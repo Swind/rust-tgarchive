@@ -603,3 +603,62 @@ async fn status_route_reflects_shared_collector_state_transitions() {
         );
     }
 }
+
+#[derive(Clone, Default)]
+struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBuffer {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuffer {
+    type Writer = LogBuffer;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+#[tokio::test]
+async fn info_logs_never_contain_query_text_or_secrets() {
+    let buffer = LogBuffer::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_writer(buffer.clone())
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    for uri in [
+        "/api/v1/messages/search?q=SECRET-MESSAGE-TEXT",
+        "/api/v1/messages?limit=bad&api_hash=SECRET-API-HASH",
+    ] {
+        get(app(None), uri, Some("log-test-1")).await;
+        get(app(Some(Failure::Unavailable)), uri, Some("log-test-2")).await;
+    }
+    let logs = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+    for secret in [
+        "SECRET-MESSAGE-TEXT",
+        "SECRET-API-HASH",
+        "private database detail",
+    ] {
+        assert!(!logs.contains(secret), "log leaked {secret}: {logs}");
+    }
+}
+
+#[tokio::test]
+async fn status_reports_unresolved_deletions_and_generates_request_ids() {
+    let response = get(app(None), "/api/v1/status", None).await;
+    let id = response.headers()["x-request-id"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(!id.is_empty());
+    assert_eq!(json_body(response).await["unresolved_deletions"], 0);
+    let other = get(app(None), "/health/live", None).await;
+    assert_ne!(other.headers()["x-request-id"].to_str().unwrap(), id);
+}

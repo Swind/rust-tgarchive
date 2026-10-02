@@ -809,6 +809,10 @@ impl SyncRepository for SqliteStore {
         row.as_ref().map(row_job).transpose()
     }
 
+    async fn unresolved_deletions(&self) -> Result<u64, RepositoryError> {
+        self.unresolved_common_deletion_count().await
+    }
+
     async fn list_jobs(&self) -> Result<Vec<SyncJob>, RepositoryError> {
         sqlx::query("SELECT id, scope, chat_id, state, created_at, started_at, finished_at, error_summary FROM sync_jobs ORDER BY created_at DESC, id DESC")
             .fetch_all(&self.pool).await?.iter().map(row_job).collect()

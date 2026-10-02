@@ -89,6 +89,7 @@ impl From<ComponentStatus> for CollectorStatusHandle {
 pub struct ApplicationStatus {
     pub collector: ComponentStatus,
     pub sync_jobs: Vec<SyncJob>,
+    pub unresolved_deletions: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -262,9 +263,15 @@ impl SyncStatusService {
             .list_jobs()
             .await
             .map_err(ApplicationError::from)?;
+        let unresolved_deletions = self
+            .sync
+            .unresolved_deletions()
+            .await
+            .map_err(ApplicationError::from)?;
         Ok(ApplicationStatus {
             collector: self.collector.get(),
             sync_jobs,
+            unresolved_deletions,
         })
     }
 }

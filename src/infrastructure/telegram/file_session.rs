@@ -366,21 +366,15 @@ impl From<io::Error> for FileSessionError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-
-    fn path() -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "telegram-file-session-{}-{}.json",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ))
+    fn path() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.json");
+        (dir, path)
     }
 
     #[tokio::test]
     async fn session_state_survives_reopen() {
-        let path = path();
+        let (_dir, path) = path();
         let session = FileSession::open(&path).await.unwrap();
         session.set_home_dc_id(4).await.unwrap();
         session
@@ -434,7 +428,7 @@ mod tests {
 
     #[tokio::test]
     async fn dialog_channel_state_initializes_only_and_cannot_advance_acknowledged_cursor() {
-        let path = path();
+        let (_dir, path) = path();
         let session = FileSession::open(&path).await.unwrap();
         session
             .set_update_state(UpdateState::Channel { id: 900, pts: 7 })
@@ -465,7 +459,7 @@ mod tests {
     async fn session_and_replacement_file_are_private() {
         use std::os::unix::fs::PermissionsExt;
 
-        let path = path();
+        let (_dir, path) = path();
         let session = FileSession::open(&path).await.unwrap();
         session.set_home_dc_id(2).await.unwrap();
         assert_eq!(
@@ -484,7 +478,7 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_session_is_rejected_without_overwrite() {
-        let path = path();
+        let (_dir, path) = path();
         fs::write(&path, b"not-json").unwrap();
         assert!(FileSession::open(&path).await.is_err());
         assert_eq!(fs::read(&path).unwrap(), b"not-json");
@@ -495,7 +489,7 @@ mod tests {
     async fn cancelled_write_finishes_and_failed_write_keeps_acknowledged_state() {
         use std::sync::atomic::{AtomicBool, Ordering};
 
-        let path = path();
+        let (_dir, path) = path();
         let session = Arc::new(FileSession::open(&path).await.unwrap());
         let background = Arc::clone(&session);
         let writer_started = Arc::new(AtomicBool::new(false));

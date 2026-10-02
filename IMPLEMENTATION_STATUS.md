@@ -17,7 +17,7 @@
 | 6 Telegram | adapter/auth/refresh interfaces accepted | hidden interactive auth、CLI/REST refresh、帳號綁定已串接；完整 media fixtures 持續補充，真實帳號驗收延後 |
 | 7 History | engine/coordinator/interfaces accepted | REST 即時 202、重複 409、未知 chat 404、queue full 503 與共用 coordinator tests 通過；真實帳號验收延後 |
 | 8 Realtime | code complete; automated tests pass, real-account acceptance pending | supervisor、重連 backoff、catch-up、crash replay fake/SQLite tests 通過（全 79 tests、fmt、all-target clippy）；P8-T06 與真實斷線／crash 驗收待做 |
-| 9 Hardening | pending | full checks、README、fresh setup |
+| 9 Hardening | automated parts done; manual items pending | 設定驗證、readiness/timeouts、敏感日誌 test、openapi.yml 比對 test、README、docs/migrations.md；真實帳號矩陣與 fresh-install 走讀待主 agent／人工，見下方 V1 DoD 表 |
 
 ## Commits
 
@@ -72,3 +72,23 @@ Phase 8 supervisor／catch-up：`serve`（已設定 Telegram）啟動 realtime t
 
 - 部分 chat/sender metadata 的 null 值不會清除已知欄位；目前 refresh 也使用這個合併語意。
 - 中文 FTS5 以 unicode61 fixture 驗證精確詞，未承諾中文子字串／自然分詞。
+
+## Phase 9 與 V1 DoD 證據
+
+| DoD 項目 | 證據 | 狀態 |
+|---|---|---|
+| 1–3 auth/session/chats | `auth login` gate／session／owner lock 單元測試；先前真實帳號 login/dialog 紀錄（主 agent） | 自動測試完成；重啟後 dialog 以最新真實驗證為準 |
+| 4–5 history/resume | `tests/sync.rs`、worker／checkpoint 測試 | 自動測試完成；真實帳號大量歷史 pending |
+| 6–8 new/edit/delete | fixture 與 crash replay tests（`realtime*`） | **pending 人工**：真實即時新訊息／編輯／刪除、離線缺口補回、真實斷網重連、update 負載測試、基本群組（測試帳號無） |
+| 9–12 SQLite/pagination/FTS/chats | `tests/persistence.rs`（真 SQLite、同秒跨 chat、FTS）、`tests/tracking.rs` | 完成 |
+| 13–15 REST/CLI/shared logic | `tests/cli_smoke.rs`、`tests/rest_routes.rs`、`tests/application_services.rs` | 完成 |
+| 16–18 OpenAPI | `/openapi.json`／`.yml` 路由測試；`committed_openapi_yml_matches_generated_output` 比對根目錄 `openapi.yml`（重新產生：`cargo run -q -- openapi --format yaml > openapi.yml`） | 完成 |
+| 19 migrations | 空資料庫與 reopen tests；`docs/migrations.md` | 完成 |
+| 20 shutdown | `tests/runtime_serve.rs`（SIGTERM）、supervisor drain tests | 自動測試完成 |
+| 21 automated tests | 不需 Telegram credentials 即可執行；測試 session 檔改用 tempdir，不再遺留 /tmp 檔案 | 完成 |
+| 22–24 fmt/clippy/test | `cargo fmt --check`、`cargo test --offline --all-targets`、`cargo clippy --offline --all-targets -- -D warnings` | 見最新一次執行結果（提交時由主 agent 重跑） |
+| 25 README | `README.md`，命令已對照 `--help` | **fresh-install 走讀 pending（主 agent）** |
+
+P9-T01/T02 自動證據：readiness 在 DB 不可用或 collector `failed` 回 503；status 含 `unresolved_deletions`；30 秒請求逾時、body／query 上限、request id；INFO 日誌不含查詢文字或 api_hash 的 test；`TelegramConfig` Debug 遮蔽 api_hash；錯誤的 DB／session 路徑與非 loopback bind 啟動失敗並附修正提示。
+
+仍 pending（不以 fake tests 取代）：真實即時 new/edit/delete、離線缺口補回、真實斷網重連、update 負載測試、基本群組、fresh-install 走讀。

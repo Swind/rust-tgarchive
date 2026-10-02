@@ -22,7 +22,8 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
-use tower_http::{limit::RequestBodyLimitLayer, trace::TraceLayer};
+use std::time::Duration;
+use tower_http::{limit::RequestBodyLimitLayer, timeout::TimeoutLayer, trace::TraceLayer};
 
 use crate::application::{services::Application, sync::SyncCoordinator};
 
@@ -31,6 +32,7 @@ pub use openapi::{OpenApiFormat, export_openapi, openapi_document};
 
 const MAX_QUERY_BYTES: usize = 8 * 1024;
 const MAX_BODY_BYTES: usize = 16 * 1024;
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 static PROCESS_NONCE: OnceLock<u128> = OnceLock::new();
@@ -81,6 +83,10 @@ pub fn router_with_sync(
         .with_state(state)
         .layer(middleware::from_fn(request_limits))
         .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            REQUEST_TIMEOUT,
+        ))
         .layer(TraceLayer::new_for_http().make_span_with(|request: &Request<Body>| {
             tracing::info_span!(
                 "http.request",
@@ -96,7 +102,9 @@ pub fn validate_loopback_bind(address: SocketAddr) -> Result<(), &'static str> {
     if address.ip().is_loopback() {
         Ok(())
     } else {
-        Err("REST server may bind only to a loopback address")
+        Err(
+            "REST server may bind only to a loopback address (e.g. 127.0.0.1:8080); the API has no authentication, so use an SSH tunnel or reverse proxy with auth for remote access",
+        )
     }
 }
 

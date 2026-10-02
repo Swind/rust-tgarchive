@@ -189,23 +189,15 @@ fn lock_path(session_path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-
     #[tokio::test]
     async fn shutdown_waits_for_runner_then_releases_owner_lock_and_is_idempotent() {
-        let path = std::env::temp_dir().join(format!(
-            "telegram-adapter-session-{}-{}.json",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.json");
         let adapter = TelegramAdapter::open(12345, &path).await.unwrap();
         assert!(AccountOwnerLock::acquire(lock_path(&path)).is_err());
         adapter.shutdown().await.unwrap();
         assert!(AccountOwnerLock::acquire(lock_path(&path)).is_ok());
         adapter.shutdown().await.unwrap();
-        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]
@@ -214,11 +206,8 @@ mod tests {
             Session,
             types::{UpdateState, UpdatesState},
         };
-        let path = std::env::temp_dir().join(format!(
-            "telegram-adapter-reconnect-{}-{}.json",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.json");
         let adapter = TelegramAdapter::open(12345, &path).await.unwrap();
         let checkpoint = UpdatesState {
             pts: 42,
@@ -242,6 +231,5 @@ mod tests {
         assert!(AccountOwnerLock::acquire(lock_path(&path)).is_err());
         adapter.shutdown().await.unwrap();
         assert!(AccountOwnerLock::acquire(lock_path(&path)).is_ok());
-        let _ = std::fs::remove_file(path);
     }
 }

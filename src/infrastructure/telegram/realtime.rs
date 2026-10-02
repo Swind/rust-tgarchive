@@ -586,11 +586,8 @@ mod tests {
 
     #[tokio::test]
     async fn aggregate_checkpoint_waits_for_full_stream_batch_archive_ack() {
-        let path = std::env::temp_dir().join(format!(
-            "telegram-realtime-session-{}-{}.json",
-            std::process::id(),
-            Utc::now().timestamp_nanos_opt().unwrap()
-        ));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.json");
         let session = Arc::new(FileSession::open(&path).await.unwrap());
         let (client, mut stream) = stream_fixture(session.clone(), two_scope_update_batch()).await;
         let (release, receiver) = oneshot::channel();
@@ -649,12 +646,10 @@ mod tests {
         }))
     }
 
-    fn session_path() -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
-            "telegram-realtime-crash-{}-{}.json",
-            std::process::id(),
-            Utc::now().timestamp_nanos_opt().unwrap()
-        ))
+    fn session_path() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.json");
+        (dir, path)
     }
 
     /// Optionally parks before the commit; always reports once the real store has committed.
@@ -768,7 +763,7 @@ mod tests {
     #[tokio::test]
     async fn crash_before_archive_commit_keeps_checkpoint_and_restart_reprocesses() {
         let (_directory, store) = bound_store().await;
-        let path = session_path();
+        let (_dir, path) = session_path();
         crashed_attempt(&path, store.clone(), true).await;
         assert_eq!(store.unresolved_common_deletion_count().await.unwrap(), 0);
         restart_and_process(&path, store.clone()).await;
@@ -779,7 +774,7 @@ mod tests {
     #[tokio::test]
     async fn crash_after_commit_before_checkpoint_replays_without_duplicates() {
         let (_directory, store) = bound_store().await;
-        let path = session_path();
+        let (_dir, path) = session_path();
         crashed_attempt(&path, store.clone(), false).await;
         assert_eq!(store.unresolved_common_deletion_count().await.unwrap(), 1);
         restart_and_process(&path, store.clone()).await;
@@ -799,7 +794,7 @@ mod tests {
 
     #[tokio::test]
     async fn untracked_updates_write_nothing_but_still_advance_the_update_checkpoint() {
-        let path = session_path();
+        let (_dir, path) = session_path();
         let session = Arc::new(FileSession::open(&path).await.unwrap());
         let (client, mut stream) = stream_fixture(session.clone(), two_scope_update_batch()).await;
         let writer = Arc::new(CountingWriter(Mutex::new(Vec::new())));

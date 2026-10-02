@@ -282,3 +282,63 @@ async fn readonly_query_does_not_initialize_an_existing_empty_database() {
             .contains("create it with `telegram-archive db init`")
     );
 }
+
+#[test]
+fn committed_openapi_yml_matches_generated_output() {
+    let output = std::process::Command::new(BIN)
+        .env_clear()
+        .args(["openapi", "--format", "yaml"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let committed = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/openapi.yml"))
+        .expect("openapi.yml must be committed");
+    assert_eq!(
+        committed,
+        String::from_utf8(output.stdout).unwrap(),
+        "openapi.yml is stale; regenerate: cargo run -q -- openapi --format yaml > openapi.yml"
+    );
+}
+
+#[test]
+fn misconfiguration_fails_at_startup_with_a_fix_hint() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing_db = format!("sqlite://{}/nope/a.db", dir.path().display());
+    let out = std::process::Command::new(BIN)
+        .env_clear()
+        .env("DATABASE_URL", &missing_db)
+        .args(["serve", "--query-only"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("does not exist"));
+
+    let out = std::process::Command::new(BIN)
+        .env_clear()
+        .env("TELEGRAM_API_ID", "1")
+        .env("TELEGRAM_API_HASH", "SECRET-HASH-VALUE")
+        .env("TELEGRAM_SESSION_FILE", dir.path().join("no/dir/s.session"))
+        .env(
+            "DATABASE_URL",
+            format!("sqlite://{}/a.db", dir.path().display()),
+        )
+        .args(["serve"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(stderr.contains("TELEGRAM_SESSION_FILE"), "{stderr}");
+    assert!(!stderr.contains("SECRET-HASH-VALUE"));
+
+    let out = std::process::Command::new(BIN)
+        .env_clear()
+        .env(
+            "DATABASE_URL",
+            format!("sqlite://{}/a.db", dir.path().display()),
+        )
+        .args(["serve", "--query-only", "--bind", "0.0.0.0:0"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("loopback"));
+}

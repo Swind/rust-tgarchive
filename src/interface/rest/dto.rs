@@ -142,6 +142,8 @@ impl TryFrom<MessagePage> for MessagePageDto {
 pub struct StatusDto {
     pub collector: ComponentStatusDto,
     pub sync_jobs: Vec<SyncJobDto>,
+    /// Deletions that could not be attributed to a chat (kept as tombstones).
+    pub unresolved_deletions: u64,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -170,6 +172,7 @@ impl From<ApplicationStatus> for StatusDto {
                 detail: status.collector.detail,
             },
             sync_jobs: status.sync_jobs.into_iter().map(Into::into).collect(),
+            unresolved_deletions: status.unresolved_deletions,
         }
     }
 }

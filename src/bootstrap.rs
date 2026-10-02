@@ -109,6 +109,7 @@ pub async fn run() -> Result<(), CliError> {
 
 async fn auth_login(phone: Option<String>) -> Result<(), CliError> {
     let telegram = Config::telegram().map_err(CliError::InvalidInput)?;
+    telegram.validate_paths().map_err(CliError::InvalidInput)?;
     let adapter = TelegramAdapter::open(telegram.api_id, &telegram.session_file)
         .await
         .map_err(|error| CliError::Telegram(error.to_string()))?;
@@ -313,24 +314,50 @@ async fn readonly_application(
     )))
 }
 
+const QUERY_ONLY_EXPLICIT_DETAIL: &str =
+    "query-only mode (--query-only); realtime collector not started";
+const QUERY_ONLY_UNCONFIGURED_DETAIL: &str = "Telegram not configured (TELEGRAM_API_ID/TELEGRAM_API_HASH not set); realtime collector not started";
+const QUERY_ONLY_UNCONFIGURED_WARNING: &str = "TELEGRAM_API_ID/TELEGRAM_API_HASH not set; serving archive queries only, realtime collection is disabled. Load .env (set -a; . ./.env; set +a) or pass --query-only to silence this.";
+
+/// Returns (status detail, optional stderr warning) when serving without Telegram.
+fn query_only_notice(
+    query_only: bool,
+    telegram_requested: bool,
+) -> Option<(&'static str, Option<&'static str>)> {
+    if query_only {
+        Some((QUERY_ONLY_EXPLICIT_DETAIL, None))
+    } else if !telegram_requested {
+        Some((
+            QUERY_ONLY_UNCONFIGURED_DETAIL,
+            Some(QUERY_ONLY_UNCONFIGURED_WARNING),
+        ))
+    } else {
+        None
+    }
+}
+
 async fn serve(bind: Option<std::net::SocketAddr>, query_only: bool) -> Result<(), CliError> {
     let config = Config::load(None);
+    config
+        .validate_database_path()
+        .map_err(CliError::InvalidInput)?;
     let bind = Config::server_bind(bind).map_err(CliError::InvalidInput)?;
     rest::validate_loopback_bind(bind).map_err(|error| CliError::InvalidInput(error.into()))?;
     let listener = TcpListener::bind(bind)
         .await
         .map_err(|error| CliError::Server(format!("cannot bind REST server: {error}")))?;
-    if query_only || !Config::telegram_configuration_requested() {
-        let application = readonly_application(
-            &config.database_url,
-            "query-only mode; realtime collector not started",
-        )
-        .await?;
+    let telegram_requested = Config::telegram_configuration_requested();
+    if let Some((detail, warning)) = query_only_notice(query_only, telegram_requested) {
+        if let Some(warning) = warning {
+            eprintln!("warning: {warning}");
+        }
+        let application = readonly_application(&config.database_url, detail).await?;
         tracing::info!(address = %listener.local_addr().unwrap_or(bind), mode = "query_only", "REST server listening");
         return serve_router(listener, rest::router(application), None).await;
     }
 
     let telegram = Config::telegram().map_err(CliError::InvalidInput)?;
+    telegram.validate_paths().map_err(CliError::InvalidInput)?;
     let adapter = open_authorized_telegram(&telegram).await?;
     let result = serve_with_telegram(listener, &config.database_url, adapter.clone()).await;
     let shutdown = adapter
@@ -718,6 +745,19 @@ fn print_output(output: String) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn query_only_notice_distinguishes_explicit_from_unconfigured() {
+        let (detail, warning) = query_only_notice(true, false).unwrap();
+        assert!(detail.contains("--query-only") && warning.is_none());
+        let (detail, warning) = query_only_notice(false, false).unwrap();
+        assert!(detail.contains("not configured"));
+        let warning = warning.unwrap();
+        assert!(
+            warning.contains("realtime collection is disabled") && warning.contains("--query-only")
+        );
+        assert!(query_only_notice(false, true).is_none());
+    }
+
     use super::*;
 
     #[test]

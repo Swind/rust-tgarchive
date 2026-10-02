@@ -392,6 +392,10 @@ pub trait SyncRepository: Send + Sync {
     async fn save_job(&self, job: SyncJob) -> Result<(), RepositoryError>;
     async fn get_job(&self, id: &str) -> Result<Option<SyncJob>, RepositoryError>;
     async fn list_jobs(&self) -> Result<Vec<SyncJob>, RepositoryError>;
+    /// Deletions whose chat could not be resolved (common-message tombstones).
+    async fn unresolved_deletions(&self) -> Result<u64, RepositoryError> {
+        Ok(0)
+    }
     async fn list_chat_progress(
         &self,
         job_id: &str,
