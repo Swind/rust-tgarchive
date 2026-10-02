@@ -180,10 +180,37 @@ pub enum ApplicationError {
     Busy,
     #[error("Telegram is unavailable: {0}")]
     TelegramUnavailable(String),
+    #[error("Telegram rate limited for {retry_after_seconds} seconds")]
+    TelegramFloodWait { retry_after_seconds: u64 },
     #[error("repository is unavailable: {0}")]
     RepositoryUnavailable(String),
     #[error("internal application error: {0}")]
     Internal(String),
+}
+
+impl From<RepositoryError> for ApplicationError {
+    fn from(error: RepositoryError) -> Self {
+        match error {
+            RepositoryError::Unavailable(message) => Self::RepositoryUnavailable(message),
+            RepositoryError::InvalidData(message) => Self::Internal(message),
+        }
+    }
+}
+
+impl From<TelegramError> for ApplicationError {
+    fn from(error: TelegramError) -> Self {
+        match error {
+            TelegramError::Unavailable(message) => Self::TelegramUnavailable(message),
+            TelegramError::Unauthorized => {
+                Self::TelegramUnavailable("Telegram account is not authorized".into())
+            }
+            TelegramError::FloodWait {
+                retry_after_seconds,
+            } => Self::TelegramFloodWait {
+                retry_after_seconds,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -341,6 +368,8 @@ pub trait SyncRepository: Send + Sync {
     ) -> Result<Vec<SyncChatProgress>, RepositoryError>;
     async fn recover_interrupted(&self) -> Result<(), RepositoryError>;
 }
+
+pub mod services;
 
 #[cfg(test)]
 mod tests {
