@@ -170,34 +170,123 @@ impl NormalizedBatch {
     }
 }
 
-/// Live-update source over one Grammers update stream. A stream that failed with a transient
-/// error is kept for the next attempt; after `Dropped` the sender pool is gone and the
-/// single-use update receiver cannot be recreated, so the next attempt reports a fatal error.
-pub struct AdapterRealtime {
+/// Why a connection stopped, and whether the same connection may be run again.
+#[derive(Debug)]
+pub struct ConnectionFailure {
+    pub error: RealtimeSourceError,
+    pub reusable: bool,
+}
+
+/// One live Telegram connection (client, sender pool and update stream).
+#[async_trait::async_trait]
+pub trait RealtimeConnection: Send {
+    /// Returns `Ok` only after `cancel` fired.
+    async fn run(&mut self, cancel: CancellationToken) -> Result<(), ConnectionFailure>;
+    /// Stops the sender pool and waits until it, and the session owner lock, are released.
+    async fn teardown(&mut self);
+}
+
+/// Builds a fresh connection. It is only called after the previous one was torn down.
+#[async_trait::async_trait]
+pub trait RealtimeConnector: Send + Sync {
+    type Connection: RealtimeConnection;
+    async fn connect(&self) -> Result<Self::Connection, RealtimeSourceError>;
+}
+
+/// Live-update source that rebuilds its connection when the sender pool is gone. Grammers'
+/// update receiver is single-use and `Dropped` means the pool stopped, so such a connection is
+/// torn down immediately and the next attempt connects anew; only a transient error on a
+/// still-live stream keeps the connection.
+pub struct ReconnectingSource<C: RealtimeConnector> {
+    connector: C,
+    connection: tokio::sync::Mutex<Option<C::Connection>>,
+}
+
+impl<C: RealtimeConnector> ReconnectingSource<C> {
+    pub fn with_connector(connector: C) -> Self {
+        Self {
+            connector,
+            connection: tokio::sync::Mutex::new(None),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl<C: RealtimeConnector> RealtimeSource for ReconnectingSource<C> {
+    async fn run_once(&self, cancel: CancellationToken) -> Result<(), RealtimeSourceError> {
+        let mut slot = self.connection.lock().await;
+        if slot.is_none() {
+            if cancel.is_cancelled() {
+                return Ok(());
+            }
+            // Building a connection is short and not interrupted midway; cancellation is
+            // honoured right after, so no half-built pool is abandoned.
+            let mut connection = self.connector.connect().await?;
+            if cancel.is_cancelled() {
+                connection.teardown().await;
+                return Ok(());
+            }
+            *slot = Some(connection);
+        }
+        let connection = slot.as_mut().expect("connection was just ensured");
+        match connection.run(cancel).await {
+            Ok(()) => Ok(()),
+            Err(failure) => {
+                if !failure.reusable
+                    && let Some(mut dead) = slot.take()
+                {
+                    dead.teardown().await;
+                }
+                Err(failure.error)
+            }
+        }
+    }
+}
+
+/// Real connector: the adapter owns the pool and rebuilds it over the same `FileSession`.
+pub struct AdapterConnector {
     adapter: Arc<TelegramAdapter>,
     sink: IngestSink,
-    stream: tokio::sync::Mutex<Option<UpdateStream>>,
 }
+
+pub type AdapterRealtime = ReconnectingSource<AdapterConnector>;
 
 impl AdapterRealtime {
     pub fn new(adapter: Arc<TelegramAdapter>, sink: IngestSink) -> Self {
-        Self {
-            adapter,
-            sink,
-            stream: tokio::sync::Mutex::new(None),
-        }
+        ReconnectingSource::with_connector(AdapterConnector { adapter, sink })
     }
+}
 
-    async fn open_stream(&self) -> Result<UpdateStream, RealtimeError> {
-        let updates = self
+pub struct AdapterConnection {
+    adapter: Arc<TelegramAdapter>,
+    sink: IngestSink,
+    stream: UpdateStream,
+}
+
+#[async_trait::async_trait]
+impl RealtimeConnector for AdapterConnector {
+    type Connection = AdapterConnection;
+
+    async fn connect(&self) -> Result<AdapterConnection, RealtimeSourceError> {
+        let updates = match self.adapter.updates.lock().await.take() {
+            Some(updates) => updates,
+            None => {
+                self.adapter.reconnect().await.map_err(|error| {
+                    RealtimeSourceError::Fatal(format!(
+                        "could not rebuild Telegram client: {error}"
+                    ))
+                })?;
+                self.adapter
+                    .updates
+                    .lock()
+                    .await
+                    .take()
+                    .ok_or_else(|| classify(RealtimeError::ReceiverUnavailable))?
+            }
+        };
+        let stream = self
             .adapter
-            .updates
-            .lock()
-            .await
-            .take()
-            .ok_or(RealtimeError::ReceiverUnavailable)?;
-        self.adapter
-            .client
+            .client()
             .stream_updates(
                 updates,
                 UpdatesConfiguration {
@@ -206,37 +295,38 @@ impl AdapterRealtime {
                 },
             )
             .await
-            .map_err(|error| RealtimeError::Stream(error.to_string()))
+            .map_err(|error| classify(RealtimeError::Stream(error.to_string())))?;
+        Ok(AdapterConnection {
+            adapter: Arc::clone(&self.adapter),
+            sink: self.sink.clone(),
+            stream,
+        })
     }
 }
 
 #[async_trait::async_trait]
-impl RealtimeSource for AdapterRealtime {
+impl RealtimeConnection for AdapterConnection {
     /// Update state is persisted only after every item currently buffered by Grammers is
     /// committed through the shared bounded, acknowledged writer.
-    async fn run_once(&self, cancel: CancellationToken) -> Result<(), RealtimeSourceError> {
-        let mut slot = self.stream.lock().await;
-        let mut stream = match slot.take() {
-            Some(stream) => stream,
-            None => self.open_stream().await.map_err(classify)?,
-        };
-        let result = process_stream(&self.adapter.client, &mut stream, &self.sink, cancel).await;
-        match result {
-            Ok(()) => {
-                *slot = Some(stream);
-                Ok(())
-            }
+    async fn run(&mut self, cancel: CancellationToken) -> Result<(), ConnectionFailure> {
+        let client = self.adapter.client();
+        match process_stream(&client, &mut self.stream, &self.sink, cancel).await {
+            Ok(()) => Ok(()),
             Err(error) => {
                 let dropped = matches!(
                     error,
                     RealtimeError::Telegram(grammers_client::InvocationError::Dropped)
                 );
                 let error = classify(error);
-                if matches!(error, RealtimeSourceError::Transient(_)) && !dropped {
-                    *slot = Some(stream);
-                }
-                Err(error)
+                let reusable = matches!(error, RealtimeSourceError::Transient(_)) && !dropped;
+                Err(ConnectionFailure { error, reusable })
             }
+        }
+    }
+
+    async fn teardown(&mut self) {
+        if let Err(error) = self.adapter.shutdown().await {
+            tracing::warn!(%error, "Telegram sender pool did not stop cleanly");
         }
     }
 }
@@ -649,5 +739,167 @@ mod tests {
         ] {
             assert!(matches!(classify(fatal), RealtimeSourceError::Fatal(_)));
         }
+    }
+
+    type Log = Arc<Mutex<Vec<String>>>;
+    type Runs = Vec<Result<(), ConnectionFailure>>;
+    type Script = Vec<Result<Runs, RealtimeSourceError>>;
+
+    struct FakeConnection {
+        id: usize,
+        log: Log,
+        runs: std::collections::VecDeque<Result<(), ConnectionFailure>>,
+    }
+
+    #[async_trait::async_trait]
+    impl RealtimeConnection for FakeConnection {
+        async fn run(&mut self, cancel: CancellationToken) -> Result<(), ConnectionFailure> {
+            self.log.lock().unwrap().push(format!("run {}", self.id));
+            match self.runs.pop_front() {
+                Some(result) => result,
+                None => {
+                    cancel.cancelled().await;
+                    Ok(())
+                }
+            }
+        }
+
+        async fn teardown(&mut self) {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("teardown {}", self.id));
+        }
+    }
+
+    struct FakeConnector {
+        log: Log,
+        next_id: Mutex<usize>,
+        /// Per connect call: `Err` fails it, `Ok` lists the scripted run results.
+        script: Mutex<std::collections::VecDeque<Result<Runs, RealtimeSourceError>>>,
+        cancel_during_connect: Option<CancellationToken>,
+    }
+
+    #[async_trait::async_trait]
+    impl RealtimeConnector for FakeConnector {
+        type Connection = FakeConnection;
+
+        async fn connect(&self) -> Result<FakeConnection, RealtimeSourceError> {
+            let id = {
+                let mut next = self.next_id.lock().unwrap();
+                *next += 1;
+                *next
+            };
+            self.log.lock().unwrap().push(format!("connect {id}"));
+            if let Some(token) = &self.cancel_during_connect {
+                token.cancel();
+            }
+            let runs = self
+                .script
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(Ok(vec![]))?;
+            Ok(FakeConnection {
+                id,
+                log: self.log.clone(),
+                runs: runs.into(),
+            })
+        }
+    }
+
+    fn source(
+        script: Script,
+        cancel_during_connect: Option<CancellationToken>,
+    ) -> (ReconnectingSource<FakeConnector>, Log) {
+        let log = Log::default();
+        let source = ReconnectingSource::with_connector(FakeConnector {
+            log: log.clone(),
+            next_id: Mutex::new(0),
+            script: Mutex::new(script.into()),
+            cancel_during_connect,
+        });
+        (source, log)
+    }
+
+    fn failure(message: &str, reusable: bool) -> Result<(), ConnectionFailure> {
+        Err(ConnectionFailure {
+            error: RealtimeSourceError::Transient(message.into()),
+            reusable,
+        })
+    }
+
+    fn entries(log: &Log) -> Vec<String> {
+        log.lock().unwrap().clone()
+    }
+
+    #[tokio::test]
+    async fn dropped_connection_is_torn_down_before_a_new_one_is_built_and_run() {
+        let (source, log) = source(vec![Ok(vec![failure("dropped", false)]), Ok(vec![])], None);
+        let first = source.run_once(CancellationToken::new()).await;
+        assert!(matches!(first, Err(RealtimeSourceError::Transient(_))));
+
+        let cancel = CancellationToken::new();
+        let token = cancel.clone();
+        let second = tokio::spawn(async move { source.run_once(token).await });
+        tokio::task::yield_now().await;
+        cancel.cancel();
+        assert_eq!(second.await.unwrap(), Ok(()));
+        assert_eq!(
+            entries(&log),
+            ["connect 1", "run 1", "teardown 1", "connect 2", "run 2"]
+        );
+    }
+
+    #[tokio::test]
+    async fn transient_error_on_live_stream_keeps_the_connection() {
+        let (source, log) = source(vec![Ok(vec![failure("flood", true)])], None);
+        assert!(source.run_once(CancellationToken::new()).await.is_err());
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        assert_eq!(source.run_once(cancel).await, Ok(()));
+        assert_eq!(entries(&log), ["connect 1", "run 1", "run 1"]);
+    }
+
+    #[tokio::test]
+    async fn transient_rebuild_failure_is_retried_on_next_attempt() {
+        let (source, log) = source(
+            vec![
+                Err(RealtimeSourceError::Transient("net down".into())),
+                Ok(vec![]),
+            ],
+            None,
+        );
+        assert_eq!(
+            source.run_once(CancellationToken::new()).await,
+            Err(RealtimeSourceError::Transient("net down".into()))
+        );
+        let cancel = CancellationToken::new();
+        let token = cancel.clone();
+        let second = tokio::spawn(async move { source.run_once(token).await });
+        tokio::task::yield_now().await;
+        cancel.cancel();
+        assert_eq!(second.await.unwrap(), Ok(()));
+        assert_eq!(entries(&log), ["connect 1", "connect 2", "run 2"]);
+    }
+
+    #[tokio::test]
+    async fn fatal_rebuild_failure_propagates() {
+        let (source, _log) = source(
+            vec![Err(RealtimeSourceError::Fatal("unauthorized".into()))],
+            None,
+        );
+        assert_eq!(
+            source.run_once(CancellationToken::new()).await,
+            Err(RealtimeSourceError::Fatal("unauthorized".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_during_rebuild_tears_down_and_returns_ok() {
+        let cancel = CancellationToken::new();
+        let (source, log) = source(vec![Ok(vec![])], Some(cancel.clone()));
+        assert_eq!(source.run_once(cancel).await, Ok(()));
+        assert_eq!(entries(&log), ["connect 1", "teardown 1"]);
     }
 }

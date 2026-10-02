@@ -18,7 +18,7 @@ use super::{
 #[async_trait]
 impl TelegramGateway for TelegramAdapter {
     async fn list_chats(&self) -> Result<Vec<Chat>, TelegramError> {
-        let mut dialogs = self.client.iter_dialogs();
+        let mut dialogs = self.client().iter_dialogs();
         let mut chats = Vec::new();
         while let Some(dialog) = dialogs.next().await.map_err(map_invocation_error)? {
             chats.push(map_dialog(&dialog).map_err(map_mapping_error)?);
@@ -49,7 +49,7 @@ impl TelegramGateway for TelegramAdapter {
         // complete page from an exhausted history without changing the caller's page size.
         let requested = usize::from(page_size.get()) + 1;
         let mut iterator = self
-            .client
+            .client()
             .iter_messages(peer_ref)
             .offset_id(offset_id)
             .reverse(reverse)

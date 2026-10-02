@@ -37,7 +37,7 @@ impl TelegramAdapter {
         phone: &str,
         api_hash: &str,
     ) -> Result<LoginChallenge, AuthError> {
-        self.client
+        self.client()
             .request_login_code(phone, api_hash)
             .await
             .map(LoginChallenge)
@@ -50,7 +50,7 @@ impl TelegramAdapter {
         challenge: LoginChallenge,
         code: &str,
     ) -> Result<LoginProgress, AuthError> {
-        match self.client.sign_in(&challenge.0, code).await {
+        match self.client().sign_in(&challenge.0, code).await {
             Ok(_) => Ok(LoginProgress::Authenticated),
             Err(SignInError::PasswordRequired(token)) => {
                 let hint = token.hint().map(str::to_owned);
@@ -68,7 +68,11 @@ impl TelegramAdapter {
         challenge: PasswordChallenge,
         password: impl AsRef<[u8]>,
     ) -> Result<(), AuthError> {
-        match self.client.check_password(challenge.token, password).await {
+        match self
+            .client()
+            .check_password(challenge.token, password)
+            .await
+        {
             Ok(_) => Ok(()),
             Err(error) => Err(map_sign_in_error(error)),
         }
