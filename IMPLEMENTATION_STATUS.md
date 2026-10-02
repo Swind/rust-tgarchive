@@ -14,8 +14,8 @@
 | 3 Application | accepted | 3 fake-port tests（多項成功／失敗案例）通過 |
 | 4 CLI | accepted | 3 子程序 tests；隔離快照全 21 tests、fmt/clippy 通過 |
 | 5 REST/OpenAPI | accepted | 11 CLI/router/runtime tests 通過；query serve、JSON/YAML OpenAPI、limits/request IDs/loopback policy |
-| 6 Telegram | adapter foundation accepted; interface integration pending | 14 adapter tests、clippy 通過；session/lock/auth API/mapper/history gateway 已實作；完整 media fixtures 與 CLI auth/refresh 待補，真實帳號驗收延後 |
-| 7 History | engine/coordinator accepted; interfaces pending | 5 sync + 2 worker tests；9 persistence tests 含獨立 checkpoint 合併；CLI/REST 整合及真實帳號驗收待辦 |
+| 6 Telegram | adapter/auth/refresh interfaces accepted | hidden interactive auth、CLI/REST refresh、帳號綁定已串接；完整 media fixtures 持續補充，真實帳號驗收延後 |
+| 7 History | engine/coordinator/interfaces accepted | REST 即時 202、重複 409、未知 chat 404、queue full 503 與共用 coordinator tests 通過；真實帳號验收延後 |
 | 8 Realtime | in progress | 帳號綁定／common deletion persistence 5 tests 通過；listener、catch-up、crash recovery 待驗收 |
 | 9 Hardening | pending | full checks、README、fresh setup |
 
@@ -35,6 +35,8 @@
 主 agent 從 `3807609` 匯出隔離快照，`cargo test --offline --locked --all-targets` 全部 51 tests 通過。all-target clippy 發現 Telegram session test module 後的 helper 排序 lint，已交由實作者修正；不影響程式行為。
 
 Phase 8 deletion persistence：未知／有歧義的 common deletion 保存 tombstone 並計數；只更新唯一 common chat match，不碰 channel namespace；綁定後拒絕不同 Telegram 帳號。5 tests 通過，並修正上述 helper 排序 lint。
+
+Auth/refresh/sync interfaces 與 vendored update-buffer boundary：隔離快照全 60 tests、fmt、all-target clippy 通過。SIGTERM 子程序測試確認 query server 正常 exit 0。即時 listener 與完整 runtime supervisor 尚在下一批工作中。
 
 ## Manual acceptance
 

@@ -220,7 +220,7 @@ Search V1 為 literal text search：空白分割 term，正確 escape FTS 引號
 - [ ] **P6-T02：Interactive auth。** `auth login`、phone/code/2FA、secret redaction、非互動錯誤處理。驗收：真帳號登入後 restart authorized；錯誤 code/2FA 不污染 session、不出現在 logs。
 - [ ] **P6-T03：Mapper。** chat/sender/message/attachments、無 sender、service messages、reply、photo/document 等 fixture。驗收：peer namespace、supergroup/channel、unknown media、缺欄位不 panic。
 - [ ] **P6-T04：Gateway。** dialog iteration、peer registry、history page cursor、typed rate-limit/network/access errors。驗收：fake 或 fixtures 確認 iterator 邊界；真帳號列 dialogs、抓指定 chat 一頁。
-- [ ] **P6-T05：RefreshChats 整合。** CLI `chats refresh`、REST refresh route、寫入 metadata。驗收：refresh 後 REST/CLI 可見相同 chats；唯讀 CLI 不需要 Telegram owner。
+- [x] **P6-T05：RefreshChats 整合。** CLI `chats refresh`、REST refresh route、寫入 metadata。驗收：refresh 後 REST/CLI 可見相同 chats；唯讀 CLI 不需要 Telegram owner。
 
 **Phase gate：** 真實 login/session restart/dialog fetch 已驗證，adapter API 與鎖定的 dependency 版本相符。
 
@@ -232,7 +232,7 @@ Search V1 為 literal text search：空白分割 term，正確 escape FTS 引號
 - [x] **P7-T02：SyncChat。** descending history cursor、batch commit/checkpoint、remote exhausted、progress。驗收：stop/restart、重跑相同 batch、空 mapping page、deleted gaps、mid-batch failure 不跳 cursor。
 - [x] **P7-T03：Coordinator 與 SyncAll。** bounded jobs、scope conflict、all snapshot、逐 chat outcome、job terminal states。驗收：重複提交 409、queue 滿 Busy、enqueue failure 不留下 accepted job、單 chat 失敗不掩蓋結果。
 - [x] **P7-T04：Rate limits 與 cancellation。** FloodWait 可取消等待、bounded retry、permanent failure。驗收：用 fake clock／Tokio paused time 測等待、不持 DB transaction、取消 job 為 interrupted。
-- [ ] **P7-T05：CLI/REST sync surface。** `sync chat/all`、`POST chats/{id}/sync`、`POST sync`、status/job routes、CLI exit codes，更新 OpenAPI。驗收：REST 立即 202 + job ID；CLI 等 terminal；兩者執行同 coordinator。
+- [x] **P7-T05：CLI/REST sync surface。** `sync chat/all`、`POST chats/{id}/sync`、`POST sync`、status/job routes、CLI exit codes，更新 OpenAPI。驗收：REST 立即 202 + job ID；CLI 等 terminal；兩者執行同 coordinator。
 - [ ] **P7-T06：History 端到端。** 真聊天同步、kill/restart/re-submit、SQL 確認唯一鍵與 checkpoint。驗收：資料無重複、無部分附件、resume 起點正確，记录批次量與耗時但不承諾未量測 throughput。
 
 **Phase gate：** 歷史同步能續接，commit 與 checkpoint 保持一致。

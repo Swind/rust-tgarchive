@@ -4,13 +4,16 @@ use serde::Deserialize;
 use utoipa::IntoParams;
 
 use crate::{
-    application::{ListMessagesQuery, MessageFilters, PageSize, SearchMessagesQuery, TimeRange},
+    application::{
+        ApplicationError, ListMessagesQuery, MessageFilters, PageSize, SearchMessagesQuery,
+        SyncScope, TimeRange,
+    },
     domain::{ChatId, MessageId, SenderId},
 };
 
 use super::{
     ApiError, RequestId, RestState,
-    dto::{ChatDto, HealthDto, MessageDto, MessagePageDto, StatusDto},
+    dto::{ChatDto, HealthDto, MessageDto, MessagePageDto, StatusDto, SyncJobDto},
     extract::{ApiPath, ApiQuery},
 };
 
@@ -63,6 +66,82 @@ pub(super) async fn list_chats(
         .list_chats()
         .await
         .map(|chats| Json(chats.into_iter().map(Into::into).collect()))
+        .map_err(|error| ApiError::from_application(error, id.0))
+}
+
+#[utoipa::path(post, path = "/api/v1/chats/refresh", responses((status = 200, body = [ChatDto]), (status = 503, body = super::ErrorEnvelope)))]
+pub(super) async fn refresh_chats(
+    State(state): State<RestState>,
+    Extension(id): Extension<RequestId>,
+) -> Result<Json<Vec<ChatDto>>, ApiError> {
+    state
+        .application
+        .refresh_chats()
+        .await
+        .map(|chats| Json(chats.into_iter().map(Into::into).collect()))
+        .map_err(|error| ApiError::from_application(error, id.0))
+}
+
+#[utoipa::path(post, path = "/api/v1/sync", responses((status = 202, body = SyncJobDto), (status = 503, body = super::ErrorEnvelope)))]
+pub(super) async fn sync_all(
+    State(state): State<RestState>,
+    Extension(id): Extension<RequestId>,
+) -> Result<(StatusCode, Json<SyncJobDto>), ApiError> {
+    let coordinator = state
+        .sync
+        .ok_or_else(|| ApiError::from_application(ApplicationError::Busy, id.0.clone()))?;
+    coordinator
+        .submit(SyncScope::All)
+        .await
+        .map(|job| (StatusCode::ACCEPTED, Json(job.into())))
+        .map_err(|error| ApiError::from_application(error, id.0))
+}
+
+#[utoipa::path(post, path = "/api/v1/chats/{chat_id}/sync", params(("chat_id" = i64, Path)), responses((status = 202, body = SyncJobDto), (status = 400, body = super::ErrorEnvelope), (status = 404, body = super::ErrorEnvelope), (status = 409, body = super::ErrorEnvelope), (status = 503, body = super::ErrorEnvelope)))]
+pub(super) async fn sync_chat(
+    State(state): State<RestState>,
+    ApiPath((raw_chat_id,)): ApiPath<(i64,)>,
+    Extension(id): Extension<RequestId>,
+) -> Result<(StatusCode, Json<SyncJobDto>), ApiError> {
+    let chat_id =
+        ChatId::from_marked(raw_chat_id).map_err(|_| ApiError::malformed(id.0.clone()))?;
+    let coordinator = state
+        .sync
+        .ok_or_else(|| ApiError::from_application(ApplicationError::Busy, id.0.clone()))?;
+    coordinator
+        .submit(SyncScope::Chat(chat_id))
+        .await
+        .map(|job| (StatusCode::ACCEPTED, Json(job.into())))
+        .map_err(|error| ApiError::from_application(error, id.0))
+}
+
+#[utoipa::path(get, path = "/api/v1/sync/status", responses((status = 200, body = StatusDto), (status = 503, body = super::ErrorEnvelope)))]
+pub(super) async fn sync_status(
+    State(state): State<RestState>,
+    Extension(id): Extension<RequestId>,
+) -> Result<Json<StatusDto>, ApiError> {
+    state
+        .application
+        .sync_status()
+        .await
+        .map(StatusDto::from)
+        .map(Json)
+        .map_err(|error| ApiError::from_application(error, id.0))
+}
+
+#[utoipa::path(get, path = "/api/v1/sync/jobs/{job_id}", params(("job_id" = String, Path)), responses((status = 200, body = SyncJobDto), (status = 404, body = super::ErrorEnvelope), (status = 503, body = super::ErrorEnvelope)))]
+pub(super) async fn get_sync_job(
+    State(state): State<RestState>,
+    ApiPath((job_id,)): ApiPath<(String,)>,
+    Extension(id): Extension<RequestId>,
+) -> Result<Json<SyncJobDto>, ApiError> {
+    let coordinator = state
+        .sync
+        .ok_or_else(|| ApiError::from_application(ApplicationError::Busy, id.0.clone()))?;
+    coordinator
+        .get_job(&job_id)
+        .await
+        .map(|job| Json(job.into()))
         .map_err(|error| ApiError::from_application(error, id.0))
 }
 

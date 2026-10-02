@@ -24,7 +24,7 @@ use axum::{
 };
 use tower_http::{limit::RequestBodyLimitLayer, trace::TraceLayer};
 
-use crate::application::services::Application;
+use crate::application::{services::Application, sync::SyncCoordinator};
 
 pub use error::{ApiError, ErrorEnvelope};
 pub use openapi::{OpenApiFormat, export_openapi, openapi_document};
@@ -38,13 +38,22 @@ static PROCESS_NONCE: OnceLock<u128> = OnceLock::new();
 #[derive(Clone)]
 pub struct RestState {
     pub application: Arc<Application>,
+    pub sync: Option<Arc<SyncCoordinator>>,
 }
 
 pub fn router(application: Arc<Application>) -> Router {
-    let state = RestState { application };
+    router_with_sync(application, None)
+}
+
+pub fn router_with_sync(
+    application: Arc<Application>,
+    sync: Option<Arc<SyncCoordinator>>,
+) -> Router {
+    let state = RestState { application, sync };
     Router::new()
         .route("/api/v1/status", get(routes::status))
         .route("/api/v1/chats", get(routes::list_chats))
+        .route("/api/v1/chats/refresh", axum::routing::post(routes::refresh_chats))
         .route("/api/v1/chats/{chat_id}", get(routes::get_chat))
         .route("/api/v1/chats/{chat_id}/messages", get(routes::list_chat_messages))
         .route("/api/v1/messages", get(routes::list_messages))
@@ -53,6 +62,13 @@ pub fn router(application: Arc<Application>) -> Router {
             "/api/v1/chats/{chat_id}/messages/{message_id}",
             get(routes::get_message),
         )
+        .route("/api/v1/sync", axum::routing::post(routes::sync_all))
+        .route(
+            "/api/v1/chats/{chat_id}/sync",
+            axum::routing::post(routes::sync_chat),
+        )
+        .route("/api/v1/sync/status", get(routes::sync_status))
+        .route("/api/v1/sync/jobs/{job_id}", get(routes::get_sync_job))
         .route("/health/live", get(routes::live))
         .route("/health/ready", get(routes::ready))
         .route("/openapi.json", get(openapi::json_endpoint))

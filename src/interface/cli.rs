@@ -8,7 +8,7 @@ use crate::{
     application::services::Application,
     application::{
         ApplicationError, ListMessagesQuery, MessageFilters, MessagePage, PageSize,
-        SearchMessagesQuery, TimeRange, ValidationError,
+        SearchMessagesQuery, SyncJob, SyncScope, TimeRange, ValidationError,
     },
     domain::{Chat, ChatId, IdError, Message, MessageId, SenderId},
 };
@@ -46,10 +46,20 @@ pub enum Command {
     Serve {
         #[arg(long)]
         bind: Option<SocketAddr>,
+        #[arg(long, help = "Serve archive queries without opening Telegram")]
+        query_only: bool,
     },
     Openapi {
         #[arg(long, value_enum, default_value = "json")]
         format: OpenApiCliFormat,
+    },
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommand,
+    },
+    Sync {
+        #[command(subcommand)]
+        command: SyncCommand,
     },
     Db {
         #[command(subcommand)]
@@ -66,10 +76,28 @@ pub enum OpenApiCliFormat {
 #[derive(Debug, Subcommand)]
 pub enum ChatsCommand {
     List,
+    Refresh,
     Get {
         #[arg(allow_hyphen_values = true)]
         chat_id: i64,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AuthCommand {
+    Login {
+        #[arg(long)]
+        phone: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SyncCommand {
+    Chat {
+        #[arg(allow_hyphen_values = true)]
+        chat_id: i64,
+    },
+    All,
 }
 
 #[derive(Debug, Subcommand)]
@@ -124,6 +152,10 @@ pub enum CliError {
     Server(String),
     #[error("OpenAPI export error: {0}")]
     OpenApi(String),
+    #[error("Telegram operation failed: {0}")]
+    Telegram(String),
+    #[error("sync job failed: {0}")]
+    SyncFailed(String),
     #[error("{0}")]
     Application(#[from] ApplicationError),
     #[error("{0}")]
@@ -166,9 +198,20 @@ pub enum PreparedInvocation {
     },
     Serve {
         bind: Option<SocketAddr>,
+        query_only: bool,
     },
     OpenApi {
         format: OpenApiCliFormat,
+    },
+    AuthLogin {
+        phone: Option<String>,
+    },
+    RefreshChats {
+        output: OutputFormat,
+    },
+    Sync {
+        scope: SyncScope,
+        output: OutputFormat,
     },
 }
 
@@ -190,8 +233,21 @@ pub fn prepare(cli: Cli) -> Result<PreparedInvocation, CliError> {
             output,
             database_url,
         }),
-        Command::Serve { bind } => Ok(PreparedInvocation::Serve { bind }),
+        Command::Serve { bind, query_only } => Ok(PreparedInvocation::Serve { bind, query_only }),
         Command::Openapi { format } => Ok(PreparedInvocation::OpenApi { format }),
+        Command::Auth {
+            command: AuthCommand::Login { phone },
+        } => Ok(PreparedInvocation::AuthLogin { phone }),
+        Command::Chats {
+            command: ChatsCommand::Refresh,
+        } => Ok(PreparedInvocation::RefreshChats { output }),
+        Command::Sync { command } => {
+            let scope = match command {
+                SyncCommand::Chat { chat_id } => SyncScope::Chat(ChatId::from_marked(chat_id)?),
+                SyncCommand::All => SyncScope::All,
+            };
+            Ok(PreparedInvocation::Sync { scope, output })
+        }
         command => Ok(PreparedInvocation::Query {
             output,
             command: prepare_query(command)?,
@@ -203,6 +259,9 @@ fn prepare_query(command: Command) -> Result<PreparedCommand, CliError> {
     match command {
         Command::Chats { command } => match command {
             ChatsCommand::List => Ok(PreparedCommand::ChatsList),
+            ChatsCommand::Refresh => {
+                unreachable!("chat refresh is handled before query preparation")
+            }
             ChatsCommand::Get { chat_id } => {
                 Ok(PreparedCommand::ChatGet(ChatId::from_marked(chat_id)?))
             }
@@ -221,7 +280,10 @@ fn prepare_query(command: Command) -> Result<PreparedCommand, CliError> {
             )),
         },
         Command::Status => Ok(PreparedCommand::Status),
-        Command::Serve { .. } | Command::Openapi { .. } => {
+        Command::Serve { .. }
+        | Command::Openapi { .. }
+        | Command::Auth { .. }
+        | Command::Sync { .. } => {
             unreachable!("non-query commands are handled during preparation")
         }
         Command::Db { .. } => unreachable!("database initialization is handled separately"),
@@ -236,13 +298,7 @@ pub async fn execute_prepared(
     match command {
         PreparedCommand::ChatsList => {
             let chats = app.list_chats().await?;
-            if output == OutputFormat::Json {
-                json(&chats)
-            } else if chats.is_empty() {
-                Ok("No chats.".into())
-            } else {
-                Ok(chats.iter().map(human_chat).collect::<Vec<_>>().join("\n"))
-            }
+            render_chats(output, &chats)
         }
         PreparedCommand::ChatGet(chat_id) => {
             let chat = app.get_chat(chat_id).await?;
@@ -298,6 +354,29 @@ pub async fn execute_prepared(
                 Ok(lines.join("\n"))
             }
         }
+    }
+}
+
+pub fn render_chats(output: OutputFormat, chats: &[Chat]) -> Result<String, CliError> {
+    if output == OutputFormat::Json {
+        json(&chats)
+    } else if chats.is_empty() {
+        Ok("No chats.".into())
+    } else {
+        Ok(chats.iter().map(human_chat).collect::<Vec<_>>().join("\n"))
+    }
+}
+
+pub fn render_sync_job(output: OutputFormat, job: &SyncJob) -> Result<String, CliError> {
+    if output == OutputFormat::Json {
+        json(job)
+    } else {
+        let mut text = format!("sync {}\t{:?}", job.id, job.state);
+        if let Some(error) = &job.summary_error {
+            text.push_str("\nerror\t");
+            text.push_str(error);
+        }
+        Ok(text)
     }
 }
 

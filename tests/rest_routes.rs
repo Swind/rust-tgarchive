@@ -1,7 +1,9 @@
 use std::{
+    collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
+use tokio::sync::Semaphore;
 
 use async_trait::async_trait;
 use axum::{
@@ -15,12 +17,15 @@ use telegram_message_archive::{
     application::{
         ArchiveWriter, ChatCheckpoint, ChatRepository, HistoryBoundary, HistoryPage, IngestBatch,
         ListMessagesQuery, MessagePage, MessageRepository, PageSize, RepositoryError,
-        SearchMessagesQuery, SyncChatProgress, SyncJob, SyncRepository, TelegramError,
-        TelegramGateway,
+        SearchMessagesQuery, SyncChatProgress, SyncJob, SyncJobState, SyncRepository,
+        TelegramError, TelegramGateway, ingestion_worker,
         services::{Application, ComponentState, ComponentStatus},
+        sync::{SyncCoordinator, SyncEngine},
     },
     domain::{Chat, ChatId, ChatKind, Message, MessageId},
-    interface::rest::{OpenApiFormat, export_openapi, router, validate_loopback_bind},
+    interface::rest::{
+        OpenApiFormat, export_openapi, router, router_with_sync, validate_loopback_bind,
+    },
 };
 
 #[derive(Clone, Copy)]
@@ -31,6 +36,13 @@ enum Failure {
 
 struct FakePorts {
     failure: Option<Failure>,
+    jobs: Mutex<HashMap<String, SyncJob>>,
+    gateway_gate: Option<Arc<GatewayGate>>,
+}
+
+struct GatewayGate {
+    entered: Semaphore,
+    release: Semaphore,
 }
 
 impl FakePorts {
@@ -78,7 +90,7 @@ impl ChatRepository for FakePorts {
         if let Some(error) = self.repo_error() {
             return Err(error);
         }
-        Ok((id.get() == 7).then(|| Chat {
+        Ok(matches!(id.get(), 7 | 9 | 10).then(|| Chat {
             id,
             kind: ChatKind::Private,
             title: Some("fixture".into()),
@@ -89,12 +101,15 @@ impl ChatRepository for FakePorts {
         if let Some(error) = self.repo_error() {
             return Err(error);
         }
-        Ok(vec![Chat {
-            id: ChatId::from_marked(7).unwrap(),
-            kind: ChatKind::Private,
-            title: Some("fixture".into()),
-            username: None,
-        }])
+        Ok([7, 9, 10]
+            .into_iter()
+            .map(|id| Chat {
+                id: ChatId::from_marked(id).unwrap(),
+                kind: ChatKind::Private,
+                title: Some("fixture".into()),
+                username: None,
+            })
+            .collect())
     }
     async fn save_refresh(&self, _: Vec<Chat>) -> Result<(), RepositoryError> {
         Ok(())
@@ -119,6 +134,15 @@ impl TelegramGateway for FakePorts {
         _: HistoryBoundary,
         _: PageSize,
     ) -> Result<HistoryPage, TelegramError> {
+        if let Some(gate) = &self.gateway_gate {
+            gate.entered.add_permits(1);
+            let permit = gate
+                .release
+                .acquire()
+                .await
+                .expect("test gate remains open");
+            permit.forget();
+        }
         Ok(HistoryPage {
             chats: vec![],
             senders: vec![],
@@ -135,14 +159,18 @@ impl SyncRepository for FakePorts {
     async fn get_checkpoint(&self, _: ChatId) -> Result<Option<ChatCheckpoint>, RepositoryError> {
         Ok(None)
     }
-    async fn save_job(&self, _: SyncJob) -> Result<(), RepositoryError> {
+    async fn save_job(&self, job: SyncJob) -> Result<(), RepositoryError> {
+        self.jobs.lock().unwrap().insert(job.id.clone(), job);
         Ok(())
     }
-    async fn get_job(&self, _: &str) -> Result<Option<SyncJob>, RepositoryError> {
-        Ok(None)
+    async fn get_job(&self, id: &str) -> Result<Option<SyncJob>, RepositoryError> {
+        Ok(self.jobs.lock().unwrap().get(id).cloned())
     }
     async fn list_jobs(&self) -> Result<Vec<SyncJob>, RepositoryError> {
-        self.repo_error().map_or(Ok(vec![]), Err)
+        self.repo_error().map_or_else(
+            || Ok(self.jobs.lock().unwrap().values().cloned().collect()),
+            Err,
+        )
     }
     async fn list_chat_progress(&self, _: &str) -> Result<Vec<SyncChatProgress>, RepositoryError> {
         Ok(vec![])
@@ -153,7 +181,11 @@ impl SyncRepository for FakePorts {
 }
 
 fn app(failure: Option<Failure>) -> Arc<Application> {
-    let fake = Arc::new(FakePorts { failure });
+    let fake = Arc::new(FakePorts {
+        failure,
+        jobs: Mutex::new(HashMap::new()),
+        gateway_gate: None,
+    });
     Application::new(
         fake.clone(),
         fake.clone(),
@@ -222,6 +254,170 @@ async fn maps_not_found_unavailable_and_internal_errors_without_leaking_details(
 }
 
 #[tokio::test]
+async fn unavailable_refresh_is_reported_without_claiming_success() {
+    let response = router(app(None))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/chats/refresh")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        json_body(response).await["error"]["code"],
+        "telegram_unavailable"
+    );
+}
+
+#[tokio::test]
+async fn sync_routes_are_present_but_do_not_accept_jobs_without_a_coordinator() {
+    let response = router(app(None))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/chats/7/sync")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(json_body(response).await["error"]["code"], "busy");
+}
+
+#[tokio::test]
+async fn sync_routes_share_the_coordinator_and_report_duplicates_unknown_chats_and_full_queue() {
+    let gate = Arc::new(GatewayGate {
+        entered: Semaphore::new(0),
+        release: Semaphore::new(0),
+    });
+    let fake = Arc::new(FakePorts {
+        failure: None,
+        jobs: Mutex::new(HashMap::new()),
+        gateway_gate: Some(gate.clone()),
+    });
+    let application: Arc<Application> = Application::new(
+        fake.clone(),
+        fake.clone(),
+        fake.clone(),
+        fake.clone(),
+        None,
+        ComponentStatus {
+            state: ComponentState::Disabled,
+            detail: None,
+        },
+    )
+    .into();
+    let (sink, writer) = ingestion_worker::spawn(fake.clone(), 1);
+    let engine = Arc::new(SyncEngine::new(
+        fake.clone(),
+        fake.clone(),
+        fake.clone(),
+        sink.clone(),
+        PageSize::new(50).unwrap(),
+    ));
+    let coordinator = SyncCoordinator::spawn(engine, fake.clone(), 1);
+    let service = router_with_sync(application, Some(coordinator.clone()));
+
+    let first = service
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/chats/7/sync")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::ACCEPTED);
+    let first = json_body(first).await;
+    assert_eq!(first["state"], "queued");
+    let first_id = first["id"].as_str().unwrap().to_owned();
+
+    // Keep the first job inside its Telegram call so subsequent submissions
+    // exercise the same live coordinator's reservation and bounded queue.
+    let permit = gate.entered.acquire().await.unwrap();
+    permit.forget();
+    let current = service
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/sync/jobs/{first_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(current.status(), StatusCode::OK);
+    assert_eq!(json_body(current).await["state"], "running");
+
+    let duplicate = service
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/chats/7/sync")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+    assert_eq!(json_body(duplicate).await["error"]["code"], "conflict");
+
+    let unknown = service
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/chats/8/sync")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+
+    let queued = service
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/chats/9/sync")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(queued.status(), StatusCode::ACCEPTED);
+    assert_eq!(json_body(queued).await["state"], "queued");
+    let full = service
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/chats/10/sync")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(full.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(json_body(full).await["error"]["code"], "busy");
+
+    gate.release.add_permits(2);
+    let completed = coordinator.wait_job(&first_id).await.unwrap();
+    assert_eq!(completed.state, SyncJobState::Succeeded);
+    coordinator.shutdown().await.unwrap();
+    drop(coordinator);
+    drop(sink);
+    writer.await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn status_health_and_query_route_report_real_application_state() {
     let response = get(app(None), "/api/v1/status", None).await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -284,11 +480,16 @@ fn openapi_json_and_yaml_export_without_application_or_database() {
     for path in [
         "/api/v1/status",
         "/api/v1/chats",
+        "/api/v1/chats/refresh",
         "/api/v1/chats/{chat_id}",
         "/api/v1/chats/{chat_id}/messages",
         "/api/v1/messages",
         "/api/v1/messages/search",
         "/api/v1/chats/{chat_id}/messages/{message_id}",
+        "/api/v1/sync",
+        "/api/v1/chats/{chat_id}/sync",
+        "/api/v1/sync/status",
+        "/api/v1/sync/jobs/{job_id}",
         "/health/live",
         "/health/ready",
         "/openapi.json",

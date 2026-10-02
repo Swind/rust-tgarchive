@@ -21,6 +21,11 @@ pub enum SpecError {
     paths(
         routes::status,
         routes::list_chats,
+        routes::refresh_chats,
+        routes::sync_all,
+        routes::sync_chat,
+        routes::sync_status,
+        routes::get_sync_job,
         routes::get_chat,
         routes::list_chat_messages,
         routes::list_messages,

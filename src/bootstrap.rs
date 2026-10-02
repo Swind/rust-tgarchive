@@ -1,15 +1,23 @@
-use std::sync::Arc;
+use std::{future::IntoFuture, sync::Arc};
 
 use clap::Parser;
 use tokio::net::TcpListener;
+use tokio::task::JoinHandle;
 
 use crate::{
-    application::services::{Application, ComponentStatus},
-    config::Config,
+    application::{
+        ArchiveWriter, PageSize, RepositoryError, SyncJob, SyncJobState, SyncRepository, SyncScope,
+        ingestion_worker::{self, IngestSink},
+        services::{Application, ComponentStatus},
+        sync::{CancellationToken, SyncCoordinator, SyncEngine},
+    },
+    config::{Config, TelegramConfig},
+    domain::Chat,
     infrastructure::persistence::sqlite::SqliteStore,
+    infrastructure::telegram::{AuthError, LoginProgress, TelegramAdapter},
     interface::cli::{
-        Cli, CliError, OpenApiCliFormat, PreparedInvocation, execute_prepared, initialized_output,
-        prepare,
+        Cli, CliError, OpenApiCliFormat, OutputFormat, PreparedInvocation, execute_prepared,
+        initialized_output, prepare, render_chats, render_sync_job,
     },
     interface::rest::{self, OpenApiFormat},
 };
@@ -48,9 +56,192 @@ pub async fn run() -> Result<(), CliError> {
                 .map_err(|error| CliError::OpenApi(error.to_string()))?;
             println!("{document}");
         }
-        PreparedInvocation::Serve { bind } => serve(bind).await?,
+        PreparedInvocation::Serve { bind, query_only } => serve(bind, query_only).await?,
+        PreparedInvocation::AuthLogin { phone } => auth_login(phone).await?,
+        PreparedInvocation::RefreshChats { output } => {
+            let config = Config::load(None);
+            let telegram = Config::telegram().map_err(CliError::InvalidInput)?;
+            let adapter = open_authorized_telegram(&telegram).await?;
+            let refreshed = refresh_with_adapter(&config.database_url, Arc::clone(&adapter)).await;
+            let closed = adapter.shutdown().await.map_err(|_| {
+                CliError::Telegram("Telegram connection did not shut down cleanly".into())
+            });
+            let chats = refreshed?;
+            closed?;
+            print_output(render_chats(output, &chats)?);
+        }
+        PreparedInvocation::Sync { scope, output } => sync_archive(scope, output).await?,
     }
     Ok(())
+}
+
+async fn auth_login(phone: Option<String>) -> Result<(), CliError> {
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() {
+        return Err(CliError::Telegram(
+            "auth login requires an interactive terminal for hidden credential input".into(),
+        ));
+    }
+    let telegram = Config::telegram().map_err(CliError::InvalidInput)?;
+    let adapter = TelegramAdapter::open(telegram.api_id, &telegram.session_file)
+        .await
+        .map_err(|error| CliError::Telegram(error.to_string()))?;
+    let result = login_with_adapter(&telegram, &adapter, phone).await;
+    let shutdown = adapter
+        .shutdown()
+        .await
+        .map_err(|_| CliError::Telegram("Telegram connection did not shut down cleanly".into()));
+    result?;
+    shutdown?;
+    Ok(())
+}
+
+async fn login_with_adapter(
+    telegram: &TelegramConfig,
+    adapter: &TelegramAdapter,
+    phone: Option<String>,
+) -> Result<(), CliError> {
+    let authorized = adapter
+        .is_authorized()
+        .await
+        .map_err(|_| CliError::Telegram("could not check Telegram authorization".into()))?;
+    if authorized {
+        println!("Telegram session is already authorized.");
+        return Ok(());
+    }
+
+    let phone = match phone {
+        Some(phone) if !phone.trim().is_empty() => phone,
+        Some(_) => {
+            return Err(CliError::InvalidInput(
+                "phone number cannot be empty".into(),
+            ));
+        }
+        None => prompt_phone()?,
+    };
+    let challenge = adapter
+        .request_login_code(&phone, &telegram.api_hash)
+        .await
+        .map_err(auth_error)?;
+    let code = prompt_secret("Telegram login code: ")?;
+    match adapter
+        .sign_in(challenge, &code)
+        .await
+        .map_err(auth_error)?
+    {
+        LoginProgress::Authenticated => println!("Telegram session authorized."),
+        LoginProgress::PasswordRequired(challenge) => {
+            if let Some(hint) = challenge.hint.as_deref().filter(|hint| !hint.is_empty()) {
+                eprintln!("Telegram requires two-factor authentication (hint: {hint}).");
+            }
+            let password = prompt_secret("Telegram two-factor password: ")?;
+            adapter
+                .check_password(*challenge, password)
+                .await
+                .map_err(auth_error)?;
+            println!("Telegram session authorized.");
+        }
+    }
+    Ok(())
+}
+
+fn prompt_phone() -> Result<String, CliError> {
+    use std::io::Write;
+    print!("Phone number: ");
+    std::io::stdout()
+        .flush()
+        .map_err(|_| CliError::Telegram("could not prompt for phone number".into()))?;
+    let mut phone = String::new();
+    std::io::stdin()
+        .read_line(&mut phone)
+        .map_err(|_| CliError::Telegram("could not read phone number".into()))?;
+    let phone = phone.trim().to_owned();
+    if phone.is_empty() {
+        return Err(CliError::InvalidInput(
+            "phone number is required; interactive input was empty".into(),
+        ));
+    }
+    Ok(phone)
+}
+
+fn prompt_secret(prompt: &str) -> Result<String, CliError> {
+    rpassword::prompt_password(prompt)
+        .map_err(|_| CliError::Telegram("hidden input requires an interactive terminal".into()))
+}
+
+fn auth_error(error: AuthError) -> CliError {
+    let message = match error {
+        AuthError::InvalidCode => "Telegram rejected the login code".to_owned(),
+        AuthError::InvalidPassword => "Telegram rejected the two-factor password".to_owned(),
+        AuthError::SignUpRequired => {
+            "this account must first be registered with an official Telegram client".to_owned()
+        }
+        AuthError::FloodWait {
+            retry_after_seconds,
+        } => format!("Telegram rate limited login; retry after {retry_after_seconds} seconds"),
+        AuthError::Telegram(_) => {
+            "Telegram login failed; check connectivity and API credentials".to_owned()
+        }
+    };
+    CliError::Telegram(message)
+}
+
+async fn open_authorized_telegram(
+    config: &TelegramConfig,
+) -> Result<Arc<TelegramAdapter>, CliError> {
+    let adapter = Arc::new(
+        TelegramAdapter::open(config.api_id, &config.session_file)
+            .await
+            .map_err(|error| CliError::Telegram(error.to_string()))?,
+    );
+    match adapter.is_authorized().await {
+        Ok(true) => Ok(adapter),
+        Ok(false) => {
+            let _ = adapter.shutdown().await;
+            Err(CliError::Telegram(
+                "Telegram session is not authorized; run `telegram-archive auth login`".into(),
+            ))
+        }
+        Err(_) => {
+            let _ = adapter.shutdown().await;
+            Err(CliError::Telegram(
+                "could not check Telegram authorization; verify connectivity and credentials"
+                    .into(),
+            ))
+        }
+    }
+}
+
+async fn refresh_with_adapter(
+    database_url: &str,
+    adapter: Arc<TelegramAdapter>,
+) -> Result<Vec<Chat>, CliError> {
+    let store = Arc::new(
+        SqliteStore::connect(database_url)
+            .await
+            .map_err(|error| CliError::Database(error.to_string()))?,
+    );
+    let result = async {
+        let account_id = adapter.authenticated_account_id().await.map_err(|_| {
+            CliError::Telegram("could not resolve Telegram account identity".into())
+        })?;
+        store
+            .bind_telegram_account(account_id)
+            .await
+            .map_err(|error| CliError::Database(error.to_string()))?;
+        let application = Application::new(
+            store.clone(),
+            store.clone(),
+            store.clone(),
+            store.clone(),
+            Some(adapter),
+            ComponentStatus::disabled(),
+        );
+        application.refresh_chats().await.map_err(CliError::from)
+    }
+    .await;
+    store.close().await;
+    result
 }
 
 async fn readonly_application(database_url: &str) -> Result<Arc<Application>, CliError> {
@@ -73,25 +264,264 @@ async fn readonly_application(database_url: &str) -> Result<Arc<Application>, Cl
     )))
 }
 
-async fn serve(bind: Option<std::net::SocketAddr>) -> Result<(), CliError> {
+async fn serve(bind: Option<std::net::SocketAddr>, query_only: bool) -> Result<(), CliError> {
     let config = Config::load(None);
     let bind = Config::server_bind(bind).map_err(CliError::InvalidInput)?;
     rest::validate_loopback_bind(bind).map_err(|error| CliError::InvalidInput(error.into()))?;
-    let application = readonly_application(&config.database_url).await?;
     let listener = TcpListener::bind(bind)
         .await
         .map_err(|error| CliError::Server(format!("cannot bind REST server: {error}")))?;
-    tracing::info!(address = %listener.local_addr().unwrap_or(bind), "REST query server listening");
-    axum::serve(listener, rest::router(application))
-        .with_graceful_shutdown(shutdown_signal())
+    if query_only || !Config::telegram_configuration_requested() {
+        let application = readonly_application(&config.database_url).await?;
+        tracing::info!(address = %listener.local_addr().unwrap_or(bind), mode = "query_only", "REST server listening");
+        return serve_router(listener, rest::router(application), None).await;
+    }
+
+    let telegram = Config::telegram().map_err(CliError::InvalidInput)?;
+    let adapter = open_authorized_telegram(&telegram).await?;
+    let result = serve_with_telegram(listener, &config.database_url, adapter.clone()).await;
+    let shutdown = adapter
+        .shutdown()
         .await
-        .map_err(|error| CliError::Server(format!("REST server failed: {error}")))
+        .map_err(|_| CliError::Telegram("Telegram connection did not shut down cleanly".into()));
+    result?;
+    shutdown?;
+    Ok(())
 }
 
-async fn shutdown_signal() {
-    if let Err(error) = tokio::signal::ctrl_c().await {
-        tracing::error!(%error, "failed to listen for Ctrl-C");
+async fn serve_with_telegram(
+    listener: TcpListener,
+    database_url: &str,
+    adapter: Arc<TelegramAdapter>,
+) -> Result<(), CliError> {
+    let store = Arc::new(
+        SqliteStore::connect(database_url)
+            .await
+            .map_err(|error| CliError::Database(error.to_string()))?,
+    );
+    let result = async {
+        let account_id = adapter.authenticated_account_id().await.map_err(|_| {
+            CliError::Telegram("could not resolve Telegram account identity".into())
+        })?;
+        store
+            .bind_telegram_account(account_id)
+            .await
+            .map_err(|error| CliError::Database(error.to_string()))?;
+        let runtime = start_sync_runtime(store.clone(), adapter.clone()).await?;
+        let application = Arc::new(Application::new(
+            store.clone(),
+            store.clone(),
+            store.clone(),
+            store.clone(),
+            Some(adapter),
+            ComponentStatus::disabled(),
+        ));
+        let serving = serve_router(
+            listener,
+            rest::router_with_sync(application, Some(Arc::clone(&runtime.coordinator))),
+            Some(&runtime),
+        )
+        .await;
+        let stopped = runtime.shutdown().await;
+        serving?;
+        stopped?;
+        Ok::<(), CliError>(())
     }
+    .await;
+    store.close().await;
+    result
+}
+
+struct SyncRuntime {
+    coordinator: Arc<SyncCoordinator>,
+    engine: Arc<SyncEngine>,
+    sink: IngestSink,
+    writer: JoinHandle<Result<(), RepositoryError>>,
+}
+
+impl SyncRuntime {
+    async fn shutdown(self) -> Result<(), CliError> {
+        let Self {
+            coordinator,
+            engine,
+            sink,
+            writer,
+        } = self;
+        let coordinator_result = coordinator
+            .shutdown()
+            .await
+            .map_err(|error| CliError::Telegram(error.to_string()));
+        drop(coordinator);
+        drop(engine);
+        drop(sink);
+        let writer_result = writer
+            .await
+            .map_err(|error| CliError::Telegram(format!("ingestion writer task failed: {error}")))?
+            .map_err(|error| CliError::Telegram(format!("ingestion writer failed: {error}")));
+        coordinator_result?;
+        writer_result
+    }
+}
+
+async fn start_sync_runtime(
+    store: Arc<SqliteStore>,
+    adapter: Arc<TelegramAdapter>,
+) -> Result<SyncRuntime, CliError> {
+    crate::application::SyncRepository::recover_interrupted(store.as_ref())
+        .await
+        .map_err(|error| CliError::Database(error.to_string()))?;
+    let writer: Arc<dyn ArchiveWriter> = store.clone();
+    let repository: Arc<dyn SyncRepository> = store.clone();
+    let chats: Arc<dyn crate::application::ChatRepository> = store;
+    let gateway: Arc<dyn crate::application::TelegramGateway> = adapter;
+    let (sink, writer_task) = ingestion_worker::spawn(writer, 32);
+    let engine = Arc::new(SyncEngine::new(
+        gateway,
+        repository.clone(),
+        chats,
+        sink.clone(),
+        PageSize::DEFAULT,
+    ));
+    let coordinator = SyncCoordinator::spawn(engine.clone(), repository, 16);
+    Ok(SyncRuntime {
+        coordinator,
+        engine,
+        sink,
+        writer: writer_task,
+    })
+}
+
+async fn serve_router(
+    listener: TcpListener,
+    app: axum::Router,
+    runtime: Option<&SyncRuntime>,
+) -> Result<(), CliError> {
+    let stop = CancellationToken::new();
+    let server = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal(stop.clone()))
+        .into_future();
+    tokio::pin!(server);
+    match runtime {
+        Some(runtime) => loop {
+            tokio::select! {
+                result = &mut server => break result.map_err(|error| CliError::Server(format!("REST server failed: {error}"))),
+                error = runtime.coordinator.wait_worker_failure() => {
+                    stop.cancel();
+                    let _ = (&mut server).await;
+                    let message = error.err().map_or_else(|| "sync worker stopped unexpectedly".to_owned(), |error| error.to_string());
+                    break Err(CliError::Server(message));
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {
+                    if runtime.writer.is_finished() {
+                        stop.cancel();
+                        let _ = (&mut server).await;
+                        break Err(CliError::Server("ingestion writer stopped unexpectedly".into()));
+                    }
+                }
+            }
+        },
+        None => (&mut server)
+            .await
+            .map_err(|error| CliError::Server(format!("REST server failed: {error}"))),
+    }
+}
+
+async fn shutdown_signal(stop: CancellationToken) {
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => {
+            if let Err(error) = result { tracing::error!(%error, "failed to listen for Ctrl-C"); }
+        }
+        _ = terminate_signal() => {}
+        _ = stop.cancelled() => {}
+    }
+}
+
+#[cfg(unix)]
+async fn terminate_signal() {
+    match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+        Ok(mut signal) => {
+            let _ = signal.recv().await;
+        }
+        Err(error) => {
+            tracing::error!(%error, "failed to listen for SIGTERM");
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+#[cfg(not(unix))]
+async fn terminate_signal() {
+    std::future::pending::<()>().await;
+}
+
+async fn sync_archive(scope: SyncScope, output: OutputFormat) -> Result<(), CliError> {
+    let config = Config::load(None);
+    let telegram = Config::telegram().map_err(CliError::InvalidInput)?;
+    let adapter = open_authorized_telegram(&telegram).await?;
+    let result = sync_with_adapter(&config.database_url, adapter.clone(), scope).await;
+    let shutdown = adapter
+        .shutdown()
+        .await
+        .map_err(|_| CliError::Telegram("Telegram connection did not shut down cleanly".into()));
+    let job = result?;
+    shutdown?;
+    if job.state != SyncJobState::Succeeded {
+        return Err(CliError::SyncFailed(
+            job.summary_error
+                .clone()
+                .unwrap_or_else(|| format!("job ended as {:?}", job.state)),
+        ));
+    }
+    print_output(render_sync_job(output, &job)?);
+    Ok(())
+}
+
+async fn sync_with_adapter(
+    database_url: &str,
+    adapter: Arc<TelegramAdapter>,
+    scope: SyncScope,
+) -> Result<SyncJob, CliError> {
+    let store = Arc::new(
+        SqliteStore::connect(database_url)
+            .await
+            .map_err(|error| CliError::Database(error.to_string()))?,
+    );
+    let setup = async {
+        let account_id = adapter.authenticated_account_id().await.map_err(|_| {
+            CliError::Telegram("could not resolve Telegram account identity".into())
+        })?;
+        store
+            .bind_telegram_account(account_id)
+            .await
+            .map_err(|error| CliError::Database(error.to_string()))?;
+        Ok::<(), CliError>(())
+    }
+    .await;
+    if let Err(error) = setup {
+        store.close().await;
+        return Err(error);
+    }
+    let runtime = match start_sync_runtime(store.clone(), adapter).await {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            store.close().await;
+            return Err(error);
+        }
+    };
+    let result = async {
+        let job = runtime.coordinator.submit(scope).await?;
+        runtime
+            .coordinator
+            .wait_job(&job.id)
+            .await
+            .map_err(CliError::from)
+    }
+    .await;
+    let stopped = runtime.shutdown().await;
+    store.close().await;
+    let job = result?;
+    stopped?;
+    Ok(job)
 }
 
 fn print_output(output: String) {
