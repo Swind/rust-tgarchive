@@ -228,10 +228,10 @@ Search V1 為 literal text search：空白分割 term，正確 escape FTS 引號
 
 相依：Phase 2 writer/checkpoints、Phase 3、Phase 6。
 
-- [ ] **P7-T01：Ingestion worker 與 ack。** bounded queue、batch request/oneshot、commit acknowledgement、worker failure 通知。驗收：queue backpressure、writer failure 不 ack success、drop receiver 的錯誤可傳回。此項提前自原 Phase 8，以確保 history 一開始就用共同管線。
-- [ ] **P7-T02：SyncChat。** descending history cursor、batch commit/checkpoint、remote exhausted、progress。驗收：stop/restart、重跑相同 batch、空 mapping page、deleted gaps、mid-batch failure 不跳 cursor。
-- [ ] **P7-T03：Coordinator 與 SyncAll。** bounded jobs、scope conflict、all snapshot、逐 chat outcome、job terminal states。驗收：重複提交 409、queue 滿 Busy、enqueue failure 不留下 accepted job、單 chat 失敗不掩蓋結果。
-- [ ] **P7-T04：Rate limits 與 cancellation。** FloodWait 可取消等待、bounded retry、permanent failure。驗收：用 fake clock／Tokio paused time 測等待、不持 DB transaction、取消 job 為 interrupted。
+- [x] **P7-T01：Ingestion worker 與 ack。** bounded queue、batch request/oneshot、commit acknowledgement、worker failure 通知。驗收：queue backpressure、writer failure 不 ack success、drop receiver 的錯誤可傳回。此項提前自原 Phase 8，以確保 history 一開始就用共同管線。
+- [x] **P7-T02：SyncChat。** descending history cursor、batch commit/checkpoint、remote exhausted、progress。驗收：stop/restart、重跑相同 batch、空 mapping page、deleted gaps、mid-batch failure 不跳 cursor。
+- [x] **P7-T03：Coordinator 與 SyncAll。** bounded jobs、scope conflict、all snapshot、逐 chat outcome、job terminal states。驗收：重複提交 409、queue 滿 Busy、enqueue failure 不留下 accepted job、單 chat 失敗不掩蓋結果。
+- [x] **P7-T04：Rate limits 與 cancellation。** FloodWait 可取消等待、bounded retry、permanent failure。驗收：用 fake clock／Tokio paused time 測等待、不持 DB transaction、取消 job 為 interrupted。
 - [ ] **P7-T05：CLI/REST sync surface。** `sync chat/all`、`POST chats/{id}/sync`、`POST sync`、status/job routes、CLI exit codes，更新 OpenAPI。驗收：REST 立即 202 + job ID；CLI 等 terminal；兩者執行同 coordinator。
 - [ ] **P7-T06：History 端到端。** 真聊天同步、kill/restart/re-submit、SQL 確認唯一鍵與 checkpoint。驗收：資料無重複、無部分附件、resume 起點正確，记录批次量與耗時但不承諾未量測 throughput。
 

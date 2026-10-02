@@ -15,7 +15,7 @@
 | 4 CLI | accepted | 3 子程序 tests；隔離快照全 21 tests、fmt/clippy 通過 |
 | 5 REST/OpenAPI | accepted | 11 CLI/router/runtime tests 通過；query serve、JSON/YAML OpenAPI、limits/request IDs/loopback policy |
 | 6 Telegram | adapter foundation accepted; interface integration pending | 14 adapter tests、clippy 通過；session/lock/auth API/mapper/history gateway 已實作；完整 media fixtures 與 CLI auth/refresh 待補，真實帳號驗收延後 |
-| 7 History | pending | checkpoint、ack、restart、job tests |
+| 7 History | engine/coordinator accepted; interfaces pending | 5 sync + 2 worker tests；9 persistence tests 含獨立 checkpoint 合併；CLI/REST 整合及真實帳號驗收待辦 |
 | 8 Realtime | pending | update、shutdown、crash recovery tests + manual verification |
 | 9 Hardening | pending | full checks、README、fresh setup |
 
@@ -30,6 +30,7 @@
 - `8198b84`：Phase 4 CLI，隔離快照 21 tests、fmt/clippy 通過。
 - `76ff399`：Phase 6 adapter foundation，14 tests、clippy 通過；不宣稱即時更新 crash recovery 已完成。
 - Phase 5 REST/OpenAPI：11 integration tests 通過，含真正子程序 HTTP query server。
+- Phase 7 history engine/coordinator：bounded queue、commit ack、可取消重試、scope reservations、fatal failure propagation、joined shutdown 通過自動驗收。
 
 ## Manual acceptance
 

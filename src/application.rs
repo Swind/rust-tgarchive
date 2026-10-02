@@ -369,7 +369,9 @@ pub trait SyncRepository: Send + Sync {
     async fn recover_interrupted(&self) -> Result<(), RepositoryError>;
 }
 
+pub mod ingestion_worker;
 pub mod services;
+pub mod sync;
 
 #[cfg(test)]
 mod tests {

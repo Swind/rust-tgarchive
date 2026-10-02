@@ -549,3 +549,41 @@ async fn jobs_transition_and_recovery_persist_chat_progress() {
     );
     assert!(SyncRepository::save_job(&store, running).await.is_err());
 }
+
+#[tokio::test]
+async fn history_and_catchup_checkpoints_merge_monotonically_in_one_writer() {
+    let (_dir, store, _) = store().await;
+    let chat_id = ChatId::from_marked(71).unwrap();
+    for checkpoint in [
+        ChatCheckpoint {
+            history_before_id: Some(MessageId::new(80).unwrap()),
+            history_complete: false,
+            catchup_after_id: Some(MessageId::new(20).unwrap()),
+        },
+        ChatCheckpoint {
+            history_before_id: Some(MessageId::new(60).unwrap()),
+            history_complete: false,
+            catchup_after_id: Some(MessageId::new(30).unwrap()),
+        },
+        ChatCheckpoint {
+            history_before_id: Some(MessageId::new(70).unwrap()),
+            history_complete: true,
+            catchup_after_id: Some(MessageId::new(25).unwrap()),
+        },
+    ] {
+        store
+            .write_batch(IngestBatch {
+                checkpoint: Some((chat_id, checkpoint)),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+    }
+    let saved = SyncRepository::get_checkpoint(&store, chat_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.history_before_id.unwrap().get(), 60);
+    assert!(saved.history_complete);
+    assert_eq!(saved.catchup_after_id.unwrap().get(), 30);
+}

@@ -274,7 +274,7 @@ impl ArchiveWriter for SqliteStore {
 
         if let Some((chat_id, checkpoint)) = batch.checkpoint {
             ensure_chat(&mut tx, chat_id).await?;
-            sqlx::query("INSERT INTO chat_sync_state(chat_id, history_before_id, history_complete, catchup_after_id, updated_at) VALUES (?, ?, ?, ?, unixepoch()) ON CONFLICT(chat_id) DO UPDATE SET history_before_id=excluded.history_before_id, history_complete=excluded.history_complete, catchup_after_id=excluded.catchup_after_id, updated_at=unixepoch()")
+            sqlx::query("INSERT INTO chat_sync_state(chat_id, history_before_id, history_complete, catchup_after_id, updated_at) VALUES (?, ?, ?, ?, unixepoch()) ON CONFLICT(chat_id) DO UPDATE SET history_before_id=CASE WHEN chat_sync_state.history_before_id IS NULL THEN excluded.history_before_id WHEN excluded.history_before_id IS NULL THEN chat_sync_state.history_before_id ELSE MIN(chat_sync_state.history_before_id, excluded.history_before_id) END, history_complete=MAX(chat_sync_state.history_complete, excluded.history_complete), catchup_after_id=CASE WHEN chat_sync_state.catchup_after_id IS NULL THEN excluded.catchup_after_id WHEN excluded.catchup_after_id IS NULL THEN chat_sync_state.catchup_after_id ELSE MAX(chat_sync_state.catchup_after_id, excluded.catchup_after_id) END, updated_at=unixepoch()")
                 .bind(chat_id.get()).bind(checkpoint.history_before_id.map(MessageId::get))
                 .bind(checkpoint.history_complete).bind(checkpoint.catchup_after_id.map(MessageId::get))
                 .execute(&mut *tx).await?;
