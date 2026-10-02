@@ -44,6 +44,13 @@ Phase 8 supervisor／catch-up：`serve`（已設定 Telegram）啟動 realtime t
 
 已知限制（未以真實帳號驗證）：grammers 的 update receiver 為一次性，`Dropped` 表示 sender pool 已停止。`ReconnectingSource` 在此情況先 teardown 舊連線（`disconnect` 並 join runner，釋放 owner lock），再由 `TelegramAdapter::reconnect` 以同一個 `FileSession`（含 archive 確認後的 update state）重建 `SenderPool`／client／receiver，並以 `catch_up: true` 重新開 stream；gateway／auth 每次呼叫皆讀取當前 client，故 history／coordinator 自動使用重建後的 client，且同一時間只有一個 live client。重建失敗：lock／session 錯誤視為致命，其餘由 stream 錯誤分類（401 等致命）。自動 tests 以 fake connector 涵蓋：Dropped 後重建且先 teardown、暫時性重建失敗重試、致命重建失敗傳遞、重建中取消；adapter test 驗證 reconnect 後 session 狀態保留且 lock 單一持有。**真實網路斷線後的重連與 getDifference 補回尚未以真實帳號驗證（pending）。** 暫時性 I/O／RPC 錯誤則保留同一 `UpdateStream` 重試，同樣尚無真實網路驗證。重建期間其他持有舊 client 的進行中呼叫會得到暫時性錯誤。Catch-up 只涵蓋已存在 chats 表的 chat，且與 grammers 內建 getDifference 為獨立機制，兩者重疊以 upsert 冪等處理；不宣稱 exactly-once 或零遺失。
 
+真實帳號驗收後修正（自動測試證據；**真實驗證待主 agent**）：
+1. Collector 狀態：新增共用 `CollectorStatusHandle`，supervisor 寫入 `starting → catching_up → running → reconnecting（含 attempt／下次重試毫秒與已清理的最後錯誤）→ stopped／failed（已清理錯誤）`；`serve` 的 REST `GET /api/v1/status`（`collector.state` 與可選 `detail`，OpenAPI 由 DTO 產生）讀同一 handle，`/health/ready` 在 `failed` 時回 503。`--query-only`／未設定 Telegram 仍為 `disabled`（附說明 detail）。CLI `status` 是獨立程序、只讀 DB，未持久化 heartbeat（計畫未要求，且 stale 狀態比明示更糟），故維持 `disabled` 並以 detail 指向執行中伺服器的 `/api/v1/status`。
+2. 靜默 catch-up：最可能根因是**空 chat（probe 無訊息）時 `catch_up_chat` 直接回傳而不寫 baseline，`catchup_after_id` 永遠為 NULL 且無任何 log**。現在空 chat 寫入 baseline `0`（`MessageId::BEFORE_FIRST`，僅用於 catch-up 邊界，之後的新訊息會被補回）；每個被略過的 chat 皆 `warn!(chat_id, reason)`（reason 已清理為單行、≤200 字），失敗寫入 `chat_sync_state.last_error`、下次 checkpoint 提交時清除；非預期錯誤中止本輪前也會 warn。另預設 tracing filter 原為僅 ERROR（未設 `RUST_LOG` 時），改為預設 `warn`。
+3. `auth login` 先檢查是否已授權，僅在需要輸入憑證時才要求互動終端機（`login_gate` 單元測試）。
+
+自動測試：supervisor 狀態轉換、REST 狀態路由、空 chat baseline 與後續補回、失敗清理與 `last_error` 持久化／清除、baseline 0 的 SQLite 往返、預設 log filter、login gate。Owner-lock 偶發失敗已修正：`SenderPool::new` 預設 `ConnectionParams` 會 fork `getconf`，子程序短暫繼承 `flock` fd，使釋放後立即重新取得鎖失敗（正式 reconnect 亦可能觸發）。改以明確 `ConnectionParams` 建立 pool，不再產生子程序；session tests 連續 50 次通過。
+
 ## Manual acceptance
 
 使用者指定本輪先完成程式與自動測試，真實帳號驗收稍後進行。真實 Telegram credentials 尚未提供。本專案不將 secrets 放入文件或 Git。登入、dialog、真實同步與更新、重啟恢復等人工驗收在取得環境前皆為 pending；自動 tests 不取代這些驗收。

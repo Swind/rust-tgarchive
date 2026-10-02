@@ -144,6 +144,8 @@ pub struct StatusDto {
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct ComponentStatusDto {
     pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -161,7 +163,8 @@ impl From<ApplicationStatus> for StatusDto {
     fn from(status: ApplicationStatus) -> Self {
         Self {
             collector: ComponentStatusDto {
-                state: format!("{:?}", status.collector.state).to_ascii_lowercase(),
+                state: status.collector.state.as_str().to_owned(),
+                detail: status.collector.detail,
             },
             sync_jobs: status.sync_jobs.into_iter().map(Into::into).collect(),
         }

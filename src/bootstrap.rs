@@ -8,8 +8,8 @@ use crate::{
     application::{
         ArchiveWriter, PageSize, RepositoryError, SyncJob, SyncJobState, SyncRepository, SyncScope,
         ingestion_worker::{self, IngestSink},
-        realtime::{ReconnectBackoff, supervise_realtime},
-        services::{Application, ComponentStatus},
+        realtime::{ReconnectBackoff, supervise_realtime_with_status},
+        services::{Application, CollectorStatusHandle, ComponentState, ComponentStatus},
         sync::{CancellationToken, SyncCoordinator, SyncEngine},
     },
     config::{Config, TelegramConfig},
@@ -25,9 +25,15 @@ use crate::{
     interface::rest::{self, OpenApiFormat},
 };
 
+/// `RUST_LOG` when set, otherwise `warn` so failures are visible by default (not only errors).
+fn log_filter() -> tracing_subscriber::EnvFilter {
+    tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"))
+}
+
 pub async fn run() -> Result<(), CliError> {
     let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(log_filter())
         .with_writer(std::io::stderr)
         .with_target(false)
         .try_init();
@@ -47,7 +53,11 @@ pub async fn run() -> Result<(), CliError> {
         }
         PreparedInvocation::Query { output, command } => {
             let config = Config::load(None);
-            let application = readonly_application(&config.database_url).await?;
+            let application = readonly_application(
+                &config.database_url,
+                "not tracked by the CLI; query GET /api/v1/status on the running server for realtime collector state",
+            )
+            .await?;
             print_output(execute_prepared(command, output, &application).await?);
         }
         PreparedInvocation::OpenApi { format } => {
@@ -79,12 +89,6 @@ pub async fn run() -> Result<(), CliError> {
 }
 
 async fn auth_login(phone: Option<String>) -> Result<(), CliError> {
-    use std::io::IsTerminal;
-    if !std::io::stdin().is_terminal() {
-        return Err(CliError::Telegram(
-            "auth login requires an interactive terminal for hidden credential input".into(),
-        ));
-    }
     let telegram = Config::telegram().map_err(CliError::InvalidInput)?;
     let adapter = TelegramAdapter::open(telegram.api_id, &telegram.session_file)
         .await
@@ -108,7 +112,8 @@ async fn login_with_adapter(
         .is_authorized()
         .await
         .map_err(|_| CliError::Telegram("could not check Telegram authorization".into()))?;
-    if authorized {
+    use std::io::IsTerminal;
+    if login_gate(authorized, std::io::stdin().is_terminal())? == LoginGate::AlreadyAuthorized {
         println!("Telegram session is already authorized.");
         return Ok(());
     }
@@ -146,6 +151,25 @@ async fn login_with_adapter(
         }
     }
     Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum LoginGate {
+    AlreadyAuthorized,
+    PromptForCredentials,
+}
+
+/// A terminal is only required when credentials must actually be entered.
+fn login_gate(authorized: bool, interactive: bool) -> Result<LoginGate, CliError> {
+    if authorized {
+        Ok(LoginGate::AlreadyAuthorized)
+    } else if interactive {
+        Ok(LoginGate::PromptForCredentials)
+    } else {
+        Err(CliError::Telegram(
+            "auth login requires an interactive terminal for hidden credential input".into(),
+        ))
+    }
 }
 
 fn prompt_phone() -> Result<String, CliError> {
@@ -247,7 +271,10 @@ async fn refresh_with_adapter(
     result
 }
 
-async fn readonly_application(database_url: &str) -> Result<Arc<Application>, CliError> {
+async fn readonly_application(
+    database_url: &str,
+    collector_detail: &str,
+) -> Result<Arc<Application>, CliError> {
     let store = Arc::new(
         SqliteStore::open_existing_readonly(database_url)
             .await
@@ -263,7 +290,7 @@ async fn readonly_application(database_url: &str) -> Result<Arc<Application>, Cl
         store.clone(),
         store,
         None,
-        ComponentStatus::disabled(),
+        ComponentStatus::new(ComponentState::Disabled, Some(collector_detail.to_owned())),
     )))
 }
 
@@ -275,7 +302,11 @@ async fn serve(bind: Option<std::net::SocketAddr>, query_only: bool) -> Result<(
         .await
         .map_err(|error| CliError::Server(format!("cannot bind REST server: {error}")))?;
     if query_only || !Config::telegram_configuration_requested() {
-        let application = readonly_application(&config.database_url).await?;
+        let application = readonly_application(
+            &config.database_url,
+            "query-only mode; realtime collector not started",
+        )
+        .await?;
         tracing::info!(address = %listener.local_addr().unwrap_or(bind), mode = "query_only", "REST server listening");
         return serve_router(listener, rest::router(application), None).await;
     }
@@ -311,14 +342,16 @@ async fn serve_with_telegram(
             .await
             .map_err(|error| CliError::Database(error.to_string()))?;
         let mut runtime = start_sync_runtime(store.clone(), adapter.clone()).await?;
-        runtime.start_realtime(adapter.clone());
+        let collector =
+            CollectorStatusHandle::new(ComponentStatus::new(ComponentState::Starting, None));
+        runtime.start_realtime(adapter.clone(), collector.clone());
         let application = Arc::new(Application::new(
             store.clone(),
             store.clone(),
             store.clone(),
             store.clone(),
             Some(adapter),
-            ComponentStatus::disabled(),
+            collector,
         ));
         let serving = serve_router(
             listener,
@@ -351,13 +384,20 @@ struct RealtimeTask {
 
 impl SyncRuntime {
     /// Starts catch-up plus live updates on the same writer and engine as history sync.
-    fn start_realtime(&mut self, adapter: Arc<TelegramAdapter>) {
+    fn start_realtime(&mut self, adapter: Arc<TelegramAdapter>, status: CollectorStatusHandle) {
         let cancel = CancellationToken::new();
         let engine = Arc::clone(&self.engine);
         let source = AdapterRealtime::new(adapter, self.sink.clone());
         let token = cancel.clone();
         let handle = tokio::spawn(async move {
-            supervise_realtime(&source, &engine, ReconnectBackoff::default(), token).await
+            supervise_realtime_with_status(
+                &source,
+                &engine,
+                ReconnectBackoff::default(),
+                token,
+                &status,
+            )
+            .await
         });
         self.realtime = Some(RealtimeTask { cancel, handle });
     }
@@ -599,5 +639,39 @@ async fn sync_with_adapter(
 fn print_output(output: String) {
     if !output.is_empty() {
         println!("{output}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_log_filter_enables_warnings_but_not_info() {
+        // Not hermetic if RUST_LOG is set in the environment; only the fallback is asserted.
+        if std::env::var_os("RUST_LOG").is_none() {
+            assert_eq!(log_filter().to_string(), "warn");
+        }
+    }
+
+    #[test]
+    fn authorized_session_needs_no_terminal() {
+        assert_eq!(
+            login_gate(true, false).unwrap(),
+            LoginGate::AlreadyAuthorized
+        );
+        assert_eq!(
+            login_gate(true, true).unwrap(),
+            LoginGate::AlreadyAuthorized
+        );
+    }
+
+    #[test]
+    fn unauthorized_session_requires_a_terminal() {
+        assert_eq!(
+            login_gate(false, true).unwrap(),
+            LoginGate::PromptForCredentials
+        );
+        assert!(login_gate(false, false).is_err());
     }
 }

@@ -5,6 +5,7 @@ use grammers_client::{
     Client, SenderPool,
     client::{ClientConfiguration, NoRetries},
     peer::Peer,
+    sender::ConnectionParams,
 };
 use grammers_session::{Session, types::PeerRef, updates::UpdatesLike};
 use tokio::{
@@ -135,7 +136,7 @@ fn start_pool(
     session: &Arc<FileSession>,
 ) -> Result<Pool, OpenError> {
     let lock = AccountOwnerLock::acquire(lock_path(session_path)).map_err(OpenError::OwnerLock)?;
-    let pool = SenderPool::new(Arc::clone(session), api_id);
+    let pool = SenderPool::with_configuration(Arc::clone(session), api_id, connection_params());
     let client = Client::with_configuration(
         pool.handle.clone(),
         ClientConfiguration {
@@ -149,6 +150,22 @@ fn start_pool(
         pool_runner.run().await;
     });
     Ok((client, pool.updates, runner))
+}
+
+/// Connection parameters built without `ConnectionParams::default()`, whose `os_info` probe spawns
+/// `getconf`. A fork between `fork` and `exec` duplicates every open descriptor, including the
+/// account lock's; the child then keeps the `flock` alive after the owner dropped it, so a lock
+/// release (shutdown/reconnect) would not be deterministic.
+fn connection_params() -> ConnectionParams {
+    ConnectionParams {
+        device_model: format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
+        system_version: "unknown".into(),
+        app_version: env!("CARGO_PKG_VERSION").into(),
+        system_lang_code: "en".into(),
+        lang_code: "en".into(),
+        use_ipv6: false,
+        __non_exhaustive: (),
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

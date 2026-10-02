@@ -3,7 +3,11 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
-use super::{ApplicationError, sync::SyncEngine};
+use super::{
+    ApplicationError,
+    services::{CollectorStatusHandle, ComponentState, ComponentStatus},
+    sync::{SyncEngine, sanitize_reason},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RealtimeSourceError {
@@ -47,21 +51,58 @@ pub async fn supervise_realtime(
     backoff: ReconnectBackoff,
     cancel: CancellationToken,
 ) -> Result<(), ApplicationError> {
+    let status = CollectorStatusHandle::new(ComponentStatus::disabled());
+    supervise_realtime_with_status(source, engine, backoff, cancel, &status).await
+}
+
+/// Same as [`supervise_realtime`], publishing the collector state to `status`.
+pub async fn supervise_realtime_with_status(
+    source: &dyn RealtimeSource,
+    engine: &SyncEngine,
+    backoff: ReconnectBackoff,
+    cancel: CancellationToken,
+    status: &CollectorStatusHandle,
+) -> Result<(), ApplicationError> {
+    let result = supervise_inner(source, engine, backoff, cancel, status).await;
+    match &result {
+        Ok(()) => status.set(ComponentState::Stopped, None),
+        Err(error) => status.set(
+            ComponentState::Failed,
+            Some(sanitize_reason(&error.to_string())),
+        ),
+    }
+    result
+}
+
+async fn supervise_inner(
+    source: &dyn RealtimeSource,
+    engine: &SyncEngine,
+    backoff: ReconnectBackoff,
+    cancel: CancellationToken,
+    status: &CollectorStatusHandle,
+) -> Result<(), ApplicationError> {
     let mut delay = backoff.initial;
+    let mut attempt = 0u32;
     loop {
         if cancel.is_cancelled() {
             return Ok(());
         }
+        status.set(ComponentState::CatchingUp, None);
+        let mut detail = None;
         match engine.catch_up_all(&cancel).await {
             Ok(summary) => {
-                for (chat, error) in &summary.failures {
-                    tracing::warn!(chat_id = chat.get(), %error, "catch-up skipped a chat; it is retried on the next round");
+                if !summary.failures.is_empty() {
+                    detail = Some(format!(
+                        "catch-up skipped {} chat(s); retried on the next round",
+                        summary.failures.len()
+                    ));
                 }
             }
             Err(_) if cancel.is_cancelled() => return Ok(()),
             Err(error) => return Err(error),
         }
         let started = Instant::now();
+        status.set(ComponentState::Running, detail);
         match source.run_once(cancel.clone()).await {
             Ok(()) => return Ok(()),
             Err(RealtimeSourceError::Fatal(message)) => {
@@ -73,7 +114,17 @@ pub async fn supervise_realtime(
                 }
                 if started.elapsed() >= backoff.healthy_after {
                     delay = backoff.initial;
+                    attempt = 0;
                 }
+                attempt += 1;
+                status.set(
+                    ComponentState::Reconnecting,
+                    Some(format!(
+                        "attempt {attempt}; next retry in {} ms; last error: {}",
+                        delay.as_millis(),
+                        sanitize_reason(&message)
+                    )),
+                );
                 tracing::warn!(%message, retry_in_ms = delay.as_millis() as u64, "realtime session ended; reconnecting");
                 tokio::select! {
                     _ = cancel.cancelled() => return Ok(()),

@@ -260,6 +260,9 @@ pub struct IngestBatch {
     pub account_deletions: Vec<AccountDeletion>,
     pub checkpoint: Option<(ChatId, ChatCheckpoint)>,
     pub job_progress: Option<SyncChatProgress>,
+    /// Sanitized reason a chat could not be synced; stored as `last_error` until the next
+    /// checkpoint commit for that chat clears it.
+    pub chat_error: Option<(ChatId, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

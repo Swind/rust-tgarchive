@@ -160,6 +160,21 @@ impl SyncEngine {
             .await?
             .next_before_message_id;
         let Some(upper) = newest else {
+            // An empty chat has nothing to catch up on. Record a "before the first message"
+            // baseline so it does not stay unbaselined forever and later messages are caught up.
+            if checkpoint.catchup_after_id.is_none() {
+                checkpoint.catchup_after_id = Some(MessageId::BEFORE_FIRST);
+                self.sink
+                    .submit(IngestBatch {
+                        checkpoint: Some((chat_id, checkpoint)),
+                        ..IngestBatch::default()
+                    })
+                    .await?;
+                tracing::info!(
+                    chat_id = chat_id.get(),
+                    "catch-up: chat has no messages; baseline set to 0"
+                );
+            }
             return Ok(0);
         };
         let Some(mut after) = checkpoint.catchup_after_id else {
@@ -240,8 +255,24 @@ impl SyncEngine {
                 Err(
                     error @ (ApplicationError::TelegramUnavailable(_)
                     | ApplicationError::TelegramFloodWait { .. }),
-                ) => summary.failures.push((chat.id, error.to_string())),
-                Err(error) => return Err(error),
+                ) => {
+                    let reason = sanitize_reason(&error.to_string());
+                    tracing::warn!(chat_id = chat.id.get(), %reason, "catch-up skipped a chat; it is retried on the next round");
+                    self.sink
+                        .submit(IngestBatch {
+                            chat_error: Some((chat.id, reason.clone())),
+                            ..IngestBatch::default()
+                        })
+                        .await?;
+                    summary.failures.push((chat.id, reason));
+                }
+                Err(ApplicationError::Conflict) if cancel.is_cancelled() => {
+                    return Err(ApplicationError::Conflict);
+                }
+                Err(error) => {
+                    tracing::warn!(chat_id = chat.id.get(), reason = %sanitize_reason(&error.to_string()), "catch-up failed for a chat; aborting the round");
+                    return Err(error);
+                }
             }
         }
         Ok(summary)
@@ -289,6 +320,16 @@ pub struct CatchUpSummary {
     pub caught_up_chats: usize,
     pub committed_messages: u64,
     pub failures: Vec<(ChatId, String)>,
+}
+
+/// Single-line, length-bounded text that is safe to log and persist.
+pub fn sanitize_reason(text: &str) -> String {
+    let cleaned: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let cleaned = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    cleaned.chars().take(200).collect()
 }
 
 fn record_message_id(record: &super::IngestRecord) -> MessageId {

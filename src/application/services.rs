@@ -12,9 +12,30 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComponentState {
     Disabled,
-    Healthy,
+    Starting,
+    CatchingUp,
+    Running,
+    Reconnecting,
+    Stopped,
+    Failed,
     Degraded,
     Unavailable,
+}
+
+impl ComponentState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Starting => "starting",
+            Self::CatchingUp => "catching_up",
+            Self::Running => "running",
+            Self::Reconnecting => "reconnecting",
+            Self::Stopped => "stopped",
+            Self::Failed => "failed",
+            Self::Degraded => "degraded",
+            Self::Unavailable => "unavailable",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +50,38 @@ impl ComponentStatus {
             state: ComponentState::Disabled,
             detail: None,
         }
+    }
+
+    pub fn new(state: ComponentState, detail: impl Into<Option<String>>) -> Self {
+        Self {
+            state,
+            detail: detail.into(),
+        }
+    }
+}
+
+/// Shared, cheaply clonable collector state: the realtime supervisor writes it and the status
+/// service reads it.
+#[derive(Debug, Clone)]
+pub struct CollectorStatusHandle(Arc<std::sync::Mutex<ComponentStatus>>);
+
+impl CollectorStatusHandle {
+    pub fn new(initial: ComponentStatus) -> Self {
+        Self(Arc::new(std::sync::Mutex::new(initial)))
+    }
+
+    pub fn set(&self, state: ComponentState, detail: impl Into<Option<String>>) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = ComponentStatus::new(state, detail);
+    }
+
+    pub fn get(&self) -> ComponentStatus {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+}
+
+impl From<ComponentStatus> for CollectorStatusHandle {
+    fn from(status: ComponentStatus) -> Self {
+        Self::new(status)
     }
 }
 
@@ -182,11 +235,11 @@ impl RefreshChatsService {
 
 pub struct SyncStatusService {
     sync: Arc<dyn SyncRepository>,
-    collector: ComponentStatus,
+    collector: CollectorStatusHandle,
 }
 
 impl SyncStatusService {
-    pub fn new(sync: Arc<dyn SyncRepository>, collector: ComponentStatus) -> Self {
+    pub fn new(sync: Arc<dyn SyncRepository>, collector: CollectorStatusHandle) -> Self {
         Self { sync, collector }
     }
 
@@ -197,7 +250,7 @@ impl SyncStatusService {
             .await
             .map_err(ApplicationError::from)?;
         Ok(ApplicationStatus {
-            collector: self.collector.clone(),
+            collector: self.collector.get(),
             sync_jobs,
         })
     }
@@ -218,14 +271,14 @@ impl Application {
         chat_repository: Arc<dyn ChatRepository>,
         sync_repository: Arc<dyn SyncRepository>,
         telegram_gateway: Option<Arc<dyn TelegramGateway>>,
-        collector_status: ComponentStatus,
+        collector_status: impl Into<CollectorStatusHandle>,
     ) -> Self {
         Self {
             ingestion: IngestionService::new(writer),
             messages: MessageService::new(message_repository, chat_repository.clone()),
             chats: ChatService::new(chat_repository.clone()),
             refresh_chats: RefreshChatsService::new(telegram_gateway, chat_repository),
-            sync_status: SyncStatusService::new(sync_repository, collector_status),
+            sync_status: SyncStatusService::new(sync_repository, collector_status.into()),
         }
     }
 

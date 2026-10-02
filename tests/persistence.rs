@@ -587,3 +587,60 @@ async fn history_and_catchup_checkpoints_merge_monotonically_in_one_writer() {
     assert!(saved.history_complete);
     assert_eq!(saved.catchup_after_id.unwrap().get(), 30);
 }
+
+#[tokio::test]
+async fn empty_chat_baseline_roundtrips_and_last_error_is_set_then_cleared() {
+    let (_dir, store, url) = store().await;
+    let chat_id = ChatId::from_marked(72).unwrap();
+    store
+        .write_batch(IngestBatch {
+            checkpoint: Some((
+                chat_id,
+                ChatCheckpoint {
+                    history_before_id: None,
+                    history_complete: false,
+                    catchup_after_id: Some(MessageId::BEFORE_FIRST),
+                },
+            )),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let saved = SyncRepository::get_checkpoint(&store, chat_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.catchup_after_id, Some(MessageId::BEFORE_FIRST));
+
+    store
+        .write_batch(IngestBatch {
+            chat_error: Some((chat_id, "peer unavailable".into())),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        last_error(&url, chat_id).await.as_deref(),
+        Some("peer unavailable")
+    );
+
+    store
+        .write_batch(IngestBatch {
+            checkpoint: Some((chat_id, saved)),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(last_error(&url, chat_id).await, None);
+}
+
+async fn last_error(url: &str, chat_id: ChatId) -> Option<String> {
+    use sqlx::{Connection, Row};
+    let mut connection = sqlx::SqliteConnection::connect(url).await.unwrap();
+    sqlx::query("SELECT last_error FROM chat_sync_state WHERE chat_id=?")
+        .bind(chat_id.get())
+        .fetch_one(&mut connection)
+        .await
+        .unwrap()
+        .get("last_error")
+}

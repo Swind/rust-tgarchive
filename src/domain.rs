@@ -110,6 +110,9 @@ impl From<SenderId> for i64 {
 pub struct MessageId(i64);
 
 impl MessageId {
+    /// Catch-up baseline for a chat with no messages yet; never a real Telegram message ID.
+    pub const BEFORE_FIRST: Self = Self(0);
+
     pub fn new(value: i64) -> Result<Self, IdError> {
         if value <= 0 || value > i64::from(i32::MAX) {
             return Err(IdError::InvalidRawId);

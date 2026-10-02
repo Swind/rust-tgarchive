@@ -341,10 +341,20 @@ impl ArchiveWriter for SqliteStore {
 
         if let Some((chat_id, checkpoint)) = batch.checkpoint {
             ensure_chat(&mut tx, chat_id).await?;
-            sqlx::query("INSERT INTO chat_sync_state(chat_id, history_before_id, history_complete, catchup_after_id, updated_at) VALUES (?, ?, ?, ?, unixepoch()) ON CONFLICT(chat_id) DO UPDATE SET history_before_id=CASE WHEN chat_sync_state.history_before_id IS NULL THEN excluded.history_before_id WHEN excluded.history_before_id IS NULL THEN chat_sync_state.history_before_id ELSE MIN(chat_sync_state.history_before_id, excluded.history_before_id) END, history_complete=MAX(chat_sync_state.history_complete, excluded.history_complete), catchup_after_id=CASE WHEN chat_sync_state.catchup_after_id IS NULL THEN excluded.catchup_after_id WHEN excluded.catchup_after_id IS NULL THEN chat_sync_state.catchup_after_id ELSE MAX(chat_sync_state.catchup_after_id, excluded.catchup_after_id) END, updated_at=unixepoch()")
+            sqlx::query("INSERT INTO chat_sync_state(chat_id, history_before_id, history_complete, catchup_after_id, updated_at) VALUES (?, ?, ?, ?, unixepoch()) ON CONFLICT(chat_id) DO UPDATE SET history_before_id=CASE WHEN chat_sync_state.history_before_id IS NULL THEN excluded.history_before_id WHEN excluded.history_before_id IS NULL THEN chat_sync_state.history_before_id ELSE MIN(chat_sync_state.history_before_id, excluded.history_before_id) END, history_complete=MAX(chat_sync_state.history_complete, excluded.history_complete), catchup_after_id=CASE WHEN chat_sync_state.catchup_after_id IS NULL THEN excluded.catchup_after_id WHEN excluded.catchup_after_id IS NULL THEN chat_sync_state.catchup_after_id ELSE MAX(chat_sync_state.catchup_after_id, excluded.catchup_after_id) END, last_error=NULL, updated_at=unixepoch()")
                 .bind(chat_id.get()).bind(checkpoint.history_before_id.map(MessageId::get))
                 .bind(checkpoint.history_complete).bind(checkpoint.catchup_after_id.map(MessageId::get))
                 .execute(&mut *tx).await?;
+        }
+        if let Some((chat_id, reason)) = batch.chat_error {
+            ensure_chat(&mut tx, chat_id).await?;
+            sqlx::query(
+                "UPDATE chat_sync_state SET last_error=?, updated_at=unixepoch() WHERE chat_id=?",
+            )
+            .bind(reason)
+            .bind(chat_id.get())
+            .execute(&mut *tx)
+            .await?;
         }
         if let Some(progress) = batch.job_progress {
             ensure_chat(&mut tx, progress.chat_id).await?;
@@ -694,7 +704,13 @@ impl SyncRepository for SqliteStore {
                     .map_err(invalid_data)?,
                 history_complete: row.try_get("history_complete").map_err(storage_error)?,
                 catchup_after_id: catchup_after
-                    .map(MessageId::new)
+                    .map(|id| {
+                        if id == 0 {
+                            Ok(MessageId::BEFORE_FIRST)
+                        } else {
+                            MessageId::new(id)
+                        }
+                    })
                     .transpose()
                     .map_err(invalid_data)?,
             })

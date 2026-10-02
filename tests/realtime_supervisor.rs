@@ -15,7 +15,11 @@ use telegram_message_archive::{
         HistoryPage, IngestBatch, IngestRecord, MessageSource, PageSize, RepositoryError,
         SyncChatProgress, SyncJob, SyncRepository, TelegramError, TelegramGateway,
         ingestion_worker,
-        realtime::{RealtimeSource, RealtimeSourceError, ReconnectBackoff, supervise_realtime},
+        realtime::{
+            RealtimeSource, RealtimeSourceError, ReconnectBackoff, supervise_realtime,
+            supervise_realtime_with_status,
+        },
+        services::{CollectorStatusHandle, ComponentState, ComponentStatus},
         sync::{CancellationToken, SyncEngine},
     },
     domain::{Chat, ChatId, ChatKind, Message, MessageEvent, MessageId},
@@ -523,4 +527,159 @@ async fn storage_failure_during_catch_up_is_fatal_and_no_session_starts() {
         Err(ApplicationError::RepositoryUnavailable(_))
     ));
     assert_eq!(source.runs.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn empty_chat_gets_a_baseline_and_later_messages_are_caught_up() {
+    let store = Arc::new(Store::default());
+    let gateway = Gateway::new([]);
+    let engine = engine(&store, gateway.clone(), 5);
+
+    let count = engine
+        .catch_up_chat(chat_id(), &CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert_eq!(count, 0);
+    assert_eq!(
+        store.checkpoints.lock().await[&chat_id()].catchup_after_id,
+        Some(MessageId::BEFORE_FIRST)
+    );
+
+    gateway.ids.lock().await.extend([1, 2]);
+    let count = engine
+        .catch_up_chat(chat_id(), &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(count, 2);
+    assert_eq!(
+        store.checkpoints.lock().await[&chat_id()].catchup_after_id,
+        Some(MessageId::new(2).unwrap())
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn catch_up_failure_is_recorded_with_a_sanitized_reason() {
+    let store = Arc::new(Store::default());
+    seed_boundary(&store, 10).await;
+    let gateway = Gateway::new(1..=12);
+    for _ in 0..4 {
+        gateway
+            .fail_with
+            .lock()
+            .await
+            .push_back(TelegramError::Unavailable(format!(
+                "peer\nnot\tfound\x07 {}",
+                "x".repeat(500)
+            )));
+    }
+    let engine = engine(&store, gateway, 5);
+
+    let summary = engine
+        .catch_up_all(&CancellationToken::new())
+        .await
+        .unwrap();
+
+    let reason = &summary.failures[0].1;
+    assert!(reason.chars().count() <= 200);
+    assert!(!reason.contains(['\n', '\t', '\x07']));
+    for _ in 0..100 {
+        if !store.batches.lock().await.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let batches = store.batches.lock().await;
+    let (chat, recorded) = batches
+        .iter()
+        .find_map(|batch| batch.chat_error.clone())
+        .expect("failure persisted as last_error");
+    assert_eq!(chat, chat_id());
+    assert_eq!(&recorded, reason);
+}
+
+#[tokio::test(start_paused = true)]
+async fn collector_status_follows_supervisor_transitions() {
+    let store = Arc::new(Store::default());
+    let engine = Arc::new(engine(&store, Gateway::new(1..=1), 5));
+    let source = Source::new(vec![Err(dropped())]);
+    let status = CollectorStatusHandle::new(ComponentStatus::new(ComponentState::Starting, None));
+    assert_eq!(status.get().state, ComponentState::Starting);
+    let cancel = CancellationToken::new();
+    let task = tokio::spawn({
+        let (source, engine, cancel, status) = (
+            source.clone(),
+            engine.clone(),
+            cancel.clone(),
+            status.clone(),
+        );
+        async move {
+            supervise_realtime_with_status(
+                source.as_ref(),
+                &engine,
+                backoff(Duration::from_secs(3600), Duration::from_secs(3600)),
+                cancel,
+                &status,
+            )
+            .await
+        }
+    });
+
+    source.entered.notified().await;
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    let reconnecting = status.get();
+    assert_eq!(reconnecting.state, ComponentState::Reconnecting);
+    let detail = reconnecting.detail.unwrap();
+    assert!(detail.contains("attempt 1") && detail.contains("3600000 ms"));
+
+    cancel.cancel();
+    task.await.unwrap().unwrap();
+    assert_eq!(status.get().state, ComponentState::Stopped);
+}
+
+#[tokio::test(start_paused = true)]
+async fn collector_status_is_running_during_a_live_session_and_failed_on_fatal_error() {
+    let store = Arc::new(Store::default());
+    let engine = Arc::new(engine(&store, Gateway::new(1..=1), 5));
+    let source = Source::new(vec![]);
+    let status = CollectorStatusHandle::new(ComponentStatus::disabled());
+    let cancel = CancellationToken::new();
+    let task = tokio::spawn({
+        let (source, engine, cancel, status) = (
+            source.clone(),
+            engine.clone(),
+            cancel.clone(),
+            status.clone(),
+        );
+        async move {
+            supervise_realtime_with_status(
+                source.as_ref(),
+                &engine,
+                ReconnectBackoff::default(),
+                cancel,
+                &status,
+            )
+            .await
+        }
+    });
+    source.entered.notified().await;
+    assert_eq!(status.get().state, ComponentState::Running);
+    cancel.cancel();
+    task.await.unwrap().unwrap();
+
+    let fatal = Source::new(vec![Err(RealtimeSourceError::Fatal(
+        "AUTH_KEY\nUNREGISTERED".into(),
+    ))]);
+    supervise_realtime_with_status(
+        fatal.as_ref(),
+        &engine,
+        ReconnectBackoff::default(),
+        CancellationToken::new(),
+        &status,
+    )
+    .await
+    .unwrap_err();
+    let failed = status.get();
+    assert_eq!(failed.state, ComponentState::Failed);
+    assert!(failed.detail.unwrap().contains("AUTH_KEY UNREGISTERED"));
 }

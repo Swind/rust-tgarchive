@@ -19,7 +19,7 @@ use telegram_message_archive::{
         ListMessagesQuery, MessagePage, MessageRepository, PageSize, RepositoryError,
         SearchMessagesQuery, SyncChatProgress, SyncJob, SyncJobState, SyncRepository,
         TelegramError, TelegramGateway, ingestion_worker,
-        services::{Application, ComponentState, ComponentStatus},
+        services::{Application, CollectorStatusHandle, ComponentState, ComponentStatus},
         sync::{SyncCoordinator, SyncEngine},
     },
     domain::{Chat, ChatId, ChatKind, Message, MessageId},
@@ -534,4 +534,54 @@ async fn oversized_query_and_body_keep_the_error_shape() {
 fn bind_policy_accepts_only_loopback() {
     assert!(validate_loopback_bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080)).is_ok());
     assert!(validate_loopback_bind("0.0.0.0:8080".parse().unwrap()).is_err());
+}
+
+#[tokio::test]
+async fn status_route_reflects_shared_collector_state_transitions() {
+    let fake = Arc::new(FakePorts {
+        failure: None,
+        jobs: Mutex::new(HashMap::new()),
+        gateway_gate: None,
+    });
+    let handle = CollectorStatusHandle::new(ComponentStatus::new(ComponentState::Starting, None));
+    let application: Arc<Application> = Application::new(
+        fake.clone(),
+        fake.clone(),
+        fake.clone(),
+        fake,
+        None,
+        handle.clone(),
+    )
+    .into();
+
+    for (state, detail, expected_ready) in [
+        (ComponentState::Starting, None, StatusCode::OK),
+        (ComponentState::CatchingUp, None, StatusCode::OK),
+        (ComponentState::Running, None, StatusCode::OK),
+        (
+            ComponentState::Reconnecting,
+            Some("attempt 2; next retry in 2000 ms".to_owned()),
+            StatusCode::OK,
+        ),
+        (
+            ComponentState::Failed,
+            Some("fatal".to_owned()),
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (ComponentState::Stopped, None, StatusCode::OK),
+    ] {
+        handle.set(state, detail.clone());
+        let body = json_body(get(application.clone(), "/api/v1/status", None).await).await;
+        assert_eq!(body["collector"]["state"], state.as_str());
+        assert_eq!(
+            body["collector"]["detail"],
+            detail.map_or(Value::Null, Value::from)
+        );
+        assert_eq!(
+            get(application.clone(), "/health/ready", None)
+                .await
+                .status(),
+            expected_ready
+        );
+    }
 }

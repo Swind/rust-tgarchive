@@ -250,6 +250,7 @@ pub(super) async fn ready(State(state): State<RestState>) -> (StatusCode, Json<H
             status.collector.state,
             crate::application::services::ComponentState::Unavailable
                 | crate::application::services::ComponentState::Degraded
+                | crate::application::services::ComponentState::Failed
         )
     });
     (

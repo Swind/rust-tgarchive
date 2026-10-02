@@ -511,10 +511,5 @@ fn human_message(message: &Message) -> String {
 }
 
 fn component_state(state: crate::application::services::ComponentState) -> &'static str {
-    match state {
-        crate::application::services::ComponentState::Disabled => "disabled",
-        crate::application::services::ComponentState::Healthy => "healthy",
-        crate::application::services::ComponentState::Degraded => "degraded",
-        crate::application::services::ComponentState::Unavailable => "unavailable",
-    }
+    state.as_str()
 }
