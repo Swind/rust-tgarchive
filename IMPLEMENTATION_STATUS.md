@@ -51,6 +51,19 @@ Phase 8 supervisor／catch-up：`serve`（已設定 Telegram）啟動 realtime t
 
 自動測試：supervisor 狀態轉換、REST 狀態路由、空 chat baseline 與後續補回、失敗清理與 `last_error` 持久化／清除、baseline 0 的 SQLite 往返、預設 log filter、login gate。Owner-lock 偶發失敗已修正：`SenderPool::new` 預設 `ConnectionParams` 會 fork `getconf`，子程序短暫繼承 `flock` fd，使釋放後立即重新取得鎖失敗（正式 reconnect 亦可能觸發）。改以明確 `ConnectionParams` 建立 pool，不再產生子程序；session tests 連續 50 次通過。
 
+## Opt-in collection（tracked chats）
+
+預設**不收集任何** chat（channel、supergroup、basic group、private 皆然），只收集明確 track 的 chat。設計見 [AD-7](docs/architecture-decisions.md)。
+
+- Schema：migration `0003_chat_tracking.sql` 新增 `chats.tracked`（預設 0）與 `tracked_at`；既有資料列維持 untracked，不刪除任何資料。
+- CLI：`chats track|untrack <CHAT_ID>`（冪等；未知 chat 回錯並提示 `chats refresh`）、`chats list [--tracked]`；`chats list/get` 的 human/json 輸出皆含 tracked 狀態。`chats refresh` 只更新所有 dialog 的 metadata，不改 tracked、不抓訊息。
+- REST：`PUT|DELETE /api/v1/chats/{chat_id}/tracking`（200 + ChatDto；未知 chat 404）、`GET /api/v1/chats?tracked=true`、ChatDto 新增 `tracked`；OpenAPI 由 annotations 產生。
+- Sync：對 untracked chat 的 `sync chat` / `POST /chats/{id}/sync` 被拒（CLI 非零退出；REST 409 `chat_not_tracked`）。`sync all` 僅同步 tracked chats；無 tracked 時為成功的 no-op。
+- Realtime：每個 batch 寫入前依 DB 的 tracked 集合過濾（訊息、編輯、chat/sender upsert、channel 刪除）；update-state checkpoint 仍前進。Common 刪除（無 chat ID）僅在符合已存檔的 tracked 非 channel 訊息時才寫入，否則不產生 tombstone。Catch-up 只走 tracked chats；執行中新 track 的 chat 由 supervisor 每 15 秒補 baseline。Track/untrack 不需重啟 serve。
+- Untrack 保留已存訊息。
+- 已知限制：common 刪除先於訊息存檔到達時不再被記住；讀取端 CLI 需 DB 已套用 0003（執行 `db init` 或任一寫入指令）；track 後的歷史回補須手動 `sync chat`；進行中的歷史 job 不因 untrack 中斷。
+- 因前提「收集所有 chat」而調整的既有測試：`tests/sync.rs`、`tests/realtime_supervisor.rs`、`tests/rest_routes.rs` 的 fake chat 改為 `tracked: true`；`src/infrastructure/telegram/realtime.rs` 既有 stream/crash 測試改帶固定 scope（原更新視為在範圍內）。新測試見 `tests/tracking.rs` 與 realtime 單元測試 `untracked_updates_write_nothing_but_still_advance_the_update_checkpoint`。真實帳號驗證 pending。
+
 ## Manual acceptance
 
 使用者指定本輪先完成程式與自動測試，真實帳號驗收稍後進行。真實 Telegram credentials 尚未提供。本專案不將 secrets 放入文件或 Git。登入、dialog、真實同步與更新、重啟恢復等人工驗收在取得環境前皆為 pending；自動 tests 不取代這些驗收。

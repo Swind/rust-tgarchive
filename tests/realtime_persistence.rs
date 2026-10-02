@@ -25,6 +25,7 @@ fn chat(marked_id: i64) -> Chat {
         },
         title: None,
         username: None,
+        tracked: false,
     }
 }
 

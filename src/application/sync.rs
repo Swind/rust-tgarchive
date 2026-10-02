@@ -43,13 +43,57 @@ impl SyncEngine {
         }
     }
 
-    async fn refresh_snapshot(
+    /// Refreshes metadata for every dialog (never touching tracking flags), then returns the
+    /// tracked chat IDs. With nothing tracked, Telegram is not contacted at all.
+    async fn tracked_snapshot(
         &self,
         cancel: &CancellationToken,
     ) -> Result<Vec<ChatId>, ApplicationError> {
         let chats = tokio::select! { _ = cancel.cancelled() => return Err(ApplicationError::Conflict), result = self.gateway.list_chats() => result? };
-        self.chats.save_refresh(chats.clone()).await?;
-        Ok(chats.into_iter().map(|chat| chat.id).collect())
+        self.chats.save_refresh(chats).await?;
+        self.tracked_ids().await
+    }
+
+    async fn tracked_ids(&self) -> Result<Vec<ChatId>, ApplicationError> {
+        let mut ids: Vec<_> = self
+            .chats
+            .list()
+            .await?
+            .into_iter()
+            .filter(|chat| chat.tracked)
+            .map(|chat| chat.id)
+            .collect();
+        ids.sort_by_key(|id| id.get());
+        Ok(ids)
+    }
+
+    /// Gives tracked chats that have no catch-up baseline one (without fetching history), so a
+    /// chat tracked while the server runs is covered by later reconnect catch-up rounds.
+    pub async fn baseline_new_tracked(
+        &self,
+        cancel: &CancellationToken,
+    ) -> Result<(), ApplicationError> {
+        for id in self.tracked_ids().await? {
+            let baselined = self
+                .repository
+                .get_checkpoint(id)
+                .await?
+                .is_some_and(|checkpoint| checkpoint.catchup_after_id.is_some());
+            if baselined {
+                continue;
+            }
+            match self.catch_up_chat(id, cancel).await {
+                Ok(_) => {}
+                Err(
+                    error @ (ApplicationError::TelegramUnavailable(_)
+                    | ApplicationError::TelegramFloodWait { .. }),
+                ) => {
+                    tracing::warn!(chat_id = id.get(), reason = %sanitize_reason(&error.to_string()), "baseline for newly tracked chat failed; retrying later");
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
     }
 
     pub async fn sync_chat(
@@ -239,14 +283,20 @@ impl SyncEngine {
         Ok(committed)
     }
 
-    /// One catch-up round over every known chat. Telegram failures for a single chat are
+    /// One catch-up round over every tracked chat. Telegram failures for a single chat are
     /// reported in the summary; storage failures and cancellation abort the round.
     pub async fn catch_up_all(
         &self,
         cancel: &CancellationToken,
     ) -> Result<CatchUpSummary, ApplicationError> {
         let mut summary = CatchUpSummary::default();
-        for chat in self.chats.list().await? {
+        for chat in self
+            .chats
+            .list()
+            .await?
+            .into_iter()
+            .filter(|chat| chat.tracked)
+        {
             match self.catch_up_chat(chat.id, cancel).await {
                 Ok(count) => {
                     summary.committed_messages += count;
@@ -531,10 +581,12 @@ impl SyncCoordinator {
         if !reservations.accepting {
             return Err(ApplicationError::Busy);
         }
-        if let SyncScope::Chat(id) = &scope
-            && self.chats.get(*id).await?.is_none()
-        {
-            return Err(ApplicationError::NotFound);
+        if let SyncScope::Chat(id) = &scope {
+            match self.chats.get(*id).await? {
+                None => return Err(ApplicationError::NotFound),
+                Some(chat) if !chat.tracked => return Err(ApplicationError::NotTracked),
+                Some(_) => {}
+            }
         }
         match &scope {
             SyncScope::Chat(id) => {
@@ -748,7 +800,7 @@ async fn run_all(
     job_id: &str,
     cancel: &CancellationToken,
 ) -> Result<(), ApplicationError> {
-    let chats = engine.refresh_snapshot(cancel).await?;
+    let chats = engine.tracked_snapshot(cancel).await?;
     let mut failures = Vec::new();
     for id in chats {
         if cancel.is_cancelled() {

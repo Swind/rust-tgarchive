@@ -5,6 +5,7 @@ use crate::{
     application::{
         ArchiveWriter, ChatCheckpoint, ChatRepository, IngestBatch, MessageRepository,
         RepositoryError, SyncChatProgress, SyncJob, SyncJobState, SyncRepository, SyncScope,
+        TrackingScope,
     },
     domain::{
         Attachment, AttachmentKind, Chat, ChatId, ChatKind, Message, MessageEvent, MessageId,
@@ -12,7 +13,7 @@ use crate::{
     },
 };
 
-use super::{open_pool, open_readonly_pool, storage_error};
+use super::{open_existing_pool, open_pool, open_readonly_pool, storage_error};
 
 #[derive(Clone)]
 pub struct SqliteStore {
@@ -23,6 +24,13 @@ impl SqliteStore {
     pub async fn connect(database_url: &str) -> Result<Self, RepositoryError> {
         Ok(Self {
             pool: open_pool(database_url).await?,
+        })
+    }
+
+    /// Like [`Self::connect`] (applies migrations) but fails instead of creating a new database.
+    pub async fn open_existing(database_url: &str) -> Result<Self, RepositoryError> {
+        Ok(Self {
+            pool: open_existing_pool(database_url).await?,
         })
     }
 
@@ -401,6 +409,7 @@ fn row_chat(row: &SqliteRow) -> Result<Chat, RepositoryError> {
         kind: parse_chat_kind(row.try_get("kind").map_err(storage_error)?)?,
         title: row.try_get("title").map_err(storage_error)?,
         username: row.try_get("username").map_err(storage_error)?,
+        tracked: row.try_get::<i64, _>("tracked").map_err(storage_error)? != 0,
     })
 }
 
@@ -643,7 +652,7 @@ impl MessageRepository for SqliteStore {
 #[async_trait::async_trait]
 impl ChatRepository for SqliteStore {
     async fn get(&self, id: ChatId) -> Result<Option<Chat>, RepositoryError> {
-        let row = sqlx::query("SELECT id, kind, title, username FROM chats WHERE id=?")
+        let row = sqlx::query("SELECT id, kind, title, username, tracked FROM chats WHERE id=?")
             .bind(id.get())
             .fetch_optional(&self.pool)
             .await?;
@@ -651,7 +660,7 @@ impl ChatRepository for SqliteStore {
     }
 
     async fn list(&self) -> Result<Vec<Chat>, RepositoryError> {
-        sqlx::query("SELECT id, kind, title, username FROM chats ORDER BY id")
+        sqlx::query("SELECT id, kind, title, username, tracked FROM chats ORDER BY id")
             .fetch_all(&self.pool)
             .await?
             .iter()
@@ -665,6 +674,53 @@ impl ChatRepository for SqliteStore {
             save_chat(&mut tx, chat).await?;
         }
         tx.commit().await.map_err(storage_error)
+    }
+
+    async fn set_tracked(
+        &self,
+        id: ChatId,
+        tracked: bool,
+    ) -> Result<Option<Chat>, RepositoryError> {
+        sqlx::query("UPDATE chats SET tracked=?1, tracked_at=CASE WHEN ?1=1 THEN COALESCE(tracked_at, unixepoch()) ELSE NULL END WHERE id=?2 AND tracked != ?1")
+            .bind(i64::from(tracked))
+            .bind(id.get())
+            .execute(&self.pool)
+            .await?;
+        ChatRepository::get(self, id).await
+    }
+}
+
+#[async_trait::async_trait]
+impl TrackingScope for SqliteStore {
+    async fn tracked_chat_ids(&self) -> Result<std::collections::HashSet<ChatId>, RepositoryError> {
+        sqlx::query_scalar::<_, i64>("SELECT id FROM chats WHERE tracked=1")
+            .fetch_all(&self.pool)
+            .await?
+            .into_iter()
+            .map(|id| ChatId::from_marked(id).map_err(invalid_data))
+            .collect()
+    }
+
+    async fn archived_common_message_ids(
+        &self,
+        ids: &[MessageId],
+    ) -> Result<std::collections::HashSet<MessageId>, RepositoryError> {
+        let mut found = std::collections::HashSet::new();
+        for chunk in ids.chunks(500) {
+            let mut query = QueryBuilder::<Sqlite>::new(
+                "SELECT DISTINCT m.message_id FROM messages m JOIN chats c ON c.id=m.chat_id WHERE c.tracked=1 AND m.chat_id > -1000000000000 AND m.message_id IN (",
+            );
+            let mut separated = query.separated(", ");
+            for id in chunk {
+                separated.push_bind(id.get());
+            }
+            separated.push_unseparated(")");
+            for row in query.build().fetch_all(&self.pool).await? {
+                let id: i64 = row.try_get("message_id").map_err(storage_error)?;
+                found.insert(MessageId::new(id).map_err(invalid_data)?);
+            }
+        }
+        Ok(found)
     }
 }
 

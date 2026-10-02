@@ -80,6 +80,9 @@ impl ChatRepository for Store {
     async fn save_refresh(&self, _: Vec<Chat>) -> Result<(), RepositoryError> {
         Ok(())
     }
+    async fn set_tracked(&self, id: ChatId, _: bool) -> Result<Option<Chat>, RepositoryError> {
+        Ok((id == chat_id()).then(chat))
+    }
 }
 
 fn chat() -> Chat {
@@ -88,6 +91,7 @@ fn chat() -> Chat {
         kind: ChatKind::Private,
         title: None,
         username: None,
+        tracked: true,
     }
 }
 
@@ -415,6 +419,7 @@ fn backoff(initial: Duration, max: Duration) -> ReconnectBackoff {
         initial,
         max,
         healthy_after: Duration::from_secs(3600),
+        baseline_poll: Duration::from_secs(3600),
     }
 }
 

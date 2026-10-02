@@ -173,6 +173,9 @@ pub struct Chat {
     pub kind: ChatKind,
     pub title: Option<String>,
     pub username: Option<String>,
+    /// Whether the chat is explicitly opted in for collection. Telegram metadata never sets it.
+    #[serde(default)]
+    pub tracked: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

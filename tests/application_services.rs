@@ -91,6 +91,18 @@ impl ChatRepository for Fakes {
             .extend(chats.into_iter().map(|chat| (chat.id, chat)));
         Ok(())
     }
+
+    async fn set_tracked(
+        &self,
+        id: ChatId,
+        tracked: bool,
+    ) -> Result<Option<Chat>, RepositoryError> {
+        let mut state = self.0.lock().await;
+        Ok(state.chats.get_mut(&id).map(|chat| {
+            chat.tracked = tracked;
+            chat.clone()
+        }))
+    }
 }
 
 #[async_trait]
@@ -196,6 +208,7 @@ fn chat() -> Chat {
         kind: ChatKind::Private,
         title: Some("test chat".into()),
         username: None,
+        tracked: false,
     }
 }
 

@@ -20,7 +20,7 @@ use crate::{
     },
     interface::cli::{
         Cli, CliError, OpenApiCliFormat, OutputFormat, PreparedInvocation, execute_prepared,
-        initialized_output, prepare, render_chats, render_sync_job,
+        execute_set_tracking, initialized_output, prepare, render_chats, render_sync_job,
     },
     interface::rest::{self, OpenApiFormat},
 };
@@ -82,6 +82,25 @@ pub async fn run() -> Result<(), CliError> {
             let chats = refreshed?;
             closed?;
             print_output(render_chats(output, &chats)?);
+        }
+        PreparedInvocation::SetTracking {
+            chat_id,
+            tracked,
+            output,
+        } => {
+            let config = Config::load(None);
+            let store = open_existing_store(&config.database_url).await?;
+            let application = Application::new(
+                store.clone(),
+                store.clone(),
+                store.clone(),
+                store.clone(),
+                None,
+                ComponentStatus::disabled(),
+            );
+            let result = execute_set_tracking(chat_id, tracked, output, &application).await;
+            store.close().await;
+            print_output(result?);
         }
         PreparedInvocation::Sync { scope, output } => sync_archive(scope, output).await?,
     }
@@ -344,7 +363,7 @@ async fn serve_with_telegram(
         let mut runtime = start_sync_runtime(store.clone(), adapter.clone()).await?;
         let collector =
             CollectorStatusHandle::new(ComponentStatus::new(ComponentState::Starting, None));
-        runtime.start_realtime(adapter.clone(), collector.clone());
+        runtime.start_realtime(adapter.clone(), store.clone(), collector.clone());
         let application = Arc::new(Application::new(
             store.clone(),
             store.clone(),
@@ -384,10 +403,15 @@ struct RealtimeTask {
 
 impl SyncRuntime {
     /// Starts catch-up plus live updates on the same writer and engine as history sync.
-    fn start_realtime(&mut self, adapter: Arc<TelegramAdapter>, status: CollectorStatusHandle) {
+    fn start_realtime(
+        &mut self,
+        adapter: Arc<TelegramAdapter>,
+        scope: Arc<dyn crate::application::TrackingScope>,
+        status: CollectorStatusHandle,
+    ) {
         let cancel = CancellationToken::new();
         let engine = Arc::clone(&self.engine);
-        let source = AdapterRealtime::new(adapter, self.sink.clone());
+        let source = AdapterRealtime::new(adapter, self.sink.clone(), scope);
         let token = cancel.clone();
         let handle = tokio::spawn(async move {
             supervise_realtime_with_status(
@@ -566,8 +590,58 @@ async fn terminate_signal() {
     std::future::pending::<()>().await;
 }
 
+async fn open_existing_store(database_url: &str) -> Result<Arc<SqliteStore>, CliError> {
+    SqliteStore::open_existing(database_url)
+        .await
+        .map(Arc::new)
+        .map_err(|error| {
+            CliError::Database(format!(
+                "cannot open archive database ({error}); create it with `telegram-archive db init`"
+            ))
+        })
+}
+
+/// Checks the tracking scope against the local database before Telegram is contacted.
+/// Returns `false` when there is nothing to sync (`sync all` with no tracked chats).
+async fn sync_scope_allowed(database_url: &str, scope: &SyncScope) -> Result<bool, CliError> {
+    use crate::application::ChatRepository;
+    let store = open_existing_store(database_url).await?;
+    let result: Result<bool, CliError> = async {
+        match scope {
+            SyncScope::Chat(id) => match store.get(*id).await.map_err(db_error)? {
+                None => Err(CliError::ChatNotFound(id.get())),
+                Some(chat) if !chat.tracked => {
+                    Err(crate::application::ApplicationError::NotTracked.into())
+                }
+                Some(_) => Ok(true),
+            },
+            SyncScope::All => Ok(store
+                .list()
+                .await
+                .map_err(db_error)?
+                .iter()
+                .any(|chat| chat.tracked)),
+        }
+    }
+    .await;
+    store.close().await;
+    result
+}
+
+fn db_error(error: crate::application::RepositoryError) -> CliError {
+    CliError::Database(error.to_string())
+}
+
 async fn sync_archive(scope: SyncScope, output: OutputFormat) -> Result<(), CliError> {
     let config = Config::load(None);
+    if !sync_scope_allowed(&config.database_url, &scope).await? {
+        print_output(if output == OutputFormat::Json {
+            "{\"tracked_chats\":0,\"synced\":false}".into()
+        } else {
+            "No tracked chats; nothing to sync. Track chats with `chats track <CHAT_ID>`.".into()
+        });
+        return Ok(());
+    }
     let telegram = Config::telegram().map_err(CliError::InvalidInput)?;
     let adapter = open_authorized_telegram(&telegram).await?;
     let result = sync_with_adapter(&config.database_url, adapter.clone(), scope).await;

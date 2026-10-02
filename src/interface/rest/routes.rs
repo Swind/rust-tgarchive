@@ -56,14 +56,22 @@ pub(super) async fn status(
         .map_err(|error| ApiError::from_application(error, id.0))
 }
 
-#[utoipa::path(get, path = "/api/v1/chats", responses((status = 200, body = [ChatDto]), (status = 503, body = super::ErrorEnvelope)))]
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub(super) struct ChatListQuery {
+    /// Only return tracked (collected) chats.
+    tracked: Option<bool>,
+}
+
+#[utoipa::path(get, path = "/api/v1/chats", params(ChatListQuery), responses((status = 200, body = [ChatDto]), (status = 400, body = super::ErrorEnvelope), (status = 503, body = super::ErrorEnvelope)))]
 pub(super) async fn list_chats(
     State(state): State<RestState>,
+    ApiQuery(query): ApiQuery<ChatListQuery>,
     Extension(id): Extension<RequestId>,
 ) -> Result<Json<Vec<ChatDto>>, ApiError> {
     state
         .application
-        .list_chats()
+        .list_chats(query.tracked.unwrap_or(false))
         .await
         .map(|chats| Json(chats.into_iter().map(Into::into).collect()))
         .map_err(|error| ApiError::from_application(error, id.0))
@@ -97,7 +105,7 @@ pub(super) async fn sync_all(
         .map_err(|error| ApiError::from_application(error, id.0))
 }
 
-#[utoipa::path(post, path = "/api/v1/chats/{chat_id}/sync", params(("chat_id" = i64, Path)), responses((status = 202, body = SyncJobDto), (status = 400, body = super::ErrorEnvelope), (status = 404, body = super::ErrorEnvelope), (status = 409, body = super::ErrorEnvelope), (status = 503, body = super::ErrorEnvelope)))]
+#[utoipa::path(post, path = "/api/v1/chats/{chat_id}/sync", params(("chat_id" = i64, Path)), responses((status = 202, body = SyncJobDto), (status = 400, body = super::ErrorEnvelope), (status = 404, body = super::ErrorEnvelope), (status = 409, description = "Chat is not tracked (code chat_not_tracked) or a conflicting job is active (code conflict)", body = super::ErrorEnvelope), (status = 503, body = super::ErrorEnvelope)))]
 pub(super) async fn sync_chat(
     State(state): State<RestState>,
     ApiPath((raw_chat_id,)): ApiPath<(i64,)>,
@@ -155,6 +163,36 @@ pub(super) async fn get_chat(
     state
         .application
         .get_chat(chat_id)
+        .await
+        .map(|chat| Json(chat.into()))
+        .map_err(|error| ApiError::from_application(error, id.0))
+}
+
+#[utoipa::path(put, path = "/api/v1/chats/{chat_id}/tracking", params(("chat_id" = i64, Path, description = "Marked Telegram chat ID")), responses((status = 200, description = "Chat is now tracked (idempotent)", body = ChatDto), (status = 400, body = super::ErrorEnvelope), (status = 404, body = super::ErrorEnvelope), (status = 503, body = super::ErrorEnvelope)))]
+pub(super) async fn track_chat(
+    State(state): State<RestState>,
+    ApiPath((raw_id,)): ApiPath<(i64,)>,
+    Extension(id): Extension<RequestId>,
+) -> Result<Json<ChatDto>, ApiError> {
+    let chat_id = ChatId::from_marked(raw_id).map_err(|_| ApiError::malformed(id.0.clone()))?;
+    state
+        .application
+        .track_chat(chat_id)
+        .await
+        .map(|chat| Json(chat.into()))
+        .map_err(|error| ApiError::from_application(error, id.0))
+}
+
+#[utoipa::path(delete, path = "/api/v1/chats/{chat_id}/tracking", params(("chat_id" = i64, Path, description = "Marked Telegram chat ID")), responses((status = 200, description = "Chat is no longer tracked; stored messages are kept (idempotent)", body = ChatDto), (status = 400, body = super::ErrorEnvelope), (status = 404, body = super::ErrorEnvelope), (status = 503, body = super::ErrorEnvelope)))]
+pub(super) async fn untrack_chat(
+    State(state): State<RestState>,
+    ApiPath((raw_id,)): ApiPath<(i64,)>,
+    Extension(id): Extension<RequestId>,
+) -> Result<Json<ChatDto>, ApiError> {
+    let chat_id = ChatId::from_marked(raw_id).map_err(|_| ApiError::malformed(id.0.clone()))?;
+    state
+        .application
+        .untrack_chat(chat_id)
         .await
         .map(|chat| Json(chat.into()))
         .map_err(|error| ApiError::from_application(error, id.0))

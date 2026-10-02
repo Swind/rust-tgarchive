@@ -55,6 +55,10 @@ pub fn router_with_sync(
         .route("/api/v1/chats", get(routes::list_chats))
         .route("/api/v1/chats/refresh", axum::routing::post(routes::refresh_chats))
         .route("/api/v1/chats/{chat_id}", get(routes::get_chat))
+        .route(
+            "/api/v1/chats/{chat_id}/tracking",
+            axum::routing::put(routes::track_chat).delete(routes::untrack_chat),
+        )
         .route("/api/v1/chats/{chat_id}/messages", get(routes::list_chat_messages))
         .route("/api/v1/messages", get(routes::list_messages))
         .route("/api/v1/messages/search", get(routes::search_messages))

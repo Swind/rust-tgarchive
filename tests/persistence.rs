@@ -29,6 +29,7 @@ fn chat(id: i64) -> Chat {
         },
         title: Some(format!("chat {id}")),
         username: None,
+        tracked: false,
     }
 }
 

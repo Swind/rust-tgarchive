@@ -174,6 +174,8 @@ pub enum ApplicationError {
     Validation(#[from] ValidationError),
     #[error("resource not found")]
     NotFound,
+    #[error("chat is not tracked; track it first (`chats track <CHAT_ID>`)")]
+    NotTracked,
     #[error("operation conflicts with current state")]
     Conflict,
     #[error("service is busy")]
@@ -346,7 +348,23 @@ pub trait MessageRepository: Send + Sync {
 pub trait ChatRepository: Send + Sync {
     async fn get(&self, id: ChatId) -> Result<Option<Chat>, RepositoryError>;
     async fn list(&self) -> Result<Vec<Chat>, RepositoryError>;
+    /// Metadata-only upsert: must never change the tracking flag.
     async fn save_refresh(&self, chats: Vec<Chat>) -> Result<(), RepositoryError>;
+    /// Idempotently sets the tracking flag; `None` when the chat is unknown.
+    async fn set_tracked(&self, id: ChatId, tracked: bool)
+    -> Result<Option<Chat>, RepositoryError>;
+}
+
+/// Read side of the opt-in collection scope, consulted by realtime ingestion for every batch so
+/// tracking changes apply without a restart.
+#[async_trait]
+pub trait TrackingScope: Send + Sync {
+    async fn tracked_chat_ids(&self) -> Result<std::collections::HashSet<ChatId>, RepositoryError>;
+    /// Of `ids`, those already archived as non-channel (common-namespace) messages of a tracked chat.
+    async fn archived_common_message_ids(
+        &self,
+        ids: &[MessageId],
+    ) -> Result<std::collections::HashSet<MessageId>, RepositoryError>;
 }
 
 #[async_trait]
@@ -504,6 +522,9 @@ mod tests {
         }
         async fn save_refresh(&self, _: Vec<Chat>) -> Result<(), RepositoryError> {
             Ok(())
+        }
+        async fn set_tracked(&self, _: ChatId, _: bool) -> Result<Option<Chat>, RepositoryError> {
+            Ok(None)
         }
     }
 

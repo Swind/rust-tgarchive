@@ -27,6 +27,8 @@ pub enum SpecError {
         routes::sync_status,
         routes::get_sync_job,
         routes::get_chat,
+        routes::track_chat,
+        routes::untrack_chat,
         routes::list_chat_messages,
         routes::list_messages,
         routes::search_messages,

@@ -13,6 +13,8 @@ pub struct ChatDto {
     pub kind: ChatKindDto,
     pub title: Option<String>,
     pub username: Option<String>,
+    /// Whether the chat is opted in for collection.
+    pub tracked: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, ToSchema)]
@@ -36,6 +38,7 @@ impl From<Chat> for ChatDto {
             },
             title: chat.title,
             username: chat.username,
+            tracked: chat.tracked,
         }
     }
 }

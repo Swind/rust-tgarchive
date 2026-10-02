@@ -15,9 +15,21 @@ use crate::application::RepositoryError;
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
 pub(crate) async fn open_pool(database_url: &str) -> Result<SqlitePool, RepositoryError> {
+    open_pool_with(database_url, true).await
+}
+
+/// Writable pool that never creates a missing database file.
+pub(crate) async fn open_existing_pool(database_url: &str) -> Result<SqlitePool, RepositoryError> {
+    open_pool_with(database_url, false).await
+}
+
+async fn open_pool_with(
+    database_url: &str,
+    create_if_missing: bool,
+) -> Result<SqlitePool, RepositoryError> {
     let options = SqliteConnectOptions::from_str(database_url)
         .map_err(storage_error)?
-        .create_if_missing(true)
+        .create_if_missing(create_if_missing)
         .foreign_keys(true)
         .busy_timeout(Duration::from_secs(5))
         .journal_mode(SqliteJournalMode::Wal)

@@ -75,8 +75,23 @@ pub enum OpenApiCliFormat {
 
 #[derive(Debug, Subcommand)]
 pub enum ChatsCommand {
-    List,
+    /// List known chats and whether each is tracked (collected)
+    List {
+        #[arg(long, help = "Only show tracked chats")]
+        tracked: bool,
+    },
+    /// Fetch chat metadata from Telegram; never collects messages or changes tracking
     Refresh,
+    /// Start collecting a known chat (idempotent)
+    Track {
+        #[arg(allow_hyphen_values = true)]
+        chat_id: i64,
+    },
+    /// Stop collecting a chat; stored messages are kept (idempotent)
+    Untrack {
+        #[arg(allow_hyphen_values = true)]
+        chat_id: i64,
+    },
     Get {
         #[arg(allow_hyphen_values = true)]
         chat_id: i64,
@@ -154,6 +169,8 @@ pub enum CliError {
     OpenApi(String),
     #[error("Telegram operation failed: {0}")]
     Telegram(String),
+    #[error("chat {0} not found; run `chats refresh` to fetch your chats from Telegram first")]
+    ChatNotFound(i64),
     #[error("sync job failed: {0}")]
     SyncFailed(String),
     #[error("{0}")]
@@ -209,6 +226,11 @@ pub enum PreparedInvocation {
     RefreshChats {
         output: OutputFormat,
     },
+    SetTracking {
+        chat_id: ChatId,
+        tracked: bool,
+        output: OutputFormat,
+    },
     Sync {
         scope: SyncScope,
         output: OutputFormat,
@@ -216,7 +238,7 @@ pub enum PreparedInvocation {
 }
 
 pub enum PreparedCommand {
-    ChatsList,
+    ChatsList { tracked_only: bool },
     ChatGet(ChatId),
     MessagesList(ListMessagesQuery),
     MessageGet(ChatId, MessageId),
@@ -241,6 +263,20 @@ pub fn prepare(cli: Cli) -> Result<PreparedInvocation, CliError> {
         Command::Chats {
             command: ChatsCommand::Refresh,
         } => Ok(PreparedInvocation::RefreshChats { output }),
+        Command::Chats {
+            command: ChatsCommand::Track { chat_id },
+        } => Ok(PreparedInvocation::SetTracking {
+            chat_id: ChatId::from_marked(chat_id)?,
+            tracked: true,
+            output,
+        }),
+        Command::Chats {
+            command: ChatsCommand::Untrack { chat_id },
+        } => Ok(PreparedInvocation::SetTracking {
+            chat_id: ChatId::from_marked(chat_id)?,
+            tracked: false,
+            output,
+        }),
         Command::Sync { command } => {
             let scope = match command {
                 SyncCommand::Chat { chat_id } => SyncScope::Chat(ChatId::from_marked(chat_id)?),
@@ -258,9 +294,11 @@ pub fn prepare(cli: Cli) -> Result<PreparedInvocation, CliError> {
 fn prepare_query(command: Command) -> Result<PreparedCommand, CliError> {
     match command {
         Command::Chats { command } => match command {
-            ChatsCommand::List => Ok(PreparedCommand::ChatsList),
-            ChatsCommand::Refresh => {
-                unreachable!("chat refresh is handled before query preparation")
+            ChatsCommand::List { tracked } => Ok(PreparedCommand::ChatsList {
+                tracked_only: tracked,
+            }),
+            ChatsCommand::Refresh | ChatsCommand::Track { .. } | ChatsCommand::Untrack { .. } => {
+                unreachable!("chat refresh/tracking are handled before query preparation")
             }
             ChatsCommand::Get { chat_id } => {
                 Ok(PreparedCommand::ChatGet(ChatId::from_marked(chat_id)?))
@@ -296,8 +334,8 @@ pub async fn execute_prepared(
     app: &Application,
 ) -> Result<String, CliError> {
     match command {
-        PreparedCommand::ChatsList => {
-            let chats = app.list_chats().await?;
+        PreparedCommand::ChatsList { tracked_only } => {
+            let chats = app.list_chats(tracked_only).await?;
             render_chats(output, &chats)
         }
         PreparedCommand::ChatGet(chat_id) => {
@@ -354,6 +392,33 @@ pub async fn execute_prepared(
                 Ok(lines.join("\n"))
             }
         }
+    }
+}
+
+pub async fn execute_set_tracking(
+    chat_id: ChatId,
+    tracked: bool,
+    output: OutputFormat,
+    app: &Application,
+) -> Result<String, CliError> {
+    let result = if tracked {
+        app.track_chat(chat_id).await
+    } else {
+        app.untrack_chat(chat_id).await
+    };
+    let chat = result.map_err(|error| match error {
+        ApplicationError::NotFound => CliError::ChatNotFound(chat_id.get()),
+        other => other.into(),
+    })?;
+    if output == OutputFormat::Json {
+        json(&chat)
+    } else if tracked {
+        Ok(format!("Tracking chat {}.", chat.id.get()))
+    } else {
+        Ok(format!(
+            "Stopped tracking chat {}; stored messages are kept.",
+            chat.id.get()
+        ))
     }
 }
 
@@ -493,10 +558,11 @@ fn json(value: &impl Serialize) -> Result<String, CliError> {
 
 fn human_chat(chat: &Chat) -> String {
     format!(
-        "{}\t{:?}\t{}",
+        "{}\t{:?}\t{}\t{}",
         chat.id.get(),
         chat.kind,
-        chat.title.as_deref().unwrap_or("")
+        chat.title.as_deref().unwrap_or(""),
+        if chat.tracked { "tracked" } else { "untracked" }
     )
 }
 

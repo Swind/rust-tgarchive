@@ -95,6 +95,7 @@ impl ChatRepository for FakePorts {
             kind: ChatKind::Private,
             title: Some("fixture".into()),
             username: None,
+            tracked: true,
         }))
     }
     async fn list(&self) -> Result<Vec<Chat>, RepositoryError> {
@@ -108,11 +109,28 @@ impl ChatRepository for FakePorts {
                 kind: ChatKind::Private,
                 title: Some("fixture".into()),
                 username: None,
+                tracked: true,
             })
             .collect())
     }
     async fn save_refresh(&self, _: Vec<Chat>) -> Result<(), RepositoryError> {
         Ok(())
+    }
+    async fn set_tracked(
+        &self,
+        id: ChatId,
+        tracked: bool,
+    ) -> Result<Option<Chat>, RepositoryError> {
+        if let Some(error) = self.repo_error() {
+            return Err(error);
+        }
+        Ok(matches!(id.get(), 7 | 9 | 10).then(|| Chat {
+            id,
+            kind: ChatKind::Private,
+            title: Some("fixture".into()),
+            username: None,
+            tracked,
+        }))
     }
 }
 

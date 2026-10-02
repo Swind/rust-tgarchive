@@ -46,6 +46,16 @@ Use Grammers' newest-to-oldest exclusive history boundary (`offset_id`/equivalen
 
 `serve`, auth, refresh, and one-shot sync all acquire one OS advisory exclusive lock before opening the Telegram session. A second owner exits with a clear busy error. Query-only CLI processes may read SQLite concurrently. Do not guess stale PID state or delete sessions. The HTTP server defaults to loopback; do not expose archive data on non-loopback without authentication.
 
+## AD-7: Opt-in collection (tracked chats)
+
+No chat — channel, supergroup, basic group or private — is collected by default. `chats.tracked` (migration `0003`, default 0, existing rows stay untracked, nothing deleted) is the single source of truth, changed only by `chats track|untrack` (CLI) or `PUT|DELETE /api/v1/chats/{id}/tracking` through `ChatService`. `chats refresh` upserts metadata for all dialogs and never touches the flag.
+
+- Untrack stops collection; stored messages stay and remain queryable.
+- `sync chat <id>` / `POST /api/v1/chats/{id}/sync` on an untracked chat fails: CLI exits non-zero (checked locally before Telegram is contacted), REST answers `409` with code `chat_not_tracked` (unknown chat stays `404`). `sync all` / `POST /api/v1/sync` refresh metadata and then sync tracked chats only; with none tracked the job (or CLI run) succeeds as a no-op (CLI prints "No tracked chats").
+- Realtime: every stream batch is reduced by `restrict_to_tracked` before any write, reading the tracked set from SQLite each batch, so track/untrack apply without a restart. Records, chat and sender upserts, and channel deletions of untracked chats are dropped; the Telegram update-state checkpoint still advances (ignored, not lost). Common-namespace deletions carry no chat ID, so they are written only when the ID matches an already archived message of a tracked non-channel chat; otherwise no tombstone is created (a deletion that arrives before its message is archived is therefore not remembered).
+- Catch-up rounds iterate tracked chats only. While a live session runs, the supervisor also polls (default 15 s) and gives tracked chats without a catch-up baseline one, so a chat tracked mid-session is protected against a later reconnect gap. Tracking does not itself fetch history; use `sync chat`.
+- Not enforced mid-job: untracking while a history job for that chat runs lets that job finish its current run.
+
 ## Evidence and pending checks
 
 Telegram's official ID guide documents the non-overlapping Bot API dialog-ID ranges and conversion formulas; the peer guide explains overlapping MTProto ID sequences and that user/channel access hashes are required to form input peers. Telegram's update guide documents the common private/basic-group message-ID sequence versus independent channel sequences. See the linked sources in [the adapter decisions](telegram-adapter-decisions.md).

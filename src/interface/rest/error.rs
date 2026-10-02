@@ -101,6 +101,11 @@ impl ApiError {
                 "conflict",
                 "Operation conflicts with current state",
             ),
+            ApplicationError::NotTracked => (
+                StatusCode::CONFLICT,
+                "chat_not_tracked",
+                "Chat is not tracked; track it first with PUT /api/v1/chats/{chat_id}/tracking",
+            ),
             ApplicationError::Busy => (StatusCode::SERVICE_UNAVAILABLE, "busy", "Service is busy"),
             ApplicationError::TelegramUnavailable(_) => (
                 StatusCode::SERVICE_UNAVAILABLE,

@@ -205,8 +205,21 @@ impl ChatService {
             .ok_or(ApplicationError::NotFound)
     }
 
-    pub async fn list(&self) -> Result<Vec<Chat>, ApplicationError> {
-        self.chats.list().await.map_err(ApplicationError::from)
+    pub async fn list(&self, tracked_only: bool) -> Result<Vec<Chat>, ApplicationError> {
+        let mut chats = self.chats.list().await.map_err(ApplicationError::from)?;
+        if tracked_only {
+            chats.retain(|chat| chat.tracked);
+        }
+        Ok(chats)
+    }
+
+    /// Idempotent. Unknown chats are `NotFound`; untracking keeps all stored messages.
+    pub async fn set_tracked(&self, id: ChatId, tracked: bool) -> Result<Chat, ApplicationError> {
+        self.chats
+            .set_tracked(id, tracked)
+            .await
+            .map_err(ApplicationError::from)?
+            .ok_or(ApplicationError::NotFound)
     }
 }
 
@@ -316,8 +329,16 @@ impl Application {
         self.chats.get(id).await
     }
 
-    pub async fn list_chats(&self) -> Result<Vec<Chat>, ApplicationError> {
-        self.chats.list().await
+    pub async fn list_chats(&self, tracked_only: bool) -> Result<Vec<Chat>, ApplicationError> {
+        self.chats.list(tracked_only).await
+    }
+
+    pub async fn track_chat(&self, id: ChatId) -> Result<Chat, ApplicationError> {
+        self.chats.set_tracked(id, true).await
+    }
+
+    pub async fn untrack_chat(&self, id: ChatId) -> Result<Chat, ApplicationError> {
+        self.chats.set_tracked(id, false).await
     }
 
     pub async fn refresh_chats(&self) -> Result<Vec<Chat>, ApplicationError> {

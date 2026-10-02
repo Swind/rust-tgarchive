@@ -156,7 +156,7 @@ fn start_pool(
 /// `getconf`. A fork between `fork` and `exec` duplicates every open descriptor, including the
 /// account lock's; the child then keeps the `flock` alive after the owner dropped it, so a lock
 /// release (shutdown/reconnect) would not be deterministic.
-fn connection_params() -> ConnectionParams {
+pub(super) fn connection_params() -> ConnectionParams {
     ConnectionParams {
         device_model: format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
         system_version: "unknown".into(),

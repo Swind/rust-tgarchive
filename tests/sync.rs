@@ -65,6 +65,16 @@ impl ChatRepository for Store {
             .extend(chats.into_iter().map(|chat| (chat.id, chat)));
         Ok(())
     }
+    async fn set_tracked(
+        &self,
+        id: ChatId,
+        tracked: bool,
+    ) -> Result<Option<Chat>, RepositoryError> {
+        Ok(self.chats.lock().await.get_mut(&id).map(|chat| {
+            chat.tracked = tracked;
+            chat.clone()
+        }))
+    }
 }
 #[async_trait]
 impl SyncRepository for Store {
@@ -144,6 +154,7 @@ fn chat(raw: i64) -> Chat {
         kind: ChatKind::Private,
         title: Some(format!("chat {raw}")),
         username: None,
+        tracked: true,
     }
 }
 

@@ -30,6 +30,7 @@ fn fixture() -> (Chat, Message) {
         kind: ChatKind::Channel,
         title: Some("fixture channel".into()),
         username: Some("fixture".into()),
+        tracked: false,
     };
     let timestamp = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap();
     let message = Message {

@@ -13,9 +13,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     application::{
-        AccountDeletion, IngestBatch, IngestRecord, MessageSource, RepositoryError,
+        AccountDeletion, IngestBatch, IngestRecord, MessageSource, RepositoryError, TrackingScope,
         ingestion_worker::IngestSink,
-        realtime::{RealtimeSource, RealtimeSourceError},
+        realtime::{RealtimeSource, RealtimeSourceError, is_empty, restrict_to_tracked},
     },
     domain::{Chat, ChatKind, MessageEvent, MessageId},
 };
@@ -142,6 +142,7 @@ impl NormalizedBatch {
                 kind: chat_kind(message.peer_id()),
                 title: None,
                 username: None,
+                tracked: false,
             });
         }
         if let Some(sender_id) = message.sender_id() {
@@ -247,19 +248,29 @@ impl<C: RealtimeConnector> RealtimeSource for ReconnectingSource<C> {
 pub struct AdapterConnector {
     adapter: Arc<TelegramAdapter>,
     sink: IngestSink,
+    scope: Arc<dyn TrackingScope>,
 }
 
 pub type AdapterRealtime = ReconnectingSource<AdapterConnector>;
 
 impl AdapterRealtime {
-    pub fn new(adapter: Arc<TelegramAdapter>, sink: IngestSink) -> Self {
-        ReconnectingSource::with_connector(AdapterConnector { adapter, sink })
+    pub fn new(
+        adapter: Arc<TelegramAdapter>,
+        sink: IngestSink,
+        scope: Arc<dyn TrackingScope>,
+    ) -> Self {
+        ReconnectingSource::with_connector(AdapterConnector {
+            adapter,
+            sink,
+            scope,
+        })
     }
 }
 
 pub struct AdapterConnection {
     adapter: Arc<TelegramAdapter>,
     sink: IngestSink,
+    scope: Arc<dyn TrackingScope>,
     stream: UpdateStream,
 }
 
@@ -299,6 +310,7 @@ impl RealtimeConnector for AdapterConnector {
         Ok(AdapterConnection {
             adapter: Arc::clone(&self.adapter),
             sink: self.sink.clone(),
+            scope: Arc::clone(&self.scope),
             stream,
         })
     }
@@ -310,7 +322,15 @@ impl RealtimeConnection for AdapterConnection {
     /// committed through the shared bounded, acknowledged writer.
     async fn run(&mut self, cancel: CancellationToken) -> Result<(), ConnectionFailure> {
         let client = self.adapter.client();
-        match process_stream(&client, &mut self.stream, &self.sink, cancel).await {
+        match process_stream(
+            &client,
+            &mut self.stream,
+            &self.sink,
+            self.scope.as_ref(),
+            cancel,
+        )
+        .await
+        {
             Ok(()) => Ok(()),
             Err(error) => {
                 let dropped = matches!(
@@ -351,6 +371,7 @@ async fn process_stream(
     client: &Client,
     stream: &mut UpdateStream,
     sink: &IngestSink,
+    scope: &dyn TrackingScope,
     cancellation: CancellationToken,
 ) -> Result<(), RealtimeError> {
     loop {
@@ -368,9 +389,15 @@ async fn process_stream(
             batch.add_update(client, raw, state, peers)?;
         }
 
-        tokio::select! {
-            _ = cancellation.cancelled() => return Ok(()),
-            result = sink.submit(batch.into_ingest_batch()) => result?,
+        // The tracked set is read per batch, so tracking changes apply without a restart.
+        // Updates of untracked chats are intentionally ignored (not lost): the batch is reduced
+        // before anything is written and the update-state checkpoint below still advances.
+        let batch = restrict_to_tracked(scope, batch.into_ingest_batch()).await?;
+        if !is_empty(&batch) {
+            tokio::select! {
+                _ = cancellation.cancelled() => return Ok(()),
+                result = sink.submit(batch) => result?,
+            }
         }
         // Intentionally not cancellation-selectable: after the writer ACK the checkpoint must
         // finish or report failure before the runtime tears this stream down.
@@ -411,6 +438,39 @@ mod tests {
 
     use super::super::file_session::FileSession;
     use grammers_session::{Session, updates::UpdatesLike};
+
+    /// Fixed scope; the original tests assume the updates they feed are in scope.
+    #[derive(Default)]
+    struct FixedScope {
+        tracked: HashSet<crate::domain::ChatId>,
+        common: HashSet<MessageId>,
+    }
+
+    #[async_trait::async_trait]
+    impl TrackingScope for FixedScope {
+        async fn tracked_chat_ids(
+            &self,
+        ) -> Result<HashSet<crate::domain::ChatId>, RepositoryError> {
+            Ok(self.tracked.clone())
+        }
+        async fn archived_common_message_ids(
+            &self,
+            ids: &[MessageId],
+        ) -> Result<HashSet<MessageId>, RepositoryError> {
+            Ok(ids
+                .iter()
+                .copied()
+                .filter(|id| self.common.contains(id))
+                .collect())
+        }
+    }
+
+    fn in_scope() -> FixedScope {
+        FixedScope {
+            tracked: [crate::domain::ChatId::from_telegram(ChatKind::Channel, 90).unwrap()].into(),
+            common: [MessageId::new(7).unwrap()].into(),
+        }
+    }
 
     #[test]
     fn raw_common_delete_has_no_guessed_chat_and_channel_delete_keeps_channel_scope() {
@@ -497,7 +557,11 @@ mod tests {
         session: Arc<FileSession>,
         updates: UpdatesLike,
     ) -> (Client, UpdateStream) {
-        let pool = grammers_client::SenderPool::new(session, 12345);
+        let pool = grammers_client::SenderPool::with_configuration(
+            session,
+            12345,
+            super::super::session::connection_params(),
+        );
         let client = Client::with_configuration(
             pool.handle.clone(),
             grammers_client::client::ClientConfiguration {
@@ -537,7 +601,8 @@ mod tests {
         });
         let (sink, worker) = ingestion_worker::spawn(writer.clone(), 1);
         let cancellation = CancellationToken::new();
-        let process = process_stream(&client, &mut stream, &sink, cancellation.clone());
+        let scope = in_scope();
+        let process = process_stream(&client, &mut stream, &sink, &scope, cancellation.clone());
         let observe = async {
             writer.entered.acquire().await.unwrap().forget();
             assert_eq!(session.updates_state().await.unwrap(), Default::default());
@@ -647,7 +712,14 @@ mod tests {
         });
         let (sink, worker) = ingestion_worker::spawn(writer.clone(), 1);
         {
-            let process = process_stream(&client, &mut stream, &sink, CancellationToken::new());
+            let scope = in_scope();
+            let process = process_stream(
+                &client,
+                &mut stream,
+                &sink,
+                &scope,
+                CancellationToken::new(),
+            );
             tokio::pin!(process);
             tokio::select! {
                 biased;
@@ -674,7 +746,14 @@ mod tests {
         assert_eq!(session.updates_state().await.unwrap(), Default::default());
         let (client, mut stream) = stream_fixture(session.clone(), common_delete_update()).await;
         let (sink, worker) = ingestion_worker::spawn(store, 1);
-        let result = process_stream(&client, &mut stream, &sink, CancellationToken::new()).await;
+        let result = process_stream(
+            &client,
+            &mut stream,
+            &sink,
+            &in_scope(),
+            CancellationToken::new(),
+        )
+        .await;
         assert!(matches!(
             result,
             Err(RealtimeError::Telegram(
@@ -705,6 +784,47 @@ mod tests {
         assert_eq!(store.unresolved_common_deletion_count().await.unwrap(), 1);
         restart_and_process(&path, store.clone()).await;
         assert_eq!(store.unresolved_common_deletion_count().await.unwrap(), 1);
+        let _ = std::fs::remove_file(path);
+    }
+
+    struct CountingWriter(Mutex<Vec<IngestBatch>>);
+
+    #[async_trait::async_trait]
+    impl ArchiveWriter for CountingWriter {
+        async fn write_batch(&self, batch: IngestBatch) -> Result<(), RepositoryError> {
+            self.0.lock().unwrap().push(batch);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn untracked_updates_write_nothing_but_still_advance_the_update_checkpoint() {
+        let path = session_path();
+        let session = Arc::new(FileSession::open(&path).await.unwrap());
+        let (client, mut stream) = stream_fixture(session.clone(), two_scope_update_batch()).await;
+        let writer = Arc::new(CountingWriter(Mutex::new(Vec::new())));
+        let (sink, worker) = ingestion_worker::spawn(writer.clone(), 1);
+        let result = process_stream(
+            &client,
+            &mut stream,
+            &sink,
+            &FixedScope::default(),
+            CancellationToken::new(),
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(RealtimeError::Telegram(
+                grammers_client::InvocationError::Dropped
+            ))
+        ));
+        assert!(writer.0.lock().unwrap().is_empty());
+        let state = session.updates_state().await.unwrap();
+        assert_eq!(state.pts, 1);
+        assert_eq!(state.channels.len(), 1);
+        assert_eq!(state.channels[0].pts, 1);
+        drop(sink);
+        worker.await.unwrap().unwrap();
         let _ = std::fs::remove_file(path);
     }
 

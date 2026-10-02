@@ -62,6 +62,7 @@ pub fn map_chat(peer: &Peer) -> Result<Chat, MappingError> {
         kind,
         title,
         username,
+        tracked: false,
     })
 }
 
