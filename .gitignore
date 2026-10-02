@@ -1,0 +1,12 @@
+/target/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.session
+*.session-journal
+.env
+.env.*
+!.env.example

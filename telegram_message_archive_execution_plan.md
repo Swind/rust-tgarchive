@@ -159,11 +159,11 @@ Search V1 為 literal text search：空白分割 term，正確 escape FTS 引號
 
 相依：Phase 0 契約。交付可編譯、可測試的核心。
 
-- [ ] **P1-T01：建立 Cargo 專案與入口。** package/binary 命名、lib/main、四層 module、config/bootstrap skeleton、gitignore（DB、WAL/SHM、session、credentials）。驗收：`cargo check --all-targets`，不一次引入尚未使用的全部依賴。
-- [ ] **P1-T02：Domain。** IDs、ChatKind/SenderKind、Message、Attachment、MessageEvent；加入必要 Deleted 與來源 metadata 型別。驗收：peer namespaces、附件缺漏、UTC 等 pure tests；不把未知 sender 當 user 0。
-- [ ] **P1-T03：Pagination 與 query validation。** PageSize、MessageCursor、Page、List/Search query、time range；opaque cursor codec 留在共用 interface utility。驗收：同 timestamp、最大／最小 limit、before+after、未知 cursor version、時間區間錯誤。
-- [ ] **P1-T04：Application ports 與 errors。** 建立 query repositories、ArchiveWriter、TelegramGateway、SyncRepository 與 batch/checkpoint 契約；typed error。驗收：test fake 可 implement ports；核心 public API 無 SQLx／grammers／Axum／clap／anyhow。
-- [ ] **P1-T05：基本檢查流程。** 加最小 CI 或本地 check script，固定 fmt/test/clippy 命令與 rust toolchain。驗收：新環境能編譯 skeleton。
+- [x] **P1-T01：建立 Cargo 專案與入口。** package/binary 命名、lib/main、四層 module、config/bootstrap skeleton、gitignore（DB、WAL/SHM、session、credentials）。驗收：`cargo check --all-targets`，不一次引入尚未使用的全部依賴。
+- [x] **P1-T02：Domain。** IDs、ChatKind/SenderKind、Message、Attachment、MessageEvent；加入必要 Deleted 與來源 metadata 型別。驗收：peer namespaces、附件缺漏、UTC 等 pure tests；不把未知 sender 當 user 0。
+- [x] **P1-T03：Pagination 與 query validation。** PageSize、MessageCursor、Page、List/Search query、time range；opaque cursor codec 留在共用 interface utility。驗收：同 timestamp、最大／最小 limit、before+after、未知 cursor version、時間區間錯誤。
+- [x] **P1-T04：Application ports 與 errors。** 建立 query repositories、ArchiveWriter、TelegramGateway、SyncRepository 與 batch/checkpoint 契約；typed error。驗收：test fake 可 implement ports；核心 public API 無 SQLx／grammers／Axum／clap／anyhow。
+- [x] **P1-T05：基本檢查流程。** 加最小 CI 或本地 check script，固定 fmt/test/clippy 命令與 rust toolchain。驗收：新環境能編譯 skeleton。
 
 **Phase gate：** 核心型別與 ports 穩定，純測試通過。
 
