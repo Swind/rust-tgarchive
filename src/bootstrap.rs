@@ -8,13 +8,16 @@ use crate::{
     application::{
         ArchiveWriter, PageSize, RepositoryError, SyncJob, SyncJobState, SyncRepository, SyncScope,
         ingestion_worker::{self, IngestSink},
+        realtime::{ReconnectBackoff, supervise_realtime},
         services::{Application, ComponentStatus},
         sync::{CancellationToken, SyncCoordinator, SyncEngine},
     },
     config::{Config, TelegramConfig},
     domain::Chat,
     infrastructure::persistence::sqlite::SqliteStore,
-    infrastructure::telegram::{AuthError, LoginProgress, TelegramAdapter},
+    infrastructure::telegram::{
+        AuthError, LoginProgress, TelegramAdapter, realtime::AdapterRealtime,
+    },
     interface::cli::{
         Cli, CliError, OpenApiCliFormat, OutputFormat, PreparedInvocation, execute_prepared,
         initialized_output, prepare, render_chats, render_sync_job,
@@ -307,7 +310,8 @@ async fn serve_with_telegram(
             .bind_telegram_account(account_id)
             .await
             .map_err(|error| CliError::Database(error.to_string()))?;
-        let runtime = start_sync_runtime(store.clone(), adapter.clone()).await?;
+        let mut runtime = start_sync_runtime(store.clone(), adapter.clone()).await?;
+        runtime.start_realtime(adapter.clone());
         let application = Arc::new(Application::new(
             store.clone(),
             store.clone(),
@@ -337,16 +341,61 @@ struct SyncRuntime {
     engine: Arc<SyncEngine>,
     sink: IngestSink,
     writer: JoinHandle<Result<(), RepositoryError>>,
+    realtime: Option<RealtimeTask>,
+}
+
+struct RealtimeTask {
+    cancel: CancellationToken,
+    handle: JoinHandle<Result<(), crate::application::ApplicationError>>,
 }
 
 impl SyncRuntime {
+    /// Starts catch-up plus live updates on the same writer and engine as history sync.
+    fn start_realtime(&mut self, adapter: Arc<TelegramAdapter>) {
+        let cancel = CancellationToken::new();
+        let engine = Arc::clone(&self.engine);
+        let source = AdapterRealtime::new(adapter, self.sink.clone());
+        let token = cancel.clone();
+        let handle = tokio::spawn(async move {
+            supervise_realtime(&source, &engine, ReconnectBackoff::default(), token).await
+        });
+        self.realtime = Some(RealtimeTask { cancel, handle });
+    }
+
     async fn shutdown(self) -> Result<(), CliError> {
         let Self {
             coordinator,
             engine,
             sink,
             writer,
+            realtime,
         } = self;
+        // Producers stop first so the writer can drain once every sender is dropped.
+        let realtime_result = match realtime {
+            Some(RealtimeTask { cancel, mut handle }) => {
+                cancel.cancel();
+                match tokio::time::timeout(std::time::Duration::from_secs(10), &mut handle).await {
+                    Ok(joined) => joined
+                        .map_err(|error| {
+                            CliError::Telegram(format!("realtime task failed: {error}"))
+                        })?
+                        .map_err(|error| {
+                            CliError::Telegram(format!("realtime updates failed: {error}"))
+                        }),
+                    Err(_) => {
+                        handle.abort();
+                        let _ = handle.await;
+                        Err(CliError::Telegram(
+                            "realtime shutdown exceeded its deadline; unacknowledged updates are re-fetched on restart".into(),
+                        ))
+                    }
+                }
+            }
+            None => Ok(()),
+        };
+        if let Err(error) = &realtime_result {
+            tracing::error!(%error, "realtime listener ended with an error");
+        }
         let coordinator_result = coordinator
             .shutdown_with_timeout(std::time::Duration::from_secs(10))
             .await
@@ -374,6 +423,7 @@ impl SyncRuntime {
                 ))
             }
         };
+        realtime_result?;
         coordinator_result?;
         writer_result
     }
@@ -404,6 +454,7 @@ async fn start_sync_runtime(
         engine,
         sink,
         writer: writer_task,
+        realtime: None,
     })
 }
 
@@ -428,6 +479,11 @@ async fn serve_router(
                     break Err(CliError::Server(message));
                 }
                 _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {
+                    if runtime.realtime.as_ref().is_some_and(|task| task.handle.is_finished()) {
+                        stop.cancel();
+                        let _ = (&mut server).await;
+                        break Err(CliError::Server("realtime listener stopped unexpectedly".into()));
+                    }
                     if runtime.writer.is_finished() {
                         stop.cancel();
                         let _ = (&mut server).await;

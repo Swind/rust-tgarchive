@@ -16,7 +16,7 @@
 | 5 REST/OpenAPI | accepted | 11 CLI/router/runtime tests 通過；query serve、JSON/YAML OpenAPI、limits/request IDs/loopback policy |
 | 6 Telegram | adapter/auth/refresh interfaces accepted | hidden interactive auth、CLI/REST refresh、帳號綁定已串接；完整 media fixtures 持續補充，真實帳號驗收延後 |
 | 7 History | engine/coordinator/interfaces accepted | REST 即時 202、重複 409、未知 chat 404、queue full 503 與共用 coordinator tests 通過；真實帳號验收延後 |
-| 8 Realtime | in progress | 帳號綁定／common deletion persistence 5 tests 通過；listener、catch-up、crash recovery 待驗收 |
+| 8 Realtime | code complete; automated tests pass, real-account acceptance pending | supervisor、重連 backoff、catch-up、crash replay fake/SQLite tests 通過（全 79 tests、fmt、all-target clippy）；P8-T06 與真實斷線／crash 驗收待做 |
 | 9 Hardening | pending | full checks、README、fresh setup |
 
 ## Commits
@@ -39,6 +39,10 @@ Phase 8 deletion persistence：未知／有歧義的 common deletion 保存 tomb
 Auth/refresh/sync interfaces 與 vendored update-buffer boundary：隔離快照全 60 tests、fmt、all-target clippy 通過。SIGTERM 子程序測試確認 query server 正常 exit 0。即時 listener 與完整 runtime supervisor 尚在下一批工作中。
 
 Phase 8 realtime stream foundation：`realtime.rs` 於 archive 確認整批後才寫入 aggregate update checkpoint；全 66 tests、fmt、all-target clippy 通過。`process_stream` 於 stream 結束時回傳 `Telegram(Dropped)`，接入 supervisor 時須視為重連而非致命錯誤；listener supervisor、catch-up、crash recovery 仍待驗收。
+
+Phase 8 supervisor／catch-up：`serve`（已設定 Telegram）啟動 realtime task，與 history 共用 engine 與 writer；shutdown 先取消 realtime 並 join，再停 coordinator、drain writer。`supervise_realtime` 每輪先做 catch-up，再跑 live session；`Dropped`、I/O、transport、FLOOD_WAIT、5xx 視為可重連（上限 60s 的可取消指數 backoff，不限次數），auth／帳號不符／storage／checkpoint 失敗為致命並使 `serve` 非零結束。Catch-up 每輪對每個已知 chat 先固定上界（當下最新 ID），自 `catchup_after_id` 起升序分頁，每頁與 checkpoint 同一交易提交後才前進，不跳到最新 ID；尚無 baseline 的 chat 以該輪上界為起點。自動 tests（fake gateway/store、paused time、SQLite）涵蓋：Dropped 重連、backoff 期間取消、致命錯誤傳遞、分頁與邊界前進、固定上界、commit 失敗不前進邊界、crash（commit 前／commit 後 checkpoint 前）後重啟重處理且無重複。
+
+已知限制（未以真實帳號驗證）：grammers 的 update receiver 為一次性；`Dropped` 表示 sender pool 已停止，同一 adapter 無法重建，實際上第二次嘗試會回報 `ReceiverUnavailable` 並致命退出（需由外部重啟程序）。暫時性 I/O／RPC 錯誤則保留同一 `UpdateStream` 重試，此行為尚無真實網路驗證。Catch-up 只涵蓋已存在 chats 表的 chat，且與 grammers 內建 getDifference 為獨立機制，兩者重疊以 upsert 冪等處理；不宣稱 exactly-once 或零遺失。
 
 ## Manual acceptance
 

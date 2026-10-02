@@ -379,6 +379,7 @@ pub trait SyncRepository: Send + Sync {
 }
 
 pub mod ingestion_worker;
+pub mod realtime;
 pub mod services;
 pub mod sync;
 

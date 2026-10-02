@@ -212,3 +212,28 @@ async fn account_wide_deletion_requires_archive_identity() {
             .contains("bind the Telegram account")
     );
 }
+
+#[tokio::test]
+async fn replaying_the_same_realtime_batch_after_a_crash_leaves_one_row() {
+    let (_directory, store) = store().await;
+    let chat_id = ChatId::from_marked(201).unwrap();
+    let batch = insert_messages(vec![message(chat_id.get(), 41)]);
+    store.write_batch(batch.clone()).await.unwrap();
+    store.write_batch(batch).await.unwrap();
+
+    let page = store
+        .list(telegram_message_archive::application::ListMessagesQuery {
+            filters: telegram_message_archive::application::MessageFilters {
+                chat_id: Some(chat_id),
+                sender_id: None,
+                time_range: telegram_message_archive::application::TimeRange::new(None, None)
+                    .unwrap(),
+            },
+            before: None,
+            after: None,
+            page_size: telegram_message_archive::application::PageSize::DEFAULT,
+        })
+        .await
+        .unwrap();
+    assert_eq!(page.items.len(), 1);
+}

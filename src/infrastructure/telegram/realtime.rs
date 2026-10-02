@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::Arc};
 
 use chrono::Utc;
 use grammers_client::{
@@ -15,6 +15,7 @@ use crate::{
     application::{
         AccountDeletion, IngestBatch, IngestRecord, MessageSource, RepositoryError,
         ingestion_worker::IngestSink,
+        realtime::{RealtimeSource, RealtimeSourceError},
     },
     domain::{Chat, ChatKind, MessageEvent, MessageId},
 };
@@ -169,21 +170,33 @@ impl NormalizedBatch {
     }
 }
 
-impl TelegramAdapter {
-    /// Runs Grammers catch-up and live updates through the shared bounded, acknowledged writer.
-    /// Update state is persisted only after every item currently buffered by Grammers is committed.
-    pub async fn run_realtime(
-        &self,
-        sink: &IngestSink,
-        cancellation: CancellationToken,
-    ) -> Result<(), RealtimeError> {
+/// Live-update source over one Grammers update stream. A stream that failed with a transient
+/// error is kept for the next attempt; after `Dropped` the sender pool is gone and the
+/// single-use update receiver cannot be recreated, so the next attempt reports a fatal error.
+pub struct AdapterRealtime {
+    adapter: Arc<TelegramAdapter>,
+    sink: IngestSink,
+    stream: tokio::sync::Mutex<Option<UpdateStream>>,
+}
+
+impl AdapterRealtime {
+    pub fn new(adapter: Arc<TelegramAdapter>, sink: IngestSink) -> Self {
+        Self {
+            adapter,
+            sink,
+            stream: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    async fn open_stream(&self) -> Result<UpdateStream, RealtimeError> {
         let updates = self
+            .adapter
             .updates
             .lock()
             .await
             .take()
             .ok_or(RealtimeError::ReceiverUnavailable)?;
-        let mut stream = self
+        self.adapter
             .client
             .stream_updates(
                 updates,
@@ -193,9 +206,54 @@ impl TelegramAdapter {
                 },
             )
             .await
-            .map_err(|error| RealtimeError::Stream(error.to_string()))?;
+            .map_err(|error| RealtimeError::Stream(error.to_string()))
+    }
+}
 
-        process_stream(&self.client, &mut stream, sink, cancellation).await
+#[async_trait::async_trait]
+impl RealtimeSource for AdapterRealtime {
+    /// Update state is persisted only after every item currently buffered by Grammers is
+    /// committed through the shared bounded, acknowledged writer.
+    async fn run_once(&self, cancel: CancellationToken) -> Result<(), RealtimeSourceError> {
+        let mut slot = self.stream.lock().await;
+        let mut stream = match slot.take() {
+            Some(stream) => stream,
+            None => self.open_stream().await.map_err(classify)?,
+        };
+        let result = process_stream(&self.adapter.client, &mut stream, &self.sink, cancel).await;
+        match result {
+            Ok(()) => {
+                *slot = Some(stream);
+                Ok(())
+            }
+            Err(error) => {
+                let dropped = matches!(
+                    error,
+                    RealtimeError::Telegram(grammers_client::InvocationError::Dropped)
+                );
+                let error = classify(error);
+                if matches!(error, RealtimeSourceError::Transient(_)) && !dropped {
+                    *slot = Some(stream);
+                }
+                Err(error)
+            }
+        }
+    }
+}
+
+/// Stream end (`Dropped`), I/O and transport failures, FLOOD_WAIT and 5xx RPC errors are
+/// reconnectable; everything else (auth, mapping, storage, checkpoint) is fatal.
+pub fn classify(error: RealtimeError) -> RealtimeSourceError {
+    use grammers_client::InvocationError as Invocation;
+    let message = error.to_string();
+    match error {
+        RealtimeError::Telegram(
+            Invocation::Dropped | Invocation::Io(_) | Invocation::Transport(_),
+        ) => RealtimeSourceError::Transient(message),
+        RealtimeError::Telegram(Invocation::Rpc(ref rpc)) if rpc.code == 420 || rpc.code >= 500 => {
+            RealtimeSourceError::Transient(message)
+        }
+        _ => RealtimeSourceError::Fatal(message),
     }
 }
 
@@ -418,5 +476,178 @@ mod tests {
         drop(sink);
         worker.await.unwrap().unwrap();
         let _ = std::fs::remove_file(path);
+    }
+
+    fn common_delete_update() -> UpdatesLike {
+        UpdatesLike::Updates(tl::enums::Updates::Updates(tl::types::Updates {
+            updates: vec![tl::enums::Update::DeleteMessages(
+                tl::types::UpdateDeleteMessages {
+                    messages: vec![7],
+                    pts: 1,
+                    pts_count: 1,
+                },
+            )],
+            users: Vec::new(),
+            chats: Vec::new(),
+            date: 1_700_000_001,
+            seq: 0,
+        }))
+    }
+
+    fn session_path() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "telegram-realtime-crash-{}-{}.json",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap()
+        ))
+    }
+
+    /// Optionally parks before the commit; always reports once the real store has committed.
+    struct CrashWriter {
+        inner: Arc<crate::infrastructure::persistence::sqlite::SqliteStore>,
+        hang_before_commit: bool,
+        entered: tokio::sync::Notify,
+        committed: tokio::sync::Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl ArchiveWriter for CrashWriter {
+        async fn write_batch(&self, batch: IngestBatch) -> Result<(), RepositoryError> {
+            self.entered.notify_one();
+            if self.hang_before_commit {
+                std::future::pending::<()>().await;
+            }
+            self.inner.write_batch(batch).await?;
+            self.committed.notify_one();
+            Ok(())
+        }
+    }
+
+    async fn bound_store() -> (
+        tempfile::TempDir,
+        Arc<crate::infrastructure::persistence::sqlite::SqliteStore>,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let url = format!("sqlite://{}", directory.path().join("archive.db").display());
+        let store = Arc::new(
+            crate::infrastructure::persistence::sqlite::SqliteStore::connect(&url)
+                .await
+                .unwrap(),
+        );
+        store
+            .bind_telegram_account(crate::domain::SenderId::from_marked(1).unwrap())
+            .await
+            .unwrap();
+        (directory, store)
+    }
+
+    /// Runs one stream attempt that is abandoned (as a crash would) at the chosen point.
+    async fn crashed_attempt(
+        path: &std::path::Path,
+        store: Arc<crate::infrastructure::persistence::sqlite::SqliteStore>,
+        hang_before_commit: bool,
+    ) {
+        let session = Arc::new(FileSession::open(path).await.unwrap());
+        let (client, mut stream) = stream_fixture(session.clone(), common_delete_update()).await;
+        let writer = Arc::new(CrashWriter {
+            inner: store,
+            hang_before_commit,
+            entered: tokio::sync::Notify::new(),
+            committed: tokio::sync::Notify::new(),
+        });
+        let (sink, worker) = ingestion_worker::spawn(writer.clone(), 1);
+        {
+            let process = process_stream(&client, &mut stream, &sink, CancellationToken::new());
+            tokio::pin!(process);
+            tokio::select! {
+                biased;
+                _ = async {
+                    if hang_before_commit {
+                        writer.entered.notified().await;
+                    } else {
+                        writer.committed.notified().await;
+                    }
+                } => {}
+                _ = &mut process => panic!("stream finished before the simulated crash"),
+            }
+        }
+        assert_eq!(session.updates_state().await.unwrap(), Default::default());
+        worker.abort();
+        let _ = worker.await;
+    }
+
+    async fn restart_and_process(
+        path: &std::path::Path,
+        store: Arc<crate::infrastructure::persistence::sqlite::SqliteStore>,
+    ) {
+        let session = Arc::new(FileSession::open(path).await.unwrap());
+        assert_eq!(session.updates_state().await.unwrap(), Default::default());
+        let (client, mut stream) = stream_fixture(session.clone(), common_delete_update()).await;
+        let (sink, worker) = ingestion_worker::spawn(store, 1);
+        let result = process_stream(&client, &mut stream, &sink, CancellationToken::new()).await;
+        assert!(matches!(
+            result,
+            Err(RealtimeError::Telegram(
+                grammers_client::InvocationError::Dropped
+            ))
+        ));
+        assert_eq!(session.updates_state().await.unwrap().pts, 1);
+        drop(sink);
+        worker.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn crash_before_archive_commit_keeps_checkpoint_and_restart_reprocesses() {
+        let (_directory, store) = bound_store().await;
+        let path = session_path();
+        crashed_attempt(&path, store.clone(), true).await;
+        assert_eq!(store.unresolved_common_deletion_count().await.unwrap(), 0);
+        restart_and_process(&path, store.clone()).await;
+        assert_eq!(store.unresolved_common_deletion_count().await.unwrap(), 1);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn crash_after_commit_before_checkpoint_replays_without_duplicates() {
+        let (_directory, store) = bound_store().await;
+        let path = session_path();
+        crashed_attempt(&path, store.clone(), false).await;
+        assert_eq!(store.unresolved_common_deletion_count().await.unwrap(), 1);
+        restart_and_process(&path, store.clone()).await;
+        assert_eq!(store.unresolved_common_deletion_count().await.unwrap(), 1);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn dropped_io_and_transient_rpc_reconnect_but_auth_and_storage_are_fatal() {
+        use grammers_client::InvocationError as Invocation;
+        let rpc = |code, name: &str| {
+            RealtimeError::Telegram(Invocation::Rpc(grammers_client::sender::RpcError {
+                code,
+                name: name.into(),
+                value: None,
+                caused_by: None,
+            }))
+        };
+        for transient in [
+            RealtimeError::Telegram(Invocation::Dropped),
+            RealtimeError::Telegram(Invocation::Io(std::io::Error::other("reset"))),
+            rpc(420, "FLOOD_WAIT"),
+            rpc(500, "INTERNAL"),
+        ] {
+            assert!(matches!(
+                classify(transient),
+                RealtimeSourceError::Transient(_)
+            ));
+        }
+        for fatal in [
+            rpc(401, "AUTH_KEY_UNREGISTERED"),
+            RealtimeError::DifferenceTooLong,
+            RealtimeError::ReceiverUnavailable,
+            RealtimeError::Archive(RepositoryError::Unavailable("disk".into())),
+            RealtimeError::Checkpoint("write".into()),
+        ] {
+            assert!(matches!(classify(fatal), RealtimeSourceError::Fatal(_)));
+        }
     }
 }

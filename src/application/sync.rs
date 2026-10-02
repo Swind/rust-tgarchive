@@ -16,7 +16,7 @@ use super::{
     ApplicationError, ChatRepository, HistoryBoundary, IngestBatch, PageSize, SyncChatProgress,
     SyncJob, SyncJobState, SyncRepository, SyncScope, TelegramError, TelegramGateway,
 };
-use crate::domain::{ChatId, MessageId};
+use crate::domain::{ChatId, MessageEvent, MessageId};
 
 pub struct SyncEngine {
     gateway: Arc<dyn TelegramGateway>,
@@ -90,6 +90,7 @@ impl SyncEngine {
                         before_message_id: checkpoint.history_before_id,
                         after_message_id: None,
                     },
+                    self.page_size,
                     cancel,
                 )
                 .await?;
@@ -133,10 +134,124 @@ impl SyncEngine {
         Ok(committed)
     }
 
+    /// Fetches messages newer than the persisted `catchup_after_id` for one chat, ascending,
+    /// up to an upper bound fixed once at the start of this round. Each page is committed
+    /// together with its checkpoint; the boundary never jumps to the live newest ID.
+    pub async fn catch_up_chat(
+        &self,
+        chat_id: ChatId,
+        cancel: &CancellationToken,
+    ) -> Result<u64, ApplicationError> {
+        let mut checkpoint = self
+            .repository
+            .get_checkpoint(chat_id)
+            .await?
+            .unwrap_or_default();
+        let newest = self
+            .fetch_with_retry(
+                chat_id,
+                HistoryBoundary {
+                    before_message_id: None,
+                    after_message_id: None,
+                },
+                PageSize::new(1)?,
+                cancel,
+            )
+            .await?
+            .next_before_message_id;
+        let Some(upper) = newest else {
+            return Ok(0);
+        };
+        let Some(mut after) = checkpoint.catchup_after_id else {
+            // No earlier baseline: history sync owns everything up to now, so start the
+            // catch-up boundary at this round's bound rather than inventing a gap.
+            checkpoint.catchup_after_id = Some(upper);
+            self.sink
+                .submit(IngestBatch {
+                    checkpoint: Some((chat_id, checkpoint)),
+                    ..IngestBatch::default()
+                })
+                .await?;
+            return Ok(0);
+        };
+        let mut committed = 0u64;
+        while after.get() < upper.get() {
+            let page = self
+                .fetch_with_retry(
+                    chat_id,
+                    HistoryBoundary {
+                        before_message_id: None,
+                        after_message_id: Some(after),
+                    },
+                    self.page_size,
+                    cancel,
+                )
+                .await?;
+            let reached_bound = page
+                .next_after_message_id
+                .is_some_and(|next| next.get() >= upper.get());
+            let next = if page.exhausted || reached_bound {
+                upper
+            } else {
+                match page.next_after_message_id {
+                    Some(next) if next.get() > after.get() => next,
+                    _ => {
+                        return Err(ApplicationError::Internal(
+                            "Telegram catch-up page did not advance its exclusive cursor".into(),
+                        ));
+                    }
+                }
+            };
+            let records = page
+                .records
+                .into_iter()
+                .filter(|record| record_message_id(record).get() <= upper.get())
+                .collect::<Vec<_>>();
+            let count = records.len() as u64;
+            checkpoint.catchup_after_id = Some(next);
+            self.sink
+                .submit(IngestBatch {
+                    chats: page.chats,
+                    senders: page.senders,
+                    records,
+                    checkpoint: Some((chat_id, checkpoint.clone())),
+                    ..IngestBatch::default()
+                })
+                .await?;
+            committed += count;
+            after = next;
+        }
+        Ok(committed)
+    }
+
+    /// One catch-up round over every known chat. Telegram failures for a single chat are
+    /// reported in the summary; storage failures and cancellation abort the round.
+    pub async fn catch_up_all(
+        &self,
+        cancel: &CancellationToken,
+    ) -> Result<CatchUpSummary, ApplicationError> {
+        let mut summary = CatchUpSummary::default();
+        for chat in self.chats.list().await? {
+            match self.catch_up_chat(chat.id, cancel).await {
+                Ok(count) => {
+                    summary.committed_messages += count;
+                    summary.caught_up_chats += 1;
+                }
+                Err(
+                    error @ (ApplicationError::TelegramUnavailable(_)
+                    | ApplicationError::TelegramFloodWait { .. }),
+                ) => summary.failures.push((chat.id, error.to_string())),
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(summary)
+    }
+
     async fn fetch_with_retry(
         &self,
         chat: ChatId,
         boundary: HistoryBoundary,
+        page_size: PageSize,
         cancel: &CancellationToken,
     ) -> Result<super::HistoryPage, ApplicationError> {
         let mut transient_attempt = 0;
@@ -145,7 +260,7 @@ impl SyncEngine {
             if cancel.is_cancelled() {
                 return Err(ApplicationError::Conflict);
             }
-            let response = tokio::select! { _ = cancel.cancelled() => return Err(ApplicationError::Conflict), result = self.gateway.fetch_history(chat, boundary.clone(), self.page_size) => result };
+            let response = tokio::select! { _ = cancel.cancelled() => return Err(ApplicationError::Conflict), result = self.gateway.fetch_history(chat, boundary.clone(), page_size) => result };
             match response {
                 Ok(page) => return Ok(page),
                 Err(TelegramError::FloodWait {
@@ -166,6 +281,20 @@ impl SyncEngine {
                 Err(error) => return Err(error.into()),
             }
         }
+    }
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct CatchUpSummary {
+    pub caught_up_chats: usize,
+    pub committed_messages: u64,
+    pub failures: Vec<(ChatId, String)>,
+}
+
+fn record_message_id(record: &super::IngestRecord) -> MessageId {
+    match &record.event {
+        MessageEvent::Created(message) | MessageEvent::Updated(message) => message.id,
+        MessageEvent::Deleted { message_id, .. } => *message_id,
     }
 }
 
