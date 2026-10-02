@@ -44,14 +44,32 @@ fn reject_too_long_difference(
     }
 }
 
+/// Synthetic RPC error name prefix for `updates.channelDifferenceTooLong`; the bare channel ID
+/// follows after an underscore. Use [`archive_too_long_channel_id`] to read it.
+pub const ARCHIVE_CHANNEL_DIFFERENCE_TOO_LONG: &str = "ARCHIVE_CHANNEL_DIFFERENCE_TOO_LONG";
+
+/// Bare channel ID carried by a synthetic channel too-long error, if `name` is one.
+pub fn archive_too_long_channel_id(name: &str) -> Option<i64> {
+    name.strip_prefix(ARCHIVE_CHANNEL_DIFFERENCE_TOO_LONG)?
+        .strip_prefix('_')?
+        .parse()
+        .ok()
+}
+
 fn reject_too_long_channel_difference(
     difference: tl::enums::updates::ChannelDifference,
+    channel_id: i64,
 ) -> Result<tl::enums::updates::ChannelDifference, InvocationError> {
     if matches!(
         difference,
         tl::enums::updates::ChannelDifference::TooLong(_)
     ) {
-        Err(archive_difference_too_long())
+        Err(InvocationError::Rpc(RpcError {
+            code: 500,
+            name: format!("{ARCHIVE_CHANNEL_DIFFERENCE_TOO_LONG}_{channel_id}"),
+            value: None,
+            caused_by: None,
+        }))
     } else {
         Ok(difference)
     }
@@ -125,9 +143,19 @@ pub struct UpdateStream {
     updates: mpsc::UnboundedReceiver<UpdatesLike>,
     configuration: UpdatesConfiguration,
     should_get_state: bool,
+    // True only while the stream is waiting for socket updates, i.e. no difference is pending.
+    live: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl UpdateStream {
+    /// Flag that is true while no difference is pending and the stream waits for socket updates.
+    ///
+    /// Socket updates are not read while any account or channel difference is being fetched, so
+    /// after a long offline period realtime delivery only starts once this turns true.
+    pub fn live_flag(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        std::sync::Arc::clone(&self.live)
+    }
+
     /// Returns whether processed raw updates remain in the local buffer.
     ///
     /// This does not inspect the sender-pool queue or process more updates. After `next_raw`
@@ -200,6 +228,10 @@ impl UpdateStream {
                 )
             };
 
+            if get_diff.is_some() || get_channel_diff.is_some() {
+                self.live.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+
             if let Some(request) = get_diff {
                 let response = reject_too_long_difference(self.client.invoke(&request).await?)?;
                 let (updates, users, chats) = self.message_box.apply_difference(response);
@@ -209,6 +241,10 @@ impl UpdateStream {
             }
 
             if let Some(request) = get_channel_diff {
+                let channel_id = match &request.channel {
+                    tl::enums::InputChannel::Channel(channel) => channel.channel_id,
+                    _ => 0,
+                };
                 let maybe_response = self.client.invoke(&request).await;
 
                 let response = match maybe_response {
@@ -256,7 +292,7 @@ impl UpdateStream {
                     Err(e) => return Err(e),
                 };
 
-                let response = reject_too_long_channel_difference(response)?;
+                let response = reject_too_long_channel_difference(response, channel_id)?;
 
                 let (updates, users, chats) = self.message_box.apply_channel_difference(response);
 
@@ -265,6 +301,7 @@ impl UpdateStream {
                 continue;
             }
 
+            self.live.store(true, std::sync::atomic::Ordering::SeqCst);
             match timeout_at(deadline.into(), self.updates.recv()).await {
                 Ok(Some(updates)) => self.process_socket_updates(updates).await?,
                 Ok(None) => break Err(InvocationError::Dropped),
@@ -376,6 +413,7 @@ impl Client {
             updates,
             configuration,
             should_get_state,
+            live: Default::default(),
         })
     }
 }
@@ -418,6 +456,7 @@ mod tests {
                 update_queue_limit: None,
             },
             should_get_state: false,
+            live: Default::default(),
         }
     }
 

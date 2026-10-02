@@ -289,13 +289,30 @@ impl SyncEngine {
         &self,
         cancel: &CancellationToken,
     ) -> Result<CatchUpSummary, ApplicationError> {
+        self.catch_up_filtered(None, cancel).await
+    }
+
+    /// Catch-up for one chat, a no-op when it is not tracked.
+    pub async fn catch_up_chat_if_tracked(
+        &self,
+        chat_id: ChatId,
+        cancel: &CancellationToken,
+    ) -> Result<CatchUpSummary, ApplicationError> {
+        self.catch_up_filtered(Some(chat_id), cancel).await
+    }
+
+    async fn catch_up_filtered(
+        &self,
+        only: Option<ChatId>,
+        cancel: &CancellationToken,
+    ) -> Result<CatchUpSummary, ApplicationError> {
         let mut summary = CatchUpSummary::default();
         for chat in self
             .chats
             .list()
             .await?
             .into_iter()
-            .filter(|chat| chat.tracked)
+            .filter(|chat| chat.tracked && only.is_none_or(|id| id == chat.id))
         {
             match self.catch_up_chat(chat.id, cancel).await {
                 Ok(count) => {

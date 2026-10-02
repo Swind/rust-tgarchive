@@ -1,4 +1,7 @@
-use std::time::{Duration, Instant};
+use std::{
+    collections::VecDeque,
+    time::{Duration, Instant},
+};
 
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
@@ -8,12 +11,38 @@ use super::{
     services::{CollectorStatusHandle, ComponentState, ComponentStatus},
     sync::{SyncEngine, sanitize_reason},
 };
+use crate::domain::ChatId;
+
+/// More than this many gap resets within [`GAP_RESET_WINDOW`] switch to backoff between resets.
+pub const GAP_RESET_LIMIT: usize = 3;
+const LIVE_POLL: Duration = Duration::from_millis(250);
+pub const GAP_RESET_WINDOW: Duration = Duration::from_secs(600);
+
+/// How far Telegram's update state was reset after an unrecoverable update gap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GapScope {
+    Account,
+    Channel(ChatId),
+}
+
+impl GapScope {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Account => "account-wide",
+            Self::Channel(_) => "channel",
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RealtimeSourceError {
     /// Connection-level trouble; the supervisor catches up and starts the source again.
     #[error("transient realtime failure: {0}")]
     Transient(String),
+    /// Telegram could not provide the update difference. The source already reset its persisted
+    /// update state to Telegram's current one; the supervisor re-syncs tracked chats by catch-up.
+    #[error("Telegram update gap too long; update state was reset")]
+    GapReset(GapScope),
     /// Authorization, account or storage failures; retrying cannot help.
     #[error("fatal realtime failure: {0}")]
     Fatal(String),
@@ -23,6 +52,11 @@ pub enum RealtimeSourceError {
 #[async_trait]
 pub trait RealtimeSource: Send + Sync {
     async fn run_once(&self, cancel: CancellationToken) -> Result<(), RealtimeSourceError>;
+    /// False while the running session still works through Telegram's pending differences and
+    /// therefore does not read live updates yet.
+    fn is_live(&self) -> bool {
+        true
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -86,30 +120,103 @@ async fn supervise_inner(
 ) -> Result<(), ApplicationError> {
     let mut delay = backoff.initial;
     let mut attempt = 0u32;
+    let mut pending_gap: Option<GapScope> = None;
+    let mut gaps: VecDeque<Instant> = VecDeque::new();
+    let mut reconciliations = 0u64;
+    let mut reconciled_note: Option<String> = None;
     loop {
         if cancel.is_cancelled() {
             return Ok(());
         }
-        status.set(ComponentState::CatchingUp, None);
-        let mut detail = None;
-        match engine.catch_up_all(&cancel).await {
+        let gap = pending_gap.take();
+        if gap.is_some() {
+            status.set(
+                ComponentState::Degraded,
+                Some("Telegram update gap too long; state reset; re-syncing tracked chats via catch-up".to_owned()),
+            );
+        } else {
+            status.set(ComponentState::CatchingUp, None);
+        }
+        let mut detail = reconciled_note.clone();
+        let round = match gap {
+            Some(GapScope::Channel(id)) => engine.catch_up_chat_if_tracked(id, &cancel).await,
+            _ => engine.catch_up_all(&cancel).await,
+        };
+        match round {
             Ok(summary) => {
                 if !summary.failures.is_empty() {
-                    detail = Some(format!(
+                    let skipped = format!(
                         "catch-up skipped {} chat(s); retried on the next round",
                         summary.failures.len()
-                    ));
+                    );
+                    detail = Some(match detail {
+                        Some(note) => format!("{note}; {skipped}"),
+                        None => skipped,
+                    });
                 }
             }
             Err(_) if cancel.is_cancelled() => return Ok(()),
             Err(error) => return Err(error),
         }
         let started = Instant::now();
-        status.set(ComponentState::Running, detail);
-        match run_with_baselines(source, engine, backoff.baseline_poll, &cancel).await {
+        match run_with_baselines(
+            source,
+            engine,
+            backoff.baseline_poll,
+            &cancel,
+            status,
+            detail,
+        )
+        .await
+        {
             Ok(()) => return Ok(()),
             Err(RealtimeSourceError::Fatal(message)) => {
                 return Err(ApplicationError::Internal(message));
+            }
+            Err(RealtimeSourceError::GapReset(scope)) => {
+                if cancel.is_cancelled() {
+                    return Ok(());
+                }
+                if started.elapsed() >= backoff.healthy_after {
+                    delay = backoff.initial;
+                }
+                let now = Instant::now();
+                reconciliations += 1;
+                gaps.push_back(now);
+                while gaps
+                    .front()
+                    .is_some_and(|at| now.duration_since(*at) > GAP_RESET_WINDOW)
+                {
+                    gaps.pop_front();
+                }
+                tracing::warn!(
+                    scope = scope.label(),
+                    reconciliations,
+                    recent = gaps.len(),
+                    "Telegram update gap too long; update state reset, re-syncing tracked chats"
+                );
+                reconciled_note = Some(format!(
+                    "Telegram update gap too long ({}); state reset at {}; tracked chats re-synced via catch-up; deletions and edits of older messages during the gap may be missed; reconciliations: {reconciliations}",
+                    scope.label(),
+                    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                ));
+                pending_gap = Some(scope);
+                if gaps.len() > GAP_RESET_LIMIT {
+                    status.set(
+                        ComponentState::Degraded,
+                        Some(format!(
+                            "repeated Telegram update gaps ({} in {} min); backing off {} ms",
+                            gaps.len(),
+                            GAP_RESET_WINDOW.as_secs() / 60,
+                            delay.as_millis()
+                        )),
+                    );
+                    tokio::select! {
+                        _ = cancel.cancelled() => return Ok(()),
+                        _ = tokio::time::sleep(delay) => {}
+                    }
+                    delay = (delay * 2).min(backoff.max);
+                }
             }
             Err(RealtimeSourceError::Transient(message)) => {
                 if cancel.is_cancelled() {
@@ -146,12 +253,39 @@ async fn run_with_baselines(
     engine: &SyncEngine,
     poll: Duration,
     cancel: &CancellationToken,
+    status: &CollectorStatusHandle,
+    detail: Option<String>,
 ) -> Result<(), RealtimeSourceError> {
     let done = CancellationToken::new();
     let session = async {
         let result = source.run_once(cancel.clone()).await;
         done.cancel();
         result
+    };
+    // Telegram updates are read only after every pending difference is fetched, which after a
+    // long offline period can take minutes; `running` means live updates are actually flowing.
+    let watcher = async {
+        if source.is_live() {
+            status.set(ComponentState::Running, detail);
+            return;
+        }
+        status.set(
+            ComponentState::CatchingUp,
+            Some(
+                "working through the Telegram update backlog; live updates start once done"
+                    .to_owned(),
+            ),
+        );
+        loop {
+            tokio::select! {
+                _ = done.cancelled() => return,
+                _ = tokio::time::sleep(LIVE_POLL) => {}
+            }
+            if source.is_live() {
+                status.set(ComponentState::Running, detail);
+                return;
+            }
+        }
     };
     let poller = async {
         loop {
@@ -166,7 +300,7 @@ async fn run_with_baselines(
             }
         }
     };
-    tokio::join!(session, poller).0
+    tokio::join!(session, poller, watcher).0
 }
 
 /// Drops everything that does not belong to a tracked chat before anything is written.

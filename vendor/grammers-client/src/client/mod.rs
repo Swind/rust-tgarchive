@@ -31,4 +31,7 @@ pub use files::DownloadIter;
 pub use iter_buffer::IterBuffer;
 pub use messages::{GlobalSearchIter, MessageIter, SearchIter};
 pub use retry_policy::{AutoSleep, NoRetries, RetryContext, RetryPolicy};
-pub use updates::{ARCHIVE_DIFFERENCE_TOO_LONG, UpdateStream};
+pub use updates::{
+    ARCHIVE_CHANNEL_DIFFERENCE_TOO_LONG, ARCHIVE_DIFFERENCE_TOO_LONG, UpdateStream,
+    archive_too_long_channel_id,
+};

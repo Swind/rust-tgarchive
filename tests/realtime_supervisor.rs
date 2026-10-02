@@ -16,7 +16,7 @@ use telegram_message_archive::{
         SyncChatProgress, SyncJob, SyncRepository, TelegramError, TelegramGateway,
         ingestion_worker,
         realtime::{
-            RealtimeSource, RealtimeSourceError, ReconnectBackoff, supervise_realtime,
+            GapScope, RealtimeSource, RealtimeSourceError, ReconnectBackoff, supervise_realtime,
             supervise_realtime_with_status,
         },
         services::{CollectorStatusHandle, ComponentState, ComponentStatus},
@@ -687,4 +687,191 @@ async fn collector_status_is_running_during_a_live_session_and_failed_on_fatal_e
     let failed = status.get();
     assert_eq!(failed.state, ComponentState::Failed);
     assert!(failed.detail.unwrap().contains("AUTH_KEY UNREGISTERED"));
+}
+
+fn catch_up_rounds(boundaries: &[HistoryBoundary]) -> usize {
+    boundaries
+        .iter()
+        .filter(|boundary| boundary.after_message_id.is_none())
+        .count()
+}
+
+async fn run_until_second_session(
+    store: &Arc<Store>,
+    gateway: &Arc<Gateway>,
+    first: RealtimeSourceError,
+) -> (Arc<Source>, CollectorStatusHandle) {
+    let engine = Arc::new(engine(store, gateway.clone(), 5));
+    let source = Source::new(vec![Err(first)]);
+    let status = CollectorStatusHandle::new(ComponentStatus::disabled());
+    tokio::spawn({
+        let (source, status) = (source.clone(), status.clone());
+        async move {
+            supervise_realtime_with_status(
+                source.as_ref(),
+                &engine,
+                backoff(Duration::from_secs(1), Duration::from_secs(60)),
+                CancellationToken::new(),
+                &status,
+            )
+            .await
+        }
+    });
+    while source.runs.load(Ordering::SeqCst) < 2 {
+        source.entered.notified().await;
+    }
+    (source, status)
+}
+
+#[tokio::test(start_paused = true)]
+async fn account_wide_gap_is_reconciled_by_catch_up_and_returns_to_running_with_a_note() {
+    let store = Arc::new(Store::default());
+    seed_boundary(&store, 10).await;
+    let gateway = Gateway::new(1..=12);
+    let (_source, status) = run_until_second_session(
+        &store,
+        &gateway,
+        RealtimeSourceError::GapReset(GapScope::Account),
+    )
+    .await;
+    // Initial round plus the reconciliation round; the gap messages 11 and 12 were committed.
+    assert_eq!(catch_up_rounds(&gateway.boundaries.lock().await), 2);
+    assert_eq!(
+        committed_ids(&store.batches.lock().await),
+        vec![vec![11, 12]]
+    );
+    let now = status.get();
+    assert_eq!(now.state, ComponentState::Running);
+    let detail = now.detail.unwrap();
+    assert!(detail.contains("gap too long (account-wide)"), "{detail}");
+    assert!(detail.contains("may be missed") && detail.contains("reconciliations: 1"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn channel_gap_of_an_untracked_chat_resets_without_catch_up() {
+    let store = Arc::new(Store::default());
+    seed_boundary(&store, 10).await;
+    let gateway = Gateway::new(1..=12);
+    let other = ChatId::from_telegram(ChatKind::Channel, 999).unwrap();
+    let (_source, status) = run_until_second_session(
+        &store,
+        &gateway,
+        RealtimeSourceError::GapReset(GapScope::Channel(other)),
+    )
+    .await;
+    // Only the initial round ran; the reset round did not touch the tracked chat.
+    assert_eq!(catch_up_rounds(&gateway.boundaries.lock().await), 1);
+    assert_eq!(status.get().state, ComponentState::Running);
+}
+
+#[tokio::test(start_paused = true)]
+async fn channel_gap_of_a_tracked_chat_catches_that_chat_up() {
+    let store = Arc::new(Store::default());
+    seed_boundary(&store, 10).await;
+    let gateway = Gateway::new(1..=12);
+    let (_source, _status) = run_until_second_session(
+        &store,
+        &gateway,
+        RealtimeSourceError::GapReset(GapScope::Channel(chat_id())),
+    )
+    .await;
+    assert_eq!(
+        committed_ids(&store.batches.lock().await),
+        vec![vec![11, 12]]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn repeated_gaps_back_off_instead_of_spinning_and_stay_degraded() {
+    let store = Arc::new(Store::default());
+    let gateway = Gateway::new(1..=1);
+    let engine = Arc::new(engine(&store, gateway, 5));
+    let gap = || Err(RealtimeSourceError::GapReset(GapScope::Account));
+    let source = Source::new(vec![gap(), gap(), gap(), gap(), gap()]);
+    let status = CollectorStatusHandle::new(ComponentStatus::disabled());
+    let started = tokio::time::Instant::now();
+    tokio::spawn({
+        let (source, status) = (source.clone(), status.clone());
+        async move {
+            supervise_realtime_with_status(
+                source.as_ref(),
+                &engine,
+                backoff(Duration::from_secs(10), Duration::from_secs(600)),
+                CancellationToken::new(),
+                &status,
+            )
+            .await
+        }
+    });
+    // Runs 1-3 reset immediately; the 4th and 5th gap wait 10s and 20s before the next session.
+    while source.runs.load(Ordering::SeqCst) < 4 {
+        source.entered.notified().await;
+    }
+    assert_eq!(started.elapsed(), Duration::ZERO);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let degraded = status.get();
+    assert_eq!(degraded.state, ComponentState::Degraded);
+    assert!(degraded.detail.unwrap().contains("backing off 10000 ms"));
+    while source.runs.load(Ordering::SeqCst) < 6 {
+        source.entered.notified().await;
+    }
+    assert_eq!(started.elapsed(), Duration::from_secs(30));
+    assert_eq!(status.get().state, ComponentState::Running);
+}
+
+struct BacklogSource {
+    live: std::sync::atomic::AtomicBool,
+    entered: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl RealtimeSource for BacklogSource {
+    async fn run_once(&self, cancel: CancellationToken) -> Result<(), RealtimeSourceError> {
+        self.entered.notify_one();
+        cancel.cancelled().await;
+        Ok(())
+    }
+    fn is_live(&self) -> bool {
+        self.live.load(Ordering::SeqCst)
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn status_is_catching_up_until_the_session_reads_live_updates() {
+    let store = Arc::new(Store::default());
+    let engine = Arc::new(engine(&store, Gateway::new(1..=1), 5));
+    let source = Arc::new(BacklogSource {
+        live: false.into(),
+        entered: tokio::sync::Notify::new(),
+    });
+    let status = CollectorStatusHandle::new(ComponentStatus::disabled());
+    let cancel = CancellationToken::new();
+    let task = tokio::spawn({
+        let (source, engine, cancel, status) = (
+            source.clone(),
+            engine.clone(),
+            cancel.clone(),
+            status.clone(),
+        );
+        async move {
+            supervise_realtime_with_status(
+                source.as_ref(),
+                &engine,
+                ReconnectBackoff::default(),
+                cancel,
+                &status,
+            )
+            .await
+        }
+    });
+    source.entered.notified().await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let waiting = status.get();
+    assert_eq!(waiting.state, ComponentState::CatchingUp);
+    assert!(waiting.detail.unwrap().contains("backlog"));
+    source.live.store(true, Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(status.get().state, ComponentState::Running);
+    cancel.cancel();
+    task.await.unwrap().unwrap();
 }

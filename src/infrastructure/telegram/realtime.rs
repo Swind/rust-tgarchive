@@ -1,4 +1,10 @@
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::HashSet,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use chrono::Utc;
 use grammers_client::{
@@ -8,19 +14,23 @@ use grammers_client::{
     tl,
     update::Update,
 };
-use grammers_session::updates::State;
+use grammers_session::{
+    Session,
+    types::{UpdateState, UpdatesState},
+    updates::State,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     application::{
         AccountDeletion, IngestBatch, IngestRecord, MessageSource, RepositoryError, TrackingScope,
         ingestion_worker::IngestSink,
-        realtime::{RealtimeSource, RealtimeSourceError, is_empty, restrict_to_tracked},
+        realtime::{GapScope, RealtimeSource, RealtimeSourceError, is_empty, restrict_to_tracked},
     },
     domain::{Chat, ChatKind, MessageEvent, MessageId},
 };
 
-use super::{mapper, session::TelegramAdapter};
+use super::{file_session::FileSession, mapper, session::TelegramAdapter};
 
 #[derive(Debug, thiserror::Error)]
 pub enum RealtimeError {
@@ -33,7 +43,7 @@ pub enum RealtimeError {
     #[error(
         "Telegram difference is too old; reconciliation is required before realtime can continue"
     )]
-    DifferenceTooLong,
+    DifferenceTooLong(Option<i64>),
     #[error("could not map Telegram update: {0}")]
     Mapping(#[from] mapper::MappingError),
     #[error("archive ingestion failed: {0}")]
@@ -185,6 +195,11 @@ pub trait RealtimeConnection: Send {
     async fn run(&mut self, cancel: CancellationToken) -> Result<(), ConnectionFailure>;
     /// Stops the sender pool and waits until it, and the session owner lock, are released.
     async fn teardown(&mut self);
+    /// True while the connection waits for socket updates; false while it still works through
+    /// pending Telegram differences. `None` means there is nothing to wait for.
+    fn live_flag(&self) -> Option<Arc<AtomicBool>> {
+        None
+    }
 }
 
 /// Builds a fresh connection. It is only called after the previous one was torn down.
@@ -201,6 +216,7 @@ pub trait RealtimeConnector: Send + Sync {
 pub struct ReconnectingSource<C: RealtimeConnector> {
     connector: C,
     connection: tokio::sync::Mutex<Option<C::Connection>>,
+    live: std::sync::Mutex<Arc<AtomicBool>>,
 }
 
 impl<C: RealtimeConnector> ReconnectingSource<C> {
@@ -208,14 +224,20 @@ impl<C: RealtimeConnector> ReconnectingSource<C> {
         Self {
             connector,
             connection: tokio::sync::Mutex::new(None),
+            live: std::sync::Mutex::new(Arc::new(AtomicBool::new(false))),
         }
     }
 }
 
 #[async_trait::async_trait]
 impl<C: RealtimeConnector> RealtimeSource for ReconnectingSource<C> {
+    fn is_live(&self) -> bool {
+        self.live.lock().expect("live lock").load(Ordering::SeqCst)
+    }
+
     async fn run_once(&self, cancel: CancellationToken) -> Result<(), RealtimeSourceError> {
         let mut slot = self.connection.lock().await;
+        *self.live.lock().expect("live lock") = Arc::new(AtomicBool::new(false));
         if slot.is_none() {
             if cancel.is_cancelled() {
                 return Ok(());
@@ -230,6 +252,9 @@ impl<C: RealtimeConnector> RealtimeSource for ReconnectingSource<C> {
             *slot = Some(connection);
         }
         let connection = slot.as_mut().expect("connection was just ensured");
+        *self.live.lock().expect("live lock") = connection
+            .live_flag()
+            .unwrap_or_else(|| Arc::new(AtomicBool::new(true)));
         match connection.run(cancel).await {
             Ok(()) => Ok(()),
             Err(failure) => {
@@ -332,6 +357,29 @@ impl RealtimeConnection for AdapterConnection {
         .await
         {
             Ok(()) => Ok(()),
+            Err(RealtimeError::DifferenceTooLong(channel)) => {
+                // The stream cannot continue: Grammers would request the same difference again.
+                // Persist Telegram's current state, then rebuild the stream from it.
+                let fresh = match channel {
+                    Some(_) => None,
+                    None => Some(fetch_current_state(&client).await.map_err(|error| {
+                        ConnectionFailure {
+                            error: classify(error),
+                            reusable: false,
+                        }
+                    })?),
+                };
+                reset_session_state(&self.adapter.session, channel, fresh)
+                    .await
+                    .map_err(|error| ConnectionFailure {
+                        error: classify(error),
+                        reusable: false,
+                    })?;
+                Err(ConnectionFailure {
+                    error: classify(RealtimeError::DifferenceTooLong(channel)),
+                    reusable: false,
+                })
+            }
             Err(error) => {
                 let dropped = matches!(
                     error,
@@ -344,10 +392,20 @@ impl RealtimeConnection for AdapterConnection {
         }
     }
 
+    /// Stops the pool, then immediately starts a fresh one. Catch-up and history calls use the
+    /// adapter's current client between sessions, so it must never be a stopped pool; `connect`
+    /// picks up the fresh pool's update receiver.
     async fn teardown(&mut self) {
         if let Err(error) = self.adapter.shutdown().await {
             tracing::warn!(%error, "Telegram sender pool did not stop cleanly");
         }
+        if let Err(error) = self.adapter.reconnect().await {
+            tracing::warn!(%error, "could not rebuild Telegram sender pool; retrying on connect");
+        }
+    }
+
+    fn live_flag(&self) -> Option<Arc<AtomicBool>> {
+        Some(self.stream.live_flag())
     }
 }
 
@@ -363,8 +421,56 @@ pub fn classify(error: RealtimeError) -> RealtimeSourceError {
         RealtimeError::Telegram(Invocation::Rpc(ref rpc)) if rpc.code == 420 || rpc.code >= 500 => {
             RealtimeSourceError::Transient(message)
         }
+        RealtimeError::DifferenceTooLong(None) => RealtimeSourceError::GapReset(GapScope::Account),
+        RealtimeError::DifferenceTooLong(Some(id)) => {
+            match grammers_session::types::PeerId::channel(id)
+                .ok_or(mapper::MappingError::InvalidPeerId)
+                .and_then(mapper::chat_id)
+            {
+                Ok(chat) => RealtimeSourceError::GapReset(GapScope::Channel(chat)),
+                Err(_) => RealtimeSourceError::GapReset(GapScope::Account),
+            }
+        }
         _ => RealtimeSourceError::Fatal(message),
     }
+}
+
+/// Telegram's current common update state (`updates.getState`), without channel states.
+async fn fetch_current_state(client: &Client) -> Result<UpdatesState, RealtimeError> {
+    let tl::enums::updates::State::State(state) =
+        client.invoke(&tl::functions::updates::GetState {}).await?;
+    Ok(UpdatesState {
+        pts: state.pts,
+        qts: state.qts,
+        date: state.date,
+        seq: state.seq,
+        channels: Vec::new(),
+    })
+}
+
+/// Persists the post-gap update state. Account-wide: the fresh common state with all channel
+/// states dropped (Grammers re-initializes a channel from its next update, exactly as it does
+/// for a channel it has not seen). Channel-scoped: only that channel's entry is dropped.
+/// Messages in the skipped gap are recovered for tracked chats by message-level catch-up.
+async fn reset_session_state(
+    session: &FileSession,
+    channel: Option<i64>,
+    fresh: Option<UpdatesState>,
+) -> Result<(), RealtimeError> {
+    let checkpoint = |error: &dyn std::fmt::Display| RealtimeError::Checkpoint(error.to_string());
+    let state = match (fresh, channel) {
+        (Some(fresh), _) => fresh,
+        (None, Some(id)) => {
+            let mut state = session.updates_state().await.map_err(|e| checkpoint(&e))?;
+            state.channels.retain(|c| c.id != id);
+            state
+        }
+        (None, None) => return Err(RealtimeError::Checkpoint("no fresh state".into())),
+    };
+    session
+        .set_update_state(UpdateState::All(state))
+        .await
+        .map_err(|e| checkpoint(&e))
 }
 
 async fn process_stream(
@@ -413,7 +519,14 @@ fn map_stream_error(error: grammers_client::InvocationError) -> RealtimeError {
         grammers_client::InvocationError::Rpc(ref rpc)
             if rpc.name == grammers_client::client::ARCHIVE_DIFFERENCE_TOO_LONG =>
         {
-            RealtimeError::DifferenceTooLong
+            RealtimeError::DifferenceTooLong(None)
+        }
+        grammers_client::InvocationError::Rpc(ref rpc)
+            if grammers_client::client::archive_too_long_channel_id(&rpc.name).is_some() =>
+        {
+            RealtimeError::DifferenceTooLong(grammers_client::client::archive_too_long_channel_id(
+                &rpc.name,
+            ))
         }
         error => RealtimeError::Telegram(error),
     }
@@ -847,13 +960,142 @@ mod tests {
         }
         for fatal in [
             rpc(401, "AUTH_KEY_UNREGISTERED"),
-            RealtimeError::DifferenceTooLong,
             RealtimeError::ReceiverUnavailable,
             RealtimeError::Archive(RepositoryError::Unavailable("disk".into())),
             RealtimeError::Checkpoint("write".into()),
         ] {
             assert!(matches!(classify(fatal), RealtimeSourceError::Fatal(_)));
         }
+    }
+
+    #[test]
+    fn difference_too_long_is_a_reconciliation_not_a_fatal_error() {
+        // Formerly asserted fatal; it is now recoverable by resetting state and catching up.
+        assert!(matches!(
+            classify(RealtimeError::DifferenceTooLong(None)),
+            RealtimeSourceError::GapReset(GapScope::Account)
+        ));
+        let channel = crate::domain::ChatId::from_telegram(ChatKind::Channel, 77).unwrap();
+        assert_eq!(
+            classify(RealtimeError::DifferenceTooLong(Some(77))),
+            RealtimeSourceError::GapReset(GapScope::Channel(channel))
+        );
+    }
+
+    #[test]
+    fn synthetic_errors_map_to_their_scope() {
+        use grammers_client::sender::RpcError;
+        let rpc = |name: String| {
+            grammers_client::InvocationError::Rpc(RpcError {
+                code: 500,
+                name,
+                value: None,
+                caused_by: None,
+            })
+        };
+        assert!(matches!(
+            map_stream_error(rpc(
+                grammers_client::client::ARCHIVE_DIFFERENCE_TOO_LONG.into()
+            )),
+            RealtimeError::DifferenceTooLong(None)
+        ));
+        let name = format!(
+            "{}_1234567890123",
+            grammers_client::client::ARCHIVE_CHANNEL_DIFFERENCE_TOO_LONG
+        );
+        assert!(matches!(
+            map_stream_error(rpc(name)),
+            RealtimeError::DifferenceTooLong(Some(1_234_567_890_123))
+        ));
+    }
+
+    fn state(pts: i32, channels: &[(i64, i32)]) -> UpdatesState {
+        UpdatesState {
+            pts,
+            qts: 1,
+            date: 10,
+            seq: 2,
+            channels: channels
+                .iter()
+                .map(|&(id, pts)| grammers_session::types::ChannelState { id, pts })
+                .collect(),
+        }
+    }
+
+    #[tokio::test]
+    async fn account_reset_persists_fresh_state_and_drops_channel_states() {
+        let (_dir, path) = session_path();
+        let session = FileSession::open(&path).await.unwrap();
+        session
+            .set_update_state(UpdateState::All(state(5, &[(1, 3), (2, 4)])))
+            .await
+            .unwrap();
+        reset_session_state(&session, None, Some(state(900, &[])))
+            .await
+            .unwrap();
+        drop(session);
+        let reopened = FileSession::open(&path).await.unwrap();
+        assert_eq!(reopened.updates_state().await.unwrap(), state(900, &[]));
+    }
+
+    #[tokio::test]
+    async fn channel_reset_drops_only_that_channel_and_persists() {
+        let (_dir, path) = session_path();
+        let session = FileSession::open(&path).await.unwrap();
+        session
+            .set_update_state(UpdateState::All(state(5, &[(1, 3), (2, 4)])))
+            .await
+            .unwrap();
+        reset_session_state(&session, Some(1), None).await.unwrap();
+        drop(session);
+        let reopened = FileSession::open(&path).await.unwrap();
+        assert_eq!(reopened.updates_state().await.unwrap(), state(5, &[(2, 4)]));
+    }
+
+    /// The Grammers message box drives the stream: socket updates are read only once no
+    /// difference is pending. A reset that drops channel X leaves the common box intact, so
+    /// after the remaining differences finish, a common-box update is yielded.
+    #[test]
+    fn after_a_channel_reset_pending_differences_gate_live_updates_then_common_updates_flow() {
+        use grammers_session::updates::{MessageBoxes, UpdatesLike};
+        let mut boxes = MessageBoxes::load(state(10, &[(2, 4)]));
+        // Common and the remaining channel are still catching up: nothing is read from the socket.
+        assert!(boxes.get_difference().is_some());
+        boxes.apply_difference(tl::types::updates::DifferenceEmpty { date: 11, seq: 2 }.into());
+        assert!(boxes.get_difference().is_none());
+        assert!(boxes.get_channel_difference().is_some());
+        boxes.apply_channel_difference(
+            tl::types::updates::ChannelDifferenceEmpty {
+                r#final: true,
+                pts: 4,
+                timeout: None,
+            }
+            .into(),
+        );
+        assert!(boxes.get_channel_difference().is_none());
+
+        let update = tl::enums::Update::NewMessage(tl::types::UpdateNewMessage {
+            message: tl::types::MessageEmpty {
+                id: 1,
+                peer_id: None,
+            }
+            .into(),
+            pts: 11,
+            pts_count: 1,
+        });
+        let (updates, _, _) = boxes
+            .process_updates(UpdatesLike::Updates(tl::enums::Updates::Updates(
+                tl::types::Updates {
+                    updates: vec![update],
+                    users: vec![],
+                    chats: vec![],
+                    date: 12,
+                    seq: 0,
+                },
+            )))
+            .unwrap();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(boxes.session_state().pts, 11);
     }
 
     type Log = Arc<Mutex<Vec<String>>>;

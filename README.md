@@ -114,6 +114,32 @@ cargo run -q -- openapi --format yaml > openapi.yml
 
 session 檔有 owner lock（`<session>.lock`）。同時執行 `serve`、`auth login`、`chats refresh`、`sync ...` 等需要 Telegram 的程序，後者會因衝突而失敗。請先停止 `serve`，或改用 REST 觸發（`POST /api/v1/chats/refresh`、`/api/v1/sync`）。
 
+## 真實帳號驗收測試
+
+`tests/live_telegram.rs` 以真實帳號自動驗收即時收集、離線缺口補回、重啟冪等與未 track 隔離（取代手機人工操作）。預設 `#[ignore]` 且缺環境變數時直接跳過。
+
+使用**同一帳號的兩個 session**：archive session（`TELEGRAM_SESSION_FILE`，由測試啟動的 `serve` 使用）與獨立的 driver session（`TELEGRAM_DRIVER_SESSION_FILE`，只負責送出／編輯／刪除測試訊息，絕不使用 archive session，以免推進其 update 狀態而使缺口測試失真）。
+
+一次性登入 driver（互動輸入驗證碼）：
+
+```sh
+scripts/login-driver.sh   # 寫入 TELEGRAM_DRIVER_SESSION_FILE（預設 ./telegram-driver.session）
+```
+
+必要環境變數：`TELEGRAM_API_ID`、`TELEGRAM_API_HASH`、`TELEGRAM_SESSION_FILE`、`TELEGRAM_DRIVER_SESSION_FILE`、`LIVE_TEST_CHAT_ID`（bot-API 風格 id，如 `-4893203104`），並設 `LIVE_TELEGRAM=1`。若測試聊天室是 supergroup／channel 另需 `LIVE_TEST_ALLOW_CHANNEL=1`。
+
+```sh
+set -a; . ./.env; set +a; LIVE_TELEGRAM=1 LIVE_TEST_CHAT_ID=-4893203104 cargo test --test live_telegram -- --ignored --nocapture --test-threads=1
+```
+
+注意：
+
+- **會在 `LIVE_TEST_CHAT_ID` 這個聊天室真的送出、編輯、刪除訊息**（文字皆以 `[archive-live <run_id>]` 開頭，只動本次建立的訊息；結束時盡力刪除剩餘者）。請用專用測試聊天室。
+- 測試會 `sync chat` 該聊天室既有歷史到暫存資料庫，歷史很長時會較久。
+- 測試使用全新暫存資料庫，不碰你的 `telegram.db`。
+- 執行前**不可**有 archive `serve`（或任何使用同一 archive session 的程序）在跑（owner lock）。
+- 失敗時會印出 serve 日誌尾段（已遮蔽 api_hash／手機號碼）。
+
 ## 備份與安全
 
 資料庫使用 WAL，**不要只用 `cp telegram.db`**（會漏掉 `-wal` 內容）。使用 SQLite 一致性備份：
@@ -133,6 +159,7 @@ sqlite3 telegram.db "VACUUM INTO 'backup.db'"
 - 重啟或斷線後會進行 catch-up（分輪、分頁、與 checkpoint 同交易提交），並在行程內自動重連（指數 backoff，上限 60 秒）。
 - 採 **at-least-once** 重新處理，以 upsert 保持冪等。**不宣稱 exactly-once 或零遺失。**
 - 一般（非 channel）刪除事件沒有聊天室資訊，可能有歧義：僅在能對應到已存檔且已 track 的訊息時才標記，否則計入 `unresolved_deletions`。
+- 離線過久（Telegram 回報 update gap 過長）時會自動重設 update 狀態並對 tracked 聊天室 catch-up：狀態短暫顯示 `degraded`，完成後回到 `running` 並附說明與次數。gap 期間較舊訊息的**編輯與刪除可能遺漏**；短時間內重複發生會 backoff。
 - 未 track 的聊天室的更新一律忽略。
 - 刪除事件若早於訊息存檔到達，不會被記住。
 - 真實帳號的即時更新、離線缺口補回、真實斷網重連與基本群組尚待人工驗收，見 [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md)。

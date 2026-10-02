@@ -92,3 +92,5 @@ Phase 8 supervisor／catch-up：`serve`（已設定 Telegram）啟動 realtime t
 P9-T01/T02 自動證據：readiness 在 DB 不可用或 collector `failed` 回 503；status 含 `unresolved_deletions`；30 秒請求逾時、body／query 上限、request id；INFO 日誌不含查詢文字或 api_hash 的 test；`TelegramConfig` Debug 遮蔽 api_hash；錯誤的 DB／session 路徑與非 loopback bind 啟動失敗並附修正提示。
 
 仍 pending（不以 fake tests 取代）：真實即時 new/edit/delete、離線缺口補回、真實斷網重連、update 負載測試、基本群組、fresh-install 走讀。
+
+Update-gap reconciliation：`differenceTooLong`／`channelDifferenceTooLong`（離線過久）不再致命。adapter 重設 `FileSession` update state（account：`updates.getState`＋清除 channel states；channel：移除該 channel），重建 stream，supervisor 對 tracked chats 做 message-level catch-up（untracked channel 不 catch-up），狀態 `degraded`→`running`（附說明與次數）；3 次／10 分鐘後以 backoff 避免空轉。fake 測試涵蓋 account／channel（tracked／untracked）／重複／FileSession 持久化／狀態轉換；真實帳號尚未驗證。限制：gap 期間較舊訊息的編輯與刪除可能遺漏。
