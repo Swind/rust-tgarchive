@@ -67,6 +67,7 @@ impl IngestionService {
             }],
             checkpoint: input.checkpoint,
             job_progress: input.job_progress,
+            ..IngestBatch::default()
         })
         .await
     }

@@ -9,6 +9,8 @@ use grammers_client::{
 use grammers_session::{Session, types::PeerRef};
 use tokio::{sync::Mutex as AsyncMutex, task::JoinHandle};
 
+use crate::{application::TelegramError, domain::SenderId};
+
 use super::file_session::FileSession;
 use super::owner_lock::AccountOwnerLock;
 
@@ -68,6 +70,16 @@ impl TelegramAdapter {
         self.client.is_authorized().await
     }
 
+    /// Resolves and validates the authenticated user identity for archive binding.
+    pub async fn authenticated_account_id(&self) -> Result<SenderId, TelegramError> {
+        let user = self.client.get_me().await.map_err(|error| {
+            TelegramError::Unavailable(format!("could not resolve Telegram account: {error}"))
+        })?;
+        super::mapper::sender_id(user.id()).map_err(|error| {
+            TelegramError::Unavailable(format!("invalid Telegram account identity: {error}"))
+        })
+    }
+
     pub(crate) async fn resolve_chat(
         &self,
         marked_id: i64,
@@ -113,6 +125,12 @@ pub(crate) enum ResolvePeerError {
     Telegram(#[source] grammers_client::InvocationError),
 }
 
+fn lock_path(session_path: &Path) -> PathBuf {
+    let mut lock_name = session_path.as_os_str().to_owned();
+    lock_name.push(".lock");
+    PathBuf::from(lock_name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,10 +152,4 @@ mod tests {
         adapter.shutdown().await.unwrap();
         let _ = std::fs::remove_file(path);
     }
-}
-
-fn lock_path(session_path: &Path) -> PathBuf {
-    let mut lock_name = session_path.as_os_str().to_owned();
-    lock_name.push(".lock");
-    PathBuf::from(lock_name)
 }

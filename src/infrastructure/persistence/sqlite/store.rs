@@ -29,6 +29,40 @@ impl SqliteStore {
     pub async fn close(&self) {
         self.pool.close().await;
     }
+
+    /// Binds this single-account archive to a Telegram user and rejects reuse for another user.
+    pub async fn bind_telegram_account(&self, user_id: SenderId) -> Result<(), RepositoryError> {
+        if user_id.get() <= 0 {
+            return Err(invalid_data("Telegram account identity must be a user ID"));
+        }
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("INSERT OR IGNORE INTO telegram_account_identity(singleton, user_id, bound_at) VALUES (1, ?, unixepoch())")
+            .bind(user_id.get())
+            .execute(&mut *tx)
+            .await?;
+        let saved: i64 =
+            sqlx::query_scalar("SELECT user_id FROM telegram_account_identity WHERE singleton=1")
+                .fetch_one(&mut *tx)
+                .await?;
+        if saved != user_id.get() {
+            return Err(invalid_data(format!(
+                "archive is bound to Telegram user {saved}, not {}",
+                user_id.get()
+            )));
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Number of account-wide deletion IDs that do not resolve to exactly one common-chat row.
+    pub async fn unresolved_common_deletion_count(&self) -> Result<u64, RepositoryError> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM (SELECT t.message_id FROM common_message_tombstones t LEFT JOIN messages m ON m.message_id=t.message_id AND m.chat_id > -1000000000000 GROUP BY t.message_id HAVING COUNT(m.row_id) != 1)",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        u64::try_from(count).map_err(invalid_data)
+    }
 }
 
 impl SqliteStore {
@@ -218,6 +252,38 @@ async fn save_progress(
 impl ArchiveWriter for SqliteStore {
     async fn write_batch(&self, batch: IngestBatch) -> Result<(), RepositoryError> {
         let mut tx = self.pool.begin().await?;
+        if !batch.account_deletions.is_empty() {
+            let bound: Option<i64> = sqlx::query_scalar(
+                "SELECT user_id FROM telegram_account_identity WHERE singleton=1",
+            )
+            .fetch_optional(&mut *tx)
+            .await?;
+            if bound.is_none() {
+                return Err(invalid_data(
+                    "bind the Telegram account before writing account-wide deletions",
+                ));
+            }
+            for deletion in &batch.account_deletions {
+                sqlx::query("INSERT INTO common_message_tombstones(message_id, deleted_at) VALUES (?, ?) ON CONFLICT(message_id) DO UPDATE SET deleted_at=MAX(common_message_tombstones.deleted_at, excluded.deleted_at)")
+                    .bind(deletion.message_id.get())
+                    .bind(seconds(deletion.deleted_at))
+                    .execute(&mut *tx)
+                    .await?;
+                let matches: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM messages WHERE message_id=? AND chat_id > -1000000000000",
+                )
+                .bind(deletion.message_id.get())
+                .fetch_one(&mut *tx)
+                .await?;
+                if matches == 1 {
+                    sqlx::query("UPDATE messages SET is_deleted=1, deleted_at=MAX(COALESCE(deleted_at, 0), ?), updated_at=unixepoch() WHERE message_id=? AND chat_id > -1000000000000")
+                        .bind(seconds(deletion.deleted_at))
+                        .bind(deletion.message_id.get())
+                        .execute(&mut *tx)
+                        .await?;
+                }
+            }
+        }
         for chat in &batch.chats {
             save_chat(&mut tx, chat).await?;
         }
@@ -249,10 +315,11 @@ impl ArchiveWriter for SqliteStore {
                         } else {
                             0
                         };
-                    let result = sqlx::query("INSERT INTO messages(chat_id, message_id, sender_id, timestamp, edited_at, collected_at, created_at, updated_at, text, reply_to, version_at, source_priority) SELECT ?, ?, ?, ?, ?, ?, unixepoch(), unixepoch(), ?, ?, ?, ? WHERE NOT EXISTS(SELECT 1 FROM message_tombstones WHERE chat_id=? AND message_id=?) ON CONFLICT(chat_id, message_id) DO UPDATE SET sender_id=excluded.sender_id, timestamp=excluded.timestamp, edited_at=excluded.edited_at, collected_at=excluded.collected_at, updated_at=unixepoch(), text=excluded.text, reply_to=excluded.reply_to, version_at=excluded.version_at, source_priority=excluded.source_priority WHERE (excluded.version_at > messages.version_at OR (excluded.version_at = messages.version_at AND excluded.source_priority >= messages.source_priority)) AND messages.is_deleted=0")
+                    let result = sqlx::query("INSERT INTO messages(chat_id, message_id, sender_id, timestamp, edited_at, collected_at, created_at, updated_at, text, reply_to, version_at, source_priority) SELECT ?, ?, ?, ?, ?, ?, unixepoch(), unixepoch(), ?, ?, ?, ? WHERE NOT EXISTS(SELECT 1 FROM message_tombstones WHERE chat_id=? AND message_id=?) AND NOT (? > -1000000000000 AND EXISTS(SELECT 1 FROM common_message_tombstones WHERE message_id=?)) ON CONFLICT(chat_id, message_id) DO UPDATE SET sender_id=excluded.sender_id, timestamp=excluded.timestamp, edited_at=excluded.edited_at, collected_at=excluded.collected_at, updated_at=unixepoch(), text=excluded.text, reply_to=excluded.reply_to, version_at=excluded.version_at, source_priority=excluded.source_priority WHERE (excluded.version_at > messages.version_at OR (excluded.version_at = messages.version_at AND excluded.source_priority >= messages.source_priority)) AND messages.is_deleted=0")
                         .bind(message.chat_id.get()).bind(message.id.get()).bind(message.sender_id.map(SenderId::get))
                         .bind(seconds(message.timestamp)).bind(message.edited_at.map(seconds)).bind(seconds(message.collected_at))
                         .bind(&message.text).bind(message.reply_to.map(MessageId::get)).bind(version).bind(priority)
+                        .bind(message.chat_id.get()).bind(message.id.get())
                         .bind(message.chat_id.get()).bind(message.id.get())
                         .execute(&mut *tx).await?;
                     if result.rows_affected() > 0 {

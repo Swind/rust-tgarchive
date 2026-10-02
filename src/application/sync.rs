@@ -121,6 +121,7 @@ impl SyncEngine {
                     records: page.records,
                     checkpoint: Some((chat_id, next_checkpoint.clone())),
                     job_progress: Some(progress),
+                    ..IngestBatch::default()
                 })
                 .await?;
             committed += count;

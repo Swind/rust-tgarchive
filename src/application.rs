@@ -255,8 +255,17 @@ pub struct IngestBatch {
     pub chats: Vec<Chat>,
     pub senders: Vec<Sender>,
     pub records: Vec<IngestRecord>,
+    /// Account-wide deletions whose Telegram updates omit the originating peer.
+    /// The archive must already be bound to the matching Telegram account.
+    pub account_deletions: Vec<AccountDeletion>,
     pub checkpoint: Option<(ChatId, ChatCheckpoint)>,
     pub job_progress: Option<SyncChatProgress>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountDeletion {
+    pub message_id: MessageId,
+    pub deleted_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
