@@ -31,6 +31,14 @@ Then commit the generated `Cargo.lock` with implementation changes. The expected
 
 ## Sources
 
+## Verified compatibility pin
+
+Phase 6 的隔離 compile spike 已確認 Grammers client/session 0.10.0（官方 SQLite session）與 SQLx 0.8.6 bundled SQLite 可以同時編譯，未出現 native SQLite link conflict。這不是登入或網路驗收。
+
+Fresh resolution 發現 grammers-crypto 0.10.0 的 `glass_pumpkin` prerelease range 會選到 rc1，該版本的 bigint/check API 與 Grammers 預期不相容。因此 manifest 明確固定 `glass_pumpkin = "=2.0.0-rc0"`；使用此 pin 的 spike 編譯通過。升級 Grammers 時再檢查是否可以移除此相容性 pin。
+
+## Source links
+
 - [Tokio crate docs (1.53.1)](https://docs.rs/tokio/latest/tokio/)
 - [Axum crate docs (0.8.9)](https://docs.rs/axum/latest/axum/)
 - [SQLx 0.8.6 published manifest](https://docs.rs/crate/sqlx/0.8.6/source/Cargo.toml)
