@@ -205,10 +205,10 @@ Search V1 為 literal text search：空白分割 term，正確 escape FTS 引號
 
 相依：Phase 3–4。交付本地 archive 查詢 API，sync routes 延至 Phase 7。
 
-- [ ] **P5-T01：REST DTO/error。** shared query conversion、response models、error envelope、extractor rejection。驗收：400/404/503/500 的 status 與 shape，內部 SQL／秘密不曝光。
-- [ ] **P5-T02：Query routes。** status/chats/messages/list/search/get、localhost `serve` 查詢模式。驗收：router tests 使用 application fakes；尚未接 Telegram 時 collector 明示 disabled。
-- [ ] **P5-T03：OpenAPI。** utoipa、`/openapi.json`、`/openapi.yml`、CLI openapi export，Swagger UI 可省略。驗收：不設 Telegram env／DB 也可 export，JSON/YAML parse、schema/route 一致。
-- [ ] **P5-T04：REST 基本限制。** request tracing、body/query limits、request ID、localhost bind validation。驗收：malformed JSON/query 統一錯誤；非 loopback bind 被拒絕。
+- [x] **P5-T01：REST DTO/error。** shared query conversion、response models、error envelope、extractor rejection。驗收：400/404/503/500 的 status 與 shape，內部 SQL／秘密不曝光。
+- [x] **P5-T02：Query routes。** status/chats/messages/list/search/get、localhost `serve` 查詢模式。驗收：router tests 使用 application fakes；尚未接 Telegram 時 collector 明示 disabled。
+- [x] **P5-T03：OpenAPI。** utoipa、`/openapi.json`、`/openapi.yml`、CLI openapi export，Swagger UI 可省略。驗收：不設 Telegram env／DB 也可 export，JSON/YAML parse、schema/route 一致。
+- [x] **P5-T04：REST 基本限制。** request tracing、body/query limits、request ID、localhost bind validation。驗收：malformed JSON/query 統一錯誤；非 loopback bind 被拒絕。
 
 **Phase gate：** REST/CLI 同一 fixture 的查詢結果一致，OpenAPI 描述已實作 routes。
 

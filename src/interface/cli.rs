@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
+use std::net::SocketAddr;
 use thiserror::Error;
 
 use crate::{
@@ -42,10 +43,24 @@ pub enum Command {
         command: MessagesCommand,
     },
     Status,
+    Serve {
+        #[arg(long)]
+        bind: Option<SocketAddr>,
+    },
+    Openapi {
+        #[arg(long, value_enum, default_value = "json")]
+        format: OpenApiCliFormat,
+    },
     Db {
         #[command(subcommand)]
         command: DatabaseCommand,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum OpenApiCliFormat {
+    Json,
+    Yaml,
 }
 
 #[derive(Debug, Subcommand)]
@@ -105,6 +120,10 @@ pub enum CliError {
     InvalidInput(String),
     #[error("database error: {0}")]
     Database(String),
+    #[error("REST server error: {0}")]
+    Server(String),
+    #[error("OpenAPI export error: {0}")]
+    OpenApi(String),
     #[error("{0}")]
     Application(#[from] ApplicationError),
     #[error("{0}")]
@@ -145,6 +164,12 @@ pub enum PreparedInvocation {
         output: OutputFormat,
         command: PreparedCommand,
     },
+    Serve {
+        bind: Option<SocketAddr>,
+    },
+    OpenApi {
+        format: OpenApiCliFormat,
+    },
 }
 
 pub enum PreparedCommand {
@@ -165,6 +190,8 @@ pub fn prepare(cli: Cli) -> Result<PreparedInvocation, CliError> {
             output,
             database_url,
         }),
+        Command::Serve { bind } => Ok(PreparedInvocation::Serve { bind }),
+        Command::Openapi { format } => Ok(PreparedInvocation::OpenApi { format }),
         command => Ok(PreparedInvocation::Query {
             output,
             command: prepare_query(command)?,
@@ -194,6 +221,9 @@ fn prepare_query(command: Command) -> Result<PreparedCommand, CliError> {
             )),
         },
         Command::Status => Ok(PreparedCommand::Status),
+        Command::Serve { .. } | Command::Openapi { .. } => {
+            unreachable!("non-query commands are handled during preparation")
+        }
         Command::Db { .. } => unreachable!("database initialization is handled separately"),
     }
 }

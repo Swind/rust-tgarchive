@@ -100,6 +100,32 @@ fn help_and_bad_arguments_need_no_database_or_telegram_credentials() {
         .unwrap();
     assert!(!bad_cursor.status.success());
     assert!(String::from_utf8_lossy(&bad_cursor.stderr).contains("cursor is malformed"));
+
+    let openapi = Command::new(BIN)
+        .env_clear()
+        .arg("openapi")
+        .output()
+        .unwrap();
+    assert!(openapi.status.success());
+    let document: Value = serde_json::from_slice(&openapi.stdout).unwrap();
+    assert!(document["paths"].get("/api/v1/messages").is_some());
+
+    let yaml = Command::new(BIN)
+        .env_clear()
+        .args(["openapi", "--format", "yaml"])
+        .output()
+        .unwrap();
+    assert!(yaml.status.success());
+    let yaml: Value = serde_norway::from_slice(&yaml.stdout).unwrap();
+    assert!(yaml["paths"].get("/api/v1/messages").is_some());
+
+    let rejected_bind = Command::new(BIN)
+        .env_clear()
+        .args(["serve", "--bind", "0.0.0.0:8080"])
+        .output()
+        .unwrap();
+    assert!(!rejected_bind.status.success());
+    assert!(String::from_utf8_lossy(&rejected_bind.stderr).contains("loopback"));
 }
 
 #[tokio::test]
