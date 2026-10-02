@@ -9,4 +9,4 @@ pub mod domain;
 pub mod interface;
 
 /// Infrastructure adapters are added with their implementation phases.
-pub mod infrastructure {}
+pub mod infrastructure;

@@ -171,12 +171,12 @@ Search V1 為 literal text search：空白分割 term，正確 escape FTS 引號
 
 相依：Phase 1。交付真正可操作的 archive storage。
 
-- [ ] **P2-T01：Database 與 migrations。** connect options、WAL/per-connection pragmas、原表及 tombstones/jobs/checkpoints；connection/migration errors typed。驗收：empty DB 升級成功、再次啟動不重建資料、各 connection FK 生效。
-- [ ] **P2-T02：Atomic ArchiveWriter。** 寫入 metadata/message/attachments/checkpoint，版本判斷與 tombstone；commit 後才回成功。驗收：rollback failure injection，訊息／附件／checkpoint 都不留下半套。
-- [ ] **P2-T03：Read repositories。** chat get/list、message get/list、filters、keyset pagination、soft-delete filtering。驗收：相同 message ID 跨 chat 可並存，雙方向 pagination 同秒資料正確，deleted get 為 None。
-- [ ] **P2-T04：FTS5。** virtual table/triggers、literal query conversion、filter/cursor search。驗收：insert/edit/delete/replay、含引號與 FTS 保留字、空字串、中文 fixture；確認查詢不用 LIKE 作主路徑。
-- [ ] **P2-T05：Sync/job repositories。** job transition、逐 chat progress、checkpoint 讀寫、啟動時 interrupted recovery。驗收：history 與 catch-up cursor 各自更新，不被 realtime newest 污染。
-- [ ] **P2-T06：持久化驗收。** 以臨時 file DB 測 WAL、多連線讀寫、close/reopen、migration、query plan；單 connection memory DB 可用於局部測試。验收：P2-T01–05 邊界全部在真 SQLite 通過。
+- [x] **P2-T01：Database 與 migrations。** connect options、WAL/per-connection pragmas、原表及 tombstones/jobs/checkpoints；connection/migration errors typed。驗收：empty DB 升級成功、再次啟動不重建資料、各 connection FK 生效。
+- [x] **P2-T02：Atomic ArchiveWriter。** 寫入 metadata/message/attachments/checkpoint，版本判斷與 tombstone；commit 後才回成功。驗收：rollback failure injection，訊息／附件／checkpoint 都不留下半套。
+- [x] **P2-T03：Read repositories。** chat get/list、message get/list、filters、keyset pagination、soft-delete filtering。驗收：相同 message ID 跨 chat 可並存，雙方向 pagination 同秒資料正確，deleted get 為 None。
+- [x] **P2-T04：FTS5。** virtual table/triggers、literal query conversion、filter/cursor search。驗收：insert/edit/delete/replay、含引號與 FTS 保留字、空字串、中文 fixture；確認查詢不用 LIKE 作主路徑。
+- [x] **P2-T05：Sync/job repositories。** job transition、逐 chat progress、checkpoint 讀寫、啟動時 interrupted recovery。驗收：history 與 catch-up cursor 各自更新，不被 realtime newest 污染。
+- [x] **P2-T06：持久化驗收。** 以臨時 file DB 測 WAL、多連線讀寫、close/reopen、migration、query plan；單 connection memory DB 可用於局部測試。验收：P2-T01–05 邊界全部在真 SQLite 通過。
 
 **Phase gate：** 可原子 ingest、查詢、全文搜尋、重啟後保留進度。
 
@@ -184,10 +184,10 @@ Search V1 為 literal text search：空白分割 term，正確 escape FTS 引號
 
 相依：Phase 1–2；application tests 僅使用 fakes。
 
-- [ ] **P3-T01：Ingestion service。** Created/Updated/Deleted 共用 batch 邏輯，metadata、checkpoint 交 writer。驗收：fake writer failure 原樣傳遞、不提前回成功，實際 SQLite 交易沿用 Phase 2。
-- [ ] **P3-T02：Message query services。** Get/List/Search、typed NotFound、query validation。驗收：非法參數在 repository 前被擋，chat/message not found 一致。
-- [ ] **P3-T03：Chat 與 status services。** Get/ListChats、GetSyncStatus、component status model；RefreshChats 契約可用 fake gateway 驗證。驗收：未知 chat、gateway/repository errors、未啟動 collector 的明確狀態。
-- [ ] **P3-T04：Application facade 與測試 fakes。** 共用 service 組合、fake repositories/gateway/writer。驗收：tests 不需網路、SQLite、Axum；沒有只為 wrapper 而建立的 trait。
+- [x] **P3-T01：Ingestion service。** Created/Updated/Deleted 共用 batch 邏輯，metadata、checkpoint 交 writer。驗收：fake writer failure 原樣傳遞、不提前回成功，實際 SQLite 交易沿用 Phase 2。
+- [x] **P3-T02：Message query services。** Get/List/Search、typed NotFound、query validation。驗收：非法參數在 repository 前被擋，chat/message not found 一致。
+- [x] **P3-T03：Chat 與 status services。** Get/ListChats、GetSyncStatus、component status model；RefreshChats 契約可用 fake gateway 驗證。驗收：未知 chat、gateway/repository errors、未啟動 collector 的明確狀態。
+- [x] **P3-T04：Application facade 與測試 fakes。** 共用 service 組合、fake repositories/gateway/writer。驗收：tests 不需網路、SQLite、Axum；沒有只為 wrapper 而建立的 trait。
 
 **Phase gate：** 本地查詢與 ingestion 可經共用 application API 完成。
 
