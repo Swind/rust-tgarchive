@@ -14,7 +14,7 @@
 | 3 Application | accepted | 3 fake-port tests（多項成功／失敗案例）通過 |
 | 4 CLI | accepted | 3 子程序 tests；隔離快照全 21 tests、fmt/clippy 通過 |
 | 5 REST/OpenAPI | in progress | router、schema、export tests |
-| 6 Telegram | in progress | adapter tests + manual login/restart/dialog verification |
+| 6 Telegram | adapter foundation accepted; interface integration pending | 14 adapter tests、clippy 通過；session/lock/auth API/mapper/history gateway 已實作；完整 media fixtures 與 CLI auth/refresh 待補，真實帳號驗收延後 |
 | 7 History | pending | checkpoint、ack、restart、job tests |
 | 8 Realtime | pending | update、shutdown、crash recovery tests + manual verification |
 | 9 Hardening | pending | full checks、README、fresh setup |
@@ -26,6 +26,9 @@
 - `c70f7c3`：Phase 0 來源審查與架構決策。
 - `2fe5276`：Phase 2 SQLite，含 8 integration tests。
 - `80655ef`：Phase 3 共用 services，3 fake-port tests。
+- `8584f07`：CLI/REST/Telegram 相容依賴。
+- `8198b84`：Phase 4 CLI，隔離快照 21 tests、fmt/clippy 通過。
+- Phase 6 adapter foundation：14 tests、clippy 通過；不宣稱即時更新 crash recovery 已完成。
 
 ## Manual acceptance
 
