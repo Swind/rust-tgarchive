@@ -195,9 +195,9 @@ Search V1 為 literal text search：空白分割 term，正確 escape FTS 引號
 
 相依：Phase 3。交付不需要 Telegram 即可使用的查詢工具。
 
-- [ ] **P4-T01：clap 命令與轉換。** chats/messages/status、human/json、negative chat ID 支援；尚未完成的 auth/sync 不回假結果。驗收：`--help`、非法 limit/cursor、負 ID 正確解析。
-- [ ] **P4-T02：command-specific bootstrap。** query 開 DB/repositories/application；config 依模式載入。提供初始化 DB 的明確方式，readonly commands 不執行 migrations。驗收：缺 Telegram env 仍能讀 existing archive；缺 DB 有可操作錯誤。
-- [ ] **P4-T03：handlers 與輸出。** 共用 query use cases、穩定 JSON shape、human 空結果、非零錯誤碼、stderr diagnostics。驗收：CLI smoke tests 用 temporary DB fixtures；stdout JSON 可 parse 且沒有 logs 混入。
+- [x] **P4-T01：clap 命令與轉換。** chats/messages/status、human/json、negative chat ID 支援；尚未完成的 auth/sync 不回假結果。驗收：`--help`、非法 limit/cursor、負 ID 正確解析。
+- [x] **P4-T02：command-specific bootstrap。** query 開 DB/repositories/application；config 依模式載入。提供初始化 DB 的明確方式，readonly commands 不執行 migrations。驗收：缺 Telegram env 仍能讀 existing archive；缺 DB 有可操作錯誤。
+- [x] **P4-T03：handlers 與輸出。** 共用 query use cases、穩定 JSON shape、human 空結果、非零錯誤碼、stderr diagnostics。驗收：CLI smoke tests 用 temporary DB fixtures；stdout JSON 可 parse 且沒有 logs 混入。
 
 **Phase gate：** 可用 CLI 查詢 Phase 2 fixture；無 SQL／grammers 邏輯洩漏到 handlers。
 

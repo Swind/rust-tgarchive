@@ -24,14 +24,17 @@ tokio = { version = "1.53", features = ["macros", "rt-multi-thread", "sync", "ti
 clap = { version = "4.6", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 axum = "0.8"
 utoipa = { version = "5.5", features = ["axum_extras", "chrono", "yaml"] }
 tower-http = { version = "0.6", features = ["request-id", "trace", "limit", "timeout"] }
 grammers-client = { version = "=0.10.0", default-features = false }
-grammers-session = { version = "=0.10.0", features = ["sqlite-storage"] }
+grammers-session = { version = "=0.10.0", default-features = false, features = ["serde"] }
 # Grammers crypto 0.10 expects the rc0 bigint/check API; rc1 is incompatible.
 glass_pumpkin = "=2.0.0-rc0"
 
 [dev-dependencies]
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
+serde_norway = "0.9"
+tokio = { version = "1.53", features = ["test-util"] }

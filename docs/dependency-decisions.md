@@ -29,11 +29,11 @@ cargo tree -i grammers-session
 
 Then commit the generated `Cargo.lock` with implementation changes. The expected checks are one resolved utoipa 5.x line shared by `utoipa-axum`, Axum 0.8.x, Grammers client/session 0.10.x (session reached via client re-export), and no SQLx TLS backend. The current lock/manifest cover only the core skeleton; resolution and compilation of the full future dependency set remain pending.
 
-## Sources
-
 ## Verified compatibility pin
 
-Phase 6 的隔離 compile spike 已確認 Grammers client/session 0.10.0（官方 SQLite session）與 SQLx 0.8.6 bundled SQLite 可以同時編譯，未出現 native SQLite link conflict。這不是登入或網路驗收。
+Phase 6 的隔離 `cargo check` spike 曾成功編譯 Grammers client/session 0.10.0（官方 SQLite session）與 SQLx 0.8.6。然而 `cargo test` 的最終 linking 發現 libsql-ffi 與 libsqlite3-sys 的 `sqlite3_*` 重複符號。`cargo check` 不足以證明 executable 可連結，先前無 conflict 的推論已撤回。
+
+因此停用 Grammers 的 `sqlite-storage` default feature，僅啟用 session types 的 `serde`，以最小 file-backed Session adapter 持久化 auth/DC/peer/update snapshot；寫檔採私有權限與原子替換。SQLx 是 archive 唯一 SQLite stack。此 adapter 仍需 Phase 6 本地 reopen/權限/連結測試；真帳號驗收另行進行。
 
 Fresh resolution 發現 grammers-crypto 0.10.0 的 `glass_pumpkin` prerelease range 會選到 rc1，該版本的 bigint/check API 與 Grammers 預期不相容。因此 manifest 明確固定 `glass_pumpkin = "=2.0.0-rc0"`；使用此 pin 的 spike 編譯通過。升級 Grammers 時再檢查是否可以移除此相容性 pin。
 

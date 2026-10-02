@@ -12,7 +12,7 @@
 | 1 核心 | accepted | 6 tests 通過、fmt/clippy 通過；核心無 adapter 依賴 |
 | 2 SQLite | accepted | migrations、FTS、transactions、pagination、WAL/readers、jobs tests 通過 |
 | 3 Application | accepted | 3 fake-port tests（多項成功／失敗案例）通過 |
-| 4 CLI | in progress | temporary archive CLI smoke tests |
+| 4 CLI | accepted | 3 子程序 tests；隔離快照全 21 tests、fmt/clippy 通過 |
 | 5 REST/OpenAPI | in progress | router、schema、export tests |
 | 6 Telegram | in progress | adapter tests + manual login/restart/dialog verification |
 | 7 History | pending | checkpoint、ack、restart、job tests |
