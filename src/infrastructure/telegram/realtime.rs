@@ -1,0 +1,422 @@
+use std::collections::HashSet;
+
+use chrono::Utc;
+use grammers_client::{
+    Client,
+    client::{UpdateStream, UpdatesConfiguration},
+    peer::PeerMap,
+    tl,
+    update::Update,
+};
+use grammers_session::updates::State;
+use tokio_util::sync::CancellationToken;
+
+use crate::{
+    application::{
+        AccountDeletion, IngestBatch, IngestRecord, MessageSource, RepositoryError,
+        ingestion_worker::IngestSink,
+    },
+    domain::{Chat, ChatKind, MessageEvent, MessageId},
+};
+
+use super::{mapper, session::TelegramAdapter};
+
+#[derive(Debug, thiserror::Error)]
+pub enum RealtimeError {
+    #[error("realtime updates are already running or have stopped")]
+    ReceiverUnavailable,
+    #[error("could not initialize Telegram update stream: {0}")]
+    Stream(String),
+    #[error("Telegram update processing failed: {0}")]
+    Telegram(#[from] grammers_client::InvocationError),
+    #[error(
+        "Telegram difference is too old; reconciliation is required before realtime can continue"
+    )]
+    DifferenceTooLong,
+    #[error("could not map Telegram update: {0}")]
+    Mapping(#[from] mapper::MappingError),
+    #[error("archive ingestion failed: {0}")]
+    Archive(#[from] RepositoryError),
+    #[error("could not persist acknowledged Telegram update state: {0}")]
+    Checkpoint(String),
+}
+
+#[derive(Default)]
+struct NormalizedBatch {
+    chats: Vec<Chat>,
+    senders: Vec<crate::domain::Sender>,
+    records: Vec<IngestRecord>,
+    account_deletions: Vec<AccountDeletion>,
+    seen_chats: HashSet<i64>,
+    seen_senders: HashSet<i64>,
+}
+
+impl NormalizedBatch {
+    fn include_chat(&mut self, chat: Chat) {
+        if self.seen_chats.insert(chat.id.get()) {
+            self.chats.push(chat);
+        }
+    }
+
+    fn include_sender(&mut self, sender: crate::domain::Sender) {
+        if self.seen_senders.insert(sender.id.get()) {
+            self.senders.push(sender);
+        }
+    }
+
+    fn add_update(
+        &mut self,
+        client: &Client,
+        raw: tl::enums::Update,
+        state: State,
+        peers: PeerMap,
+    ) -> Result<(), mapper::MappingError> {
+        let update = Update::from_raw(client, raw, state, peers);
+        let collected_at = Utc::now();
+        match update {
+            Update::NewMessage(message) => self.add_message(&message, false, collected_at)?,
+            Update::MessageEdited(message) => self.add_message(&message, true, collected_at)?,
+            Update::MessageDeleted(deletion) => {
+                self.add_deletion(&deletion.raw, collected_at)?;
+            }
+            // This archive stores messages; acknowledge other update kinds without inventing
+            // message records. Their pts still belongs to this fully processed stream batch.
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn add_deletion(
+        &mut self,
+        raw: &tl::enums::Update,
+        deleted_at: chrono::DateTime<Utc>,
+    ) -> Result<(), mapper::MappingError> {
+        match raw {
+            tl::enums::Update::DeleteMessages(update) => {
+                self.account_deletions.extend(
+                    update
+                        .messages
+                        .iter()
+                        .map(|id| {
+                            MessageId::new(i64::from(*id)).map(|message_id| AccountDeletion {
+                                message_id,
+                                deleted_at,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                );
+            }
+            tl::enums::Update::DeleteChannelMessages(update) => {
+                let peer_id = grammers_session::types::PeerId::channel(update.channel_id)
+                    .ok_or(mapper::MappingError::InvalidPeerId)?;
+                let chat_id = mapper::chat_id(peer_id)?;
+                for id in &update.messages {
+                    self.records.push(IngestRecord {
+                        event: MessageEvent::Deleted {
+                            chat_id,
+                            message_id: MessageId::new(i64::from(*id))?,
+                            deleted_at,
+                        },
+                        source: MessageSource::Realtime,
+                    });
+                }
+            }
+            _ => unreachable!("only deletion updates reach add_deletion"),
+        }
+        Ok(())
+    }
+
+    fn add_message(
+        &mut self,
+        message: &grammers_client::update::Message,
+        edited: bool,
+        collected_at: chrono::DateTime<Utc>,
+    ) -> Result<(), mapper::MappingError> {
+        let chat_id = mapper::chat_id(message.peer_id())?;
+        if let Some(peer) = message.peer() {
+            self.include_chat(mapper::map_chat(peer)?);
+        } else {
+            self.include_chat(Chat {
+                id: chat_id,
+                kind: chat_kind(message.peer_id()),
+                title: None,
+                username: None,
+            });
+        }
+        if let Some(sender_id) = message.sender_id() {
+            self.include_sender(mapper::map_sender(sender_id, message.sender())?);
+        }
+        let mapped = mapper::map_message(message, collected_at)?;
+        self.records.push(IngestRecord {
+            event: if edited {
+                MessageEvent::Updated(mapped)
+            } else {
+                MessageEvent::Created(mapped)
+            },
+            source: MessageSource::Realtime,
+        });
+        Ok(())
+    }
+
+    fn into_ingest_batch(self) -> IngestBatch {
+        IngestBatch {
+            chats: self.chats,
+            senders: self.senders,
+            records: self.records,
+            account_deletions: self.account_deletions,
+            ..IngestBatch::default()
+        }
+    }
+}
+
+impl TelegramAdapter {
+    /// Runs Grammers catch-up and live updates through the shared bounded, acknowledged writer.
+    /// Update state is persisted only after every item currently buffered by Grammers is committed.
+    pub async fn run_realtime(
+        &self,
+        sink: &IngestSink,
+        cancellation: CancellationToken,
+    ) -> Result<(), RealtimeError> {
+        let updates = self
+            .updates
+            .lock()
+            .await
+            .take()
+            .ok_or(RealtimeError::ReceiverUnavailable)?;
+        let mut stream = self
+            .client
+            .stream_updates(
+                updates,
+                UpdatesConfiguration {
+                    catch_up: true,
+                    update_queue_limit: None,
+                },
+            )
+            .await
+            .map_err(|error| RealtimeError::Stream(error.to_string()))?;
+
+        process_stream(&self.client, &mut stream, sink, cancellation).await
+    }
+}
+
+async fn process_stream(
+    client: &Client,
+    stream: &mut UpdateStream,
+    sink: &IngestSink,
+    cancellation: CancellationToken,
+) -> Result<(), RealtimeError> {
+    loop {
+        let first = tokio::select! {
+            _ = cancellation.cancelled() => return Ok(()),
+            result = stream.next_raw() => result.map_err(map_stream_error)?,
+        };
+        let mut batch = NormalizedBatch::default();
+        batch.add_update(client, first.0, first.1, first.2)?;
+
+        // Grammers can expand one Updates container or difference into several updates.
+        // Do not persist its aggregate state until the entire internal buffer is ACKed.
+        while stream.has_pending_updates() {
+            let (raw, state, peers) = stream.next_raw().await.map_err(map_stream_error)?;
+            batch.add_update(client, raw, state, peers)?;
+        }
+
+        tokio::select! {
+            _ = cancellation.cancelled() => return Ok(()),
+            result = sink.submit(batch.into_ingest_batch()) => result?,
+        }
+        // Intentionally not cancellation-selectable: after the writer ACK the checkpoint must
+        // finish or report failure before the runtime tears this stream down.
+        stream
+            .sync_update_state()
+            .await
+            .map_err(|error| RealtimeError::Checkpoint(error.to_string()))?;
+    }
+}
+
+fn map_stream_error(error: grammers_client::InvocationError) -> RealtimeError {
+    match error {
+        grammers_client::InvocationError::Rpc(ref rpc)
+            if rpc.name == grammers_client::client::ARCHIVE_DIFFERENCE_TOO_LONG =>
+        {
+            RealtimeError::DifferenceTooLong
+        }
+        error => RealtimeError::Telegram(error),
+    }
+}
+
+fn chat_kind(peer: grammers_session::types::PeerId) -> ChatKind {
+    match peer.kind() {
+        grammers_session::types::PeerKind::User => ChatKind::Private,
+        grammers_session::types::PeerKind::Chat => ChatKind::Group,
+        grammers_session::types::PeerKind::Channel => ChatKind::Channel,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    use tokio::sync::{Semaphore, oneshot};
+
+    use crate::application::{ArchiveWriter, RepositoryError, ingestion_worker};
+
+    use super::super::file_session::FileSession;
+    use grammers_session::{Session, updates::UpdatesLike};
+
+    #[test]
+    fn raw_common_delete_has_no_guessed_chat_and_channel_delete_keeps_channel_scope() {
+        let now = Utc::now();
+        let mut batch = NormalizedBatch::default();
+        batch
+            .add_deletion(
+                &tl::enums::Update::DeleteMessages(tl::types::UpdateDeleteMessages {
+                    messages: vec![12, 13],
+                    pts: 2,
+                    pts_count: 2,
+                }),
+                now,
+            )
+            .unwrap();
+        assert_eq!(batch.account_deletions.len(), 2);
+        assert!(batch.records.is_empty());
+
+        batch
+            .add_deletion(
+                &tl::enums::Update::DeleteChannelMessages(tl::types::UpdateDeleteChannelMessages {
+                    channel_id: 90,
+                    messages: vec![14],
+                    pts: 1,
+                    pts_count: 1,
+                }),
+                now,
+            )
+            .unwrap();
+        assert_eq!(batch.account_deletions.len(), 2);
+        assert!(matches!(
+            batch.records.as_slice(),
+            [IngestRecord {
+                event: MessageEvent::Deleted { chat_id, message_id, .. },
+                source: MessageSource::Realtime,
+            }] if chat_id.get() == -1_000_000_000_090 && message_id.get() == 14
+        ));
+    }
+
+    struct GateWriter {
+        entered: Semaphore,
+        release: tokio::sync::Mutex<Option<oneshot::Receiver<()>>>,
+        batch: Mutex<Option<IngestBatch>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ArchiveWriter for GateWriter {
+        async fn write_batch(&self, batch: IngestBatch) -> Result<(), RepositoryError> {
+            *self.batch.lock().unwrap() = Some(batch);
+            self.entered.add_permits(1);
+            self.release
+                .lock()
+                .await
+                .take()
+                .expect("one writer batch")
+                .await
+                .map_err(|_| RepositoryError::Unavailable("test ACK gate closed".into()))
+        }
+    }
+
+    fn two_scope_update_batch() -> UpdatesLike {
+        UpdatesLike::Updates(tl::enums::Updates::Updates(tl::types::Updates {
+            updates: vec![
+                tl::enums::Update::DeleteMessages(tl::types::UpdateDeleteMessages {
+                    messages: vec![7],
+                    pts: 1,
+                    pts_count: 1,
+                }),
+                tl::enums::Update::DeleteChannelMessages(tl::types::UpdateDeleteChannelMessages {
+                    channel_id: 90,
+                    messages: vec![8],
+                    pts: 1,
+                    pts_count: 1,
+                }),
+            ],
+            users: Vec::new(),
+            chats: Vec::new(),
+            date: 1_700_000_001,
+            seq: 0,
+        }))
+    }
+
+    async fn stream_fixture(
+        session: Arc<FileSession>,
+        updates: UpdatesLike,
+    ) -> (Client, UpdateStream) {
+        let pool = grammers_client::SenderPool::new(session, 12345);
+        let client = Client::with_configuration(
+            pool.handle.clone(),
+            grammers_client::client::ClientConfiguration {
+                retry_policy: Box::new(grammers_client::client::NoRetries),
+                auto_cache_peers: true,
+            },
+        );
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        sender.send(updates).unwrap();
+        let stream = client
+            .stream_updates(
+                receiver,
+                UpdatesConfiguration {
+                    catch_up: false,
+                    update_queue_limit: None,
+                },
+            )
+            .await
+            .unwrap();
+        (client, stream)
+    }
+
+    #[tokio::test]
+    async fn aggregate_checkpoint_waits_for_full_stream_batch_archive_ack() {
+        let path = std::env::temp_dir().join(format!(
+            "telegram-realtime-session-{}-{}.json",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let session = Arc::new(FileSession::open(&path).await.unwrap());
+        let (client, mut stream) = stream_fixture(session.clone(), two_scope_update_batch()).await;
+        let (release, receiver) = oneshot::channel();
+        let writer = Arc::new(GateWriter {
+            entered: Semaphore::new(0),
+            release: tokio::sync::Mutex::new(Some(receiver)),
+            batch: Mutex::new(None),
+        });
+        let (sink, worker) = ingestion_worker::spawn(writer.clone(), 1);
+        let cancellation = CancellationToken::new();
+        let process = process_stream(&client, &mut stream, &sink, cancellation.clone());
+        let observe = async {
+            writer.entered.acquire().await.unwrap().forget();
+            assert_eq!(session.updates_state().await.unwrap(), Default::default());
+            let batch = writer.batch.lock().unwrap().clone().unwrap();
+            assert_eq!(batch.account_deletions.len(), 1);
+            assert_eq!(batch.records.len(), 1);
+            assert!(matches!(
+                batch.records[0].event,
+                MessageEvent::Deleted { .. }
+            ));
+            release.send(()).unwrap();
+        };
+        let (result, ()) = tokio::join!(process, observe);
+        assert!(matches!(
+            result,
+            Err(RealtimeError::Telegram(
+                grammers_client::InvocationError::Dropped
+            ))
+        ));
+        let state = session.updates_state().await.unwrap();
+        assert_eq!(state.pts, 1);
+        assert_eq!(state.channels.len(), 1);
+        assert_eq!(state.channels[0].id, 90);
+        assert_eq!(state.channels[0].pts, 1);
+
+        drop(sink);
+        worker.await.unwrap().unwrap();
+        let _ = std::fs::remove_file(path);
+    }
+}

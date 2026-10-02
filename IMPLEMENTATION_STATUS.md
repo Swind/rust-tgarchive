@@ -38,6 +38,8 @@ Phase 8 deletion persistence：未知／有歧義的 common deletion 保存 tomb
 
 Auth/refresh/sync interfaces 與 vendored update-buffer boundary：隔離快照全 60 tests、fmt、all-target clippy 通過。SIGTERM 子程序測試確認 query server 正常 exit 0。即時 listener 與完整 runtime supervisor 尚在下一批工作中。
 
+Phase 8 realtime stream foundation：`realtime.rs` 於 archive 確認整批後才寫入 aggregate update checkpoint；全 66 tests、fmt、all-target clippy 通過。`process_stream` 於 stream 結束時回傳 `Telegram(Dropped)`，接入 supervisor 時須視為重連而非致命錯誤；listener supervisor、catch-up、crash recovery 仍待驗收。
+
 ## Manual acceptance
 
 使用者指定本輪先完成程式與自動測試，真實帳號驗收稍後進行。真實 Telegram credentials 尚未提供。本專案不將 secrets 放入文件或 Git。登入、dialog、真實同步與更新、重啟恢復等人工驗收在取得環境前皆為 pending；自動 tests 不取代這些驗收。

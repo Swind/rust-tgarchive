@@ -171,19 +171,25 @@ impl Session for FileSession {
     }
 
     fn set_update_state(&self, update: UpdateState) -> BoxFuture<'_, Result<(), Self::Error>> {
-        Box::pin(self.update(move |data| match update {
-            UpdateState::All(state) => data.updates_state = state,
-            UpdateState::Primary { pts, date, seq } => {
-                data.updates_state.pts = pts;
-                data.updates_state.date = date;
-                data.updates_state.seq = seq;
-            }
-            UpdateState::Secondary { qts } => data.updates_state.qts = qts,
-            UpdateState::Channel { id, pts } => {
-                data.updates_state
-                    .channels
-                    .retain(|channel| channel.id != id);
-                data.updates_state.channels.push(ChannelState { id, pts });
+        Box::pin(self.update(move |data| {
+            match update {
+                UpdateState::All(state) => data.updates_state = state,
+                UpdateState::Primary { pts, date, seq } => {
+                    data.updates_state.pts = pts;
+                    data.updates_state.date = date;
+                    data.updates_state.seq = seq;
+                }
+                UpdateState::Secondary { qts } => data.updates_state.qts = qts,
+                UpdateState::Channel { id, pts } => {
+                    if !data
+                        .updates_state
+                        .channels
+                        .iter()
+                        .any(|channel| channel.id == id)
+                    {
+                        data.updates_state.channels.push(ChannelState { id, pts });
+                    }
+                }
             }
         }))
     }
@@ -422,6 +428,34 @@ mod tests {
                 seq: 5,
                 channels: vec![ChannelState { id: 900, pts: 7 }],
             }
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn dialog_channel_state_initializes_only_and_cannot_advance_acknowledged_cursor() {
+        let path = path();
+        let session = FileSession::open(&path).await.unwrap();
+        session
+            .set_update_state(UpdateState::Channel { id: 900, pts: 7 })
+            .await
+            .unwrap();
+        session
+            .set_update_state(UpdateState::Channel { id: 900, pts: 99 })
+            .await
+            .unwrap();
+        session
+            .set_update_state(UpdateState::Channel { id: 901, pts: 11 })
+            .await
+            .unwrap();
+
+        let state = session.updates_state().await.unwrap();
+        assert_eq!(
+            state.channels,
+            vec![
+                ChannelState { id: 900, pts: 7 },
+                ChannelState { id: 901, pts: 11 }
+            ]
         );
         let _ = fs::remove_file(path);
     }

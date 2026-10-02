@@ -485,6 +485,44 @@ impl SyncCoordinator {
         }
         Ok(())
     }
+
+    /// Stop accepting work, cancel the active job, and bound the time spent
+    /// joining the worker. On timeout the task is aborted and joined so it
+    /// cannot outlive the runtime; a later startup marks any persisted active
+    /// job interrupted during recovery.
+    pub async fn shutdown_with_timeout(&self, timeout: Duration) -> Result<(), ApplicationError> {
+        {
+            let mut state = self.reserved.lock().await;
+            state.accepting = false;
+            for token in self.cancellations.lock().await.values() {
+                token.cancel();
+            }
+            let _ = self.shutdown.send(true);
+        }
+
+        let mut worker = self.worker.lock().await;
+        let Some(task) = worker.as_mut() else {
+            return Ok(());
+        };
+        match tokio::time::timeout(timeout, &mut *task).await {
+            Ok(joined) => {
+                *worker = None;
+                joined
+                    .map_err(|error| {
+                        ApplicationError::Internal(format!("sync worker task failed: {error}"))
+                    })?
+                    .map_err(ApplicationError::Internal)
+            }
+            Err(_) => {
+                task.abort();
+                let _ = task.await;
+                *worker = None;
+                Err(ApplicationError::Internal(
+                    "sync worker shutdown exceeded its deadline; active work will be recovered on restart".into(),
+                ))
+            }
+        }
+    }
 }
 
 async fn mark_interrupted(

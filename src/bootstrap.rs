@@ -348,16 +348,32 @@ impl SyncRuntime {
             writer,
         } = self;
         let coordinator_result = coordinator
-            .shutdown()
+            .shutdown_with_timeout(std::time::Duration::from_secs(10))
             .await
             .map_err(|error| CliError::Telegram(error.to_string()));
         drop(coordinator);
         drop(engine);
         drop(sink);
-        let writer_result = writer
-            .await
-            .map_err(|error| CliError::Telegram(format!("ingestion writer task failed: {error}")))?
-            .map_err(|error| CliError::Telegram(format!("ingestion writer failed: {error}")));
+        let mut writer = writer;
+        let writer_result = match tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            &mut writer,
+        )
+        .await
+        {
+            Ok(result) => result
+                .map_err(|error| {
+                    CliError::Telegram(format!("ingestion writer task failed: {error}"))
+                })?
+                .map_err(|error| CliError::Telegram(format!("ingestion writer failed: {error}"))),
+            Err(_) => {
+                writer.abort();
+                let _ = writer.await;
+                Err(CliError::Telegram(
+                    "ingestion writer shutdown exceeded its deadline; the database may require recovery on restart".into(),
+                ))
+            }
+        };
         coordinator_result?;
         writer_result
     }

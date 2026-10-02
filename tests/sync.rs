@@ -25,6 +25,12 @@ struct Store {
     chats: Mutex<HashMap<ChatId, Chat>>,
     fail_writer: AtomicBool,
     fail_terminal_job: AtomicBool,
+    checkpoint_gate: Option<Arc<CheckpointGate>>,
+}
+
+struct CheckpointGate {
+    entered: tokio::sync::Semaphore,
+    release: tokio::sync::Semaphore,
 }
 
 #[async_trait]
@@ -63,6 +69,11 @@ impl ChatRepository for Store {
 #[async_trait]
 impl SyncRepository for Store {
     async fn get_checkpoint(&self, id: ChatId) -> Result<Option<ChatCheckpoint>, RepositoryError> {
+        if let Some(gate) = &self.checkpoint_gate {
+            gate.entered.add_permits(1);
+            let permit = gate.release.acquire().await.expect("test gate stays open");
+            permit.forget();
+        }
         Ok(self.checkpoints.lock().await.get(&id).cloned())
     }
     async fn save_job(&self, job: SyncJob) -> Result<(), RepositoryError> {
@@ -299,6 +310,44 @@ async fn coordinator_rejects_unknown_and_duplicate_scope_and_drains_queue_on_shu
             .is_ok()
     );
     drop(coordinator);
+}
+
+#[tokio::test]
+async fn coordinator_shutdown_timeout_aborts_and_joins_unresponsive_worker() {
+    let gate = Arc::new(CheckpointGate {
+        entered: tokio::sync::Semaphore::new(0),
+        release: tokio::sync::Semaphore::new(0),
+    });
+    // This repository call intentionally ignores cancellation, so shutdown
+    // must hit its deadline and explicitly abort+join the worker.
+    let store = Arc::new(Store {
+        checkpoint_gate: Some(gate.clone()),
+        ..Store::default()
+    });
+    store.save_refresh(vec![chat(7)]).await.unwrap();
+    let (coordinator, writer, _) = make_coordinator(&store, vec![], vec![], 1);
+    coordinator
+        .submit(SyncScope::Chat(chat_id()))
+        .await
+        .unwrap();
+    let permit = gate.entered.acquire().await.unwrap();
+    permit.forget();
+
+    let error = coordinator
+        .shutdown_with_timeout(std::time::Duration::from_millis(10))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("shutdown exceeded its deadline"));
+    assert!(
+        coordinator
+            .wait_worker_failure()
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("stopped")
+    );
+    drop(coordinator);
+    writer.await.unwrap().unwrap();
 }
 
 #[tokio::test]

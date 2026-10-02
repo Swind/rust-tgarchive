@@ -11,4 +11,5 @@ pub use session::{OpenError, TelegramAdapter};
 pub mod gateway;
 pub mod mapper;
 pub mod owner_lock;
+pub mod realtime;
 pub mod session;

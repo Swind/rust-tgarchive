@@ -6,8 +6,11 @@ use grammers_client::{
     client::{ClientConfiguration, NoRetries},
     peer::Peer,
 };
-use grammers_session::{Session, types::PeerRef};
-use tokio::{sync::Mutex as AsyncMutex, task::JoinHandle};
+use grammers_session::{Session, types::PeerRef, updates::UpdatesLike};
+use tokio::{
+    sync::{Mutex as AsyncMutex, mpsc::UnboundedReceiver},
+    task::JoinHandle,
+};
 
 use crate::{application::TelegramError, domain::SenderId};
 
@@ -17,6 +20,7 @@ use super::owner_lock::AccountOwnerLock;
 pub struct TelegramAdapter {
     pub(crate) client: Client,
     pub(crate) session: Arc<FileSession>,
+    pub(crate) updates: AsyncMutex<Option<UnboundedReceiver<UpdatesLike>>>,
     runner: AsyncMutex<Option<JoinHandle<()>>>,
 }
 
@@ -33,8 +37,7 @@ impl TelegramAdapter {
     ///
     /// Keep the returned adapter alive while performing API calls. Its worker owns the account
     /// lock until the sender runner stops, preventing concurrent use of the session by processes.
-    /// The raw update receiver is intentionally closed; this adapter implements history access,
-    /// while durable realtime update handling remains a separately tested capability.
+    /// The raw update receiver remains owned by the adapter for sequential realtime processing.
     pub async fn open(api_id: i32, session_path: impl AsRef<Path>) -> Result<Self, OpenError> {
         let session_path = session_path.as_ref().to_path_buf();
         let lock =
@@ -53,15 +56,17 @@ impl TelegramAdapter {
                 auto_cache_peers: true,
             },
         );
-        drop(pool.updates);
+        let updates = pool.updates;
+        let pool_runner = pool.runner;
         let runner = tokio::spawn(async move {
             let _account_lock = lock;
-            pool.runner.run().await;
+            pool_runner.run().await;
         });
 
         Ok(Self {
             client,
             session,
+            updates: AsyncMutex::new(Some(updates)),
             runner: AsyncMutex::new(Some(runner)),
         })
     }
