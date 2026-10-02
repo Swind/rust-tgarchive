@@ -8,10 +8,10 @@
 
 | Phase | Status | Acceptance |
 |---|---|---|
-| 0 技術決策 | in progress | 依官方文件確認版本與外部限制；真 Telegram 驗證另外記錄 |
+| 0 技術決策 | source review accepted; spike pending | P0-T01/T03 完成；P0-T02 編譯 spike／人工驗證待 Phase 6/8 |
 | 1 核心 | accepted | 6 tests 通過、fmt/clippy 通過；核心無 adapter 依賴 |
-| 2 SQLite | pending | 真 SQLite integration tests |
-| 3 Application | pending | fake-port use case tests |
+| 2 SQLite | in progress | 真 SQLite integration tests |
+| 3 Application | in progress | fake-port use case tests |
 | 4 CLI | pending | temporary archive CLI smoke tests |
 | 5 REST/OpenAPI | pending | router、schema、export tests |
 | 6 Telegram | pending | adapter tests + manual login/restart/dialog verification |
@@ -22,6 +22,7 @@
 ## Commits
 
 - `a0466c9`：原始規劃與執行規劃基準。
+- `f60b0ee`：Phase 1 核心，6 tests、fmt、clippy 通過。
 
 ## Manual acceptance
 

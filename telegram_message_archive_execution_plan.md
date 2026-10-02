@@ -149,9 +149,9 @@ Search V1 為 literal text search：空白分割 term，正確 escape FTS 引號
 
 目的：在建立核心型別前確認會影響 ID、session 和 ingestion 的外部限制。
 
-- [ ] **P0-T01：版本與工具鏈選型。** 依官方文件選 Rust edition/MSRV 與相容的 Tokio、SQLx、Axum、utoipa、clap、grammers 系列版本；確認 `serde_yaml` 或相容替代的維護狀況。交付簡短版本決策及必要 features；實作時提交 Cargo.lock。驗收：不用 Git HEAD，不複製原規劃版本佔位符。
+- [x] **P0-T01：版本與工具鏈選型。** 依官方文件選 Rust edition/MSRV 與相容的 Tokio、SQLx、Axum、utoipa、clap、grammers 系列版本；確認 `serde_yaml` 或相容替代的維護狀況。交付簡短版本決策及必要 features；實作時提交 Cargo.lock。驗收：不用 Git HEAD，不複製原規劃版本佔位符。
 - [ ] **P0-T02：grammers 最小技術驗證。** 用隔離小程式確認 client/runner/session API、登入保存、dialog/history、update/delete context、peer ID/access hash、FloodWait，以及 update state 推進／queue 行為。交付 `docs/telegram-adapter-decisions.md` 與可重跑的手動步驟；session 不提交。驗收：明列已實證／僅查文件／待 credentials 的項目，定出 crash window 解法。
-- [ ] **P0-T03：契約凍結。** 固定 ID 編碼、cursor、ingest batch、writer 交易、history boundary 與 CLI owner policy。交付 `docs/architecture-decisions.md`，直接引用本文件且只記最終決策。驗收：無 peer collision、checkpoint 不依赖 newest、application 不需要 SQL transaction／grammers 型別。
+- [x] **P0-T03：契約凍結。** 固定 ID 編碼、cursor、ingest batch、writer 交易、history boundary 與 CLI owner policy。交付 `docs/architecture-decisions.md`，直接引用本文件且只記最終決策。驗收：無 peer collision、checkpoint 不依赖 newest、application 不需要 SQL transaction／grammers 型別。
 
 **Phase gate：** 外部 API 的不確定性有可執行驗證方案；ID／port 可進入 Phase 1。未通過真實 Telegram 的驗證標記保留到 Phase 6／8 gate。
 
