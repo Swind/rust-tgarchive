@@ -86,6 +86,10 @@ pub enum ChatsCommand {
     Track {
         #[arg(allow_hyphen_values = true)]
         chat_id: i64,
+        /// After tracking, also fetch the chat's history now (like `sync chat`); needs Telegram
+        /// credentials. Tracking is saved first even if the sync cannot run or is rate limited.
+        #[arg(long)]
+        backfill: bool,
     },
     /// Stop collecting a chat; stored messages are kept (idempotent)
     Untrack {
@@ -229,6 +233,7 @@ pub enum PreparedInvocation {
     SetTracking {
         chat_id: ChatId,
         tracked: bool,
+        backfill: bool,
         output: OutputFormat,
     },
     Sync {
@@ -264,10 +269,11 @@ pub fn prepare(cli: Cli) -> Result<PreparedInvocation, CliError> {
             command: ChatsCommand::Refresh,
         } => Ok(PreparedInvocation::RefreshChats { output }),
         Command::Chats {
-            command: ChatsCommand::Track { chat_id },
+            command: ChatsCommand::Track { chat_id, backfill },
         } => Ok(PreparedInvocation::SetTracking {
             chat_id: ChatId::from_marked(chat_id)?,
             tracked: true,
+            backfill,
             output,
         }),
         Command::Chats {
@@ -275,6 +281,7 @@ pub fn prepare(cli: Cli) -> Result<PreparedInvocation, CliError> {
         } => Ok(PreparedInvocation::SetTracking {
             chat_id: ChatId::from_marked(chat_id)?,
             tracked: false,
+            backfill: false,
             output,
         }),
         Command::Sync { command } => {

@@ -46,6 +46,8 @@ pub enum SpecError {
         AttachmentKindDto,
         MessagePageDto,
         StatusDto,
+        RateLimitDto,
+        TrackChatDto,
         ComponentStatusDto,
         SyncJobDto,
         HealthDto,

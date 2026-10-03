@@ -144,6 +144,32 @@ pub struct StatusDto {
     pub sync_jobs: Vec<SyncJobDto>,
     /// Deletions that could not be attributed to a chat (kept as tombstones).
     pub unresolved_deletions: u64,
+    /// Pacing of Telegram history requests; absent when this process has no Telegram access.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<RateLimitDto>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct RateLimitDto {
+    /// Current minimum interval between history requests (grows after FLOOD_WAIT).
+    pub interval_ms: u64,
+    /// Configured base interval (`SYNC_PAGE_DELAY_MS`).
+    pub base_interval_ms: u64,
+    pub last_flood_wait_secs: Option<u64>,
+    pub last_flood_at: Option<DateTime<Utc>>,
+}
+
+/// Response of `PUT /chats/{id}/tracking`: the chat, plus backfill info when requested.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct TrackChatDto {
+    #[serde(flatten)]
+    pub chat: ChatDto,
+    /// History sync job covering this chat (only with `backfill=true`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backfill_job_id: Option<String>,
+    /// `queued` for a newly enqueued job, `already_running` when an existing job was reused.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backfill: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -173,6 +199,12 @@ impl From<ApplicationStatus> for StatusDto {
             },
             sync_jobs: status.sync_jobs.into_iter().map(Into::into).collect(),
             unresolved_deletions: status.unresolved_deletions,
+            rate_limit: status.rate_limit.map(|r| RateLimitDto {
+                interval_ms: r.interval_ms,
+                base_interval_ms: r.base_interval_ms,
+                last_flood_wait_secs: r.last_flood_wait_secs,
+                last_flood_at: r.last_flood_at,
+            }),
         }
     }
 }
@@ -195,7 +227,15 @@ impl From<SyncJob> for SyncJobDto {
 }
 
 fn job_state(state: SyncJobState) -> String {
-    format!("{state:?}").to_ascii_lowercase()
+    match state {
+        SyncJobState::Queued => "queued",
+        SyncJobState::Running => "running",
+        SyncJobState::Succeeded => "succeeded",
+        SyncJobState::Failed => "failed",
+        SyncJobState::Interrupted => "interrupted",
+        SyncJobState::RateLimited => "rate_limited",
+    }
+    .to_owned()
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]

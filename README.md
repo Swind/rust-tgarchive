@@ -22,6 +22,8 @@ TELEGRAM_SESSION_FILE=./telegram.session
 DATABASE_URL=sqlite://telegram.db
 SERVER_BIND=127.0.0.1:8080
 RUST_LOG=info                      # 未設定時預設為 warn
+SYNC_PAGE_DELAY_MS=1000            # 選用；history 請求最小間隔，見「抓取頻率與限流」
+SYNC_MAX_FLOOD_WAIT_SECS=300       # 選用；願意等待的 FLOOD_WAIT 上限
 ```
 
 **執行檔不會自動載入 `.env`。** 手動載入到目前 shell：
@@ -59,7 +61,7 @@ telegram-archive serve
 
 重點：
 
-- `chats track` **不會**抓取歷史，只決定之後收集哪些聊天室；歷史需手動 `sync chat`／`sync all`。
+- `chats track` 預設**不會**抓取歷史，只決定之後收集哪些聊天室；歷史需手動 `sync chat`／`sync all`，或加 `--backfill`（見「抓取頻率與限流」）。
 - `chats untrack` 停止收集，但保留已存訊息。
 - 對未 track 的聊天室執行 `sync chat` 會被拒絕（REST 回 409 `chat_not_tracked`）。
 - `serve` 執行期間 track／untrack 不需重啟。
@@ -79,6 +81,33 @@ telegram-archive --output json messages list --limit 5
 ### 全文搜尋的中文限制
 
 FTS5 使用 `unicode61` tokenizer：只比對**完整 token**，**不支援**子字串搜尋，也沒有中文斷詞。例如搜尋「資料」不保證找得到「資料庫」。這是已知限制。
+
+## 抓取頻率與限流
+
+Telegram **沒有公開的固定頻率上限**，限制是動態的（依帳號、方法、行為而變）；伺服器會以 `FLOOD_WAIT_X`（420）要求等待 X 秒。本工具因此採保守策略：
+
+- **請求間隔（pacing）**：所有 `getHistory` 請求（歷史回補、重連 catch-up、新 track 聊天室的 baseline probe）都經過**同一個行程內共用的 pacer**，任兩次請求間至少間隔 `SYNC_PAGE_DELAY_MS`（預設 `1000`，整數 `0..=60000`；`0` 表示關閉 pacing 與自適應降速；無效值會讓 `serve`／`sync`／`chats track --backfill` 於啟動時直接失敗並說明）。每頁維持 100 則（API 上限），以免請求數更多。
+- **序列化**：歷史 job 由單一 worker 依序執行，同一時間只會有一個歷史 job 在抓；其餘排隊（佇列滿回 503、同聊天室重複回 409，語意不變）。即時 catch-up 不經過此佇列，可能在歷史頁與頁之間穿插，但因共用 pacer，整體請求仍保證符合最小間隔。
+- **自適應降速**：收到 FLOOD_WAIT 後，pacer 間隔變為 2 倍（上限 10 秒），並讓所有 history 請求（含 catch-up）等滿該秒數；之後每連續 50 次成功請求，間隔減半，直到回到 `SYNC_PAGE_DELAY_MS`。日誌以 WARN 記錄等待秒數與新間隔（不含訊息內容）。
+- **FLOOD_WAIT 上限**：`SYNC_MAX_FLOOD_WAIT_SECS`（預設 `300`，`0..=86400`）。Telegram 要求的等待超過上限、或同一頁連續 5 次 FLOOD_WAIT 後仍被限制時，**不再睡等**：
+  - 歷史 job 以可續跑的 `rate_limited` 狀態結束，錯誤摘要為 `Telegram rate limit: retry after N s`；已提交的進度與 checkpoint 保留，之後再執行 `sync chat`（或 `POST /api/v1/chats/{id}/sync`）會從 checkpoint 接續。`sync all` 遇到時會停止，不再嘗試其餘聊天室。CLI 以非零結束並印出該摘要。
+  - 即時 catch-up 該輪略過該聊天室（WARN + 寫入 `last_error`），下一輪再試，不阻擋即時更新。
+- **狀態**：`GET /api/v1/status` 的 `rate_limit` 含 `interval_ms`（目前間隔）、`base_interval_ms`、`last_flood_wait_secs`、`last_flood_at`（僅 Telegram 模式的 `serve` 有；CLI `status` 為獨立程序，看不到 pacer，但會列出 job 狀態含 `RateLimited`）。
+
+### 追蹤並回補：`--backfill`
+
+```sh
+telegram-archive chats track -1001234567890 --backfill
+curl -X PUT "http://127.0.0.1:8080/api/v1/chats/-1001234567890/tracking?backfill=true"
+```
+
+- 不加旗標時行為不變（只 track）。
+- REST（需 Telegram 模式的 `serve`；否則回 503 `busy` 且不更動 tracking）：track 後將歷史 job 排入 coordinator，回應除 ChatDto 外多 `backfill_job_id` 與 `backfill: "queued"`；若該聊天室（或 `sync all`）已有排隊／執行中的 job，則不重複建立，回 `backfill: "already_running"` 與既有 job id。用 `GET /api/v1/sync/jobs/{id}` 追蹤。
+- CLI（無伺服器；需 Telegram 憑證、且不可有另一程序持有 session）：先 track 並提交，再於本程序執行與 `sync chat` 相同的歷史回補。若缺憑證，tracking 仍已儲存，但命令以非零結束並說明之後如何執行 `sync chat`。
+
+### 使用條款提醒
+
+透過 Telegram API 取得的資料**不得用於 AI／機器學習訓練**（見 [Telegram API Terms of Service 1.5](https://core.telegram.org/api/terms)）。請同時遵守其他條款，並自行承擔大量抓取可能導致帳號被限制的風險；上述預設值是保守設定，不保證不會被限流。
 
 ## serve 與狀態
 
@@ -100,7 +129,7 @@ curl -s "http://127.0.0.1:8080/api/v1/messages/search?q=keyword"
 
 ## REST 與 OpenAPI
 
-路由（皆在 `/api/v1`）：`chats`、`chats/refresh`、`chats/{id}`、`chats/{id}/tracking`（PUT/DELETE）、`chats/{id}/messages`、`chats/{id}/sync`、`messages`、`messages/search`、`sync`、`sync/jobs/{id}`、`sync/status`、`status`；另有 `/health/live`、`/health/ready`、`/openapi.json`、`/openapi.yml`。請求逾時 30 秒，query 與 body 有大小上限，每個回應帶 `x-request-id`。
+路由（皆在 `/api/v1`）：`chats`、`chats/refresh`、`chats/{id}`、`chats/{id}/tracking`（PUT 可加 `?backfill=true`／DELETE）、`chats/{id}/messages`、`chats/{id}/sync`、`messages`、`messages/search`、`sync`、`sync/jobs/{id}`、`sync/status`、`status`；另有 `/health/live`、`/health/ready`、`/openapi.json`、`/openapi.yml`。請求逾時 30 秒，query 與 body 有大小上限，每個回應帶 `x-request-id`。
 
 規格檔為根目錄的 [`openapi.yml`](openapi.yml)，由程式產生，請勿手改：
 

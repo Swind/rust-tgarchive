@@ -19,8 +19,8 @@ use telegram_message_archive::{
     application::{
         AccountDeletion, ApplicationError, ArchiveWriter, ChatCheckpoint, ChatRepository,
         HistoryBoundary, HistoryPage, IngestBatch, IngestRecord, ListMessagesQuery, MessageFilters,
-        MessageSource, PageSize, SyncJobState, SyncRepository, SyncScope, TelegramError,
-        TelegramGateway, TimeRange, TrackingScope, ingestion_worker,
+        MessageSource, PageSize, SyncChatProgress, SyncJob, SyncJobState, SyncRepository,
+        SyncScope, TelegramError, TelegramGateway, TimeRange, TrackingScope, ingestion_worker,
         realtime::{
             RealtimeSource, RealtimeSourceError, ReconnectBackoff, restrict_to_tracked,
             supervise_realtime,
@@ -657,4 +657,156 @@ async fn cli_track_untrack_list_get_and_sync_rejection() {
     let out = cli(&url, &["sync", "all"]);
     assert!(out.status.success());
     assert!(String::from_utf8_lossy(&out.stdout).contains("No tracked chats"));
+}
+
+#[tokio::test]
+async fn cli_backfill_tracks_first_then_explains_missing_credentials_and_validates_pacing() {
+    let (_directory, url, store) = store_with_chats().await;
+    store.close().await;
+    let id = private().get().to_string();
+
+    // Invalid pacing config is rejected before tracking changes anything.
+    let out = Command::new(BIN)
+        .env_clear()
+        .env("DATABASE_URL", &url)
+        .env("SYNC_PAGE_DELAY_MS", "70000")
+        .args(["chats", "track", &id, "--backfill"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("SYNC_PAGE_DELAY_MS"));
+    let out = cli(&url, &["--output", "json", "chats", "get", &id]);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&out.stdout).unwrap()["tracked"],
+        false
+    );
+
+    // No Telegram credentials: tracking is saved, the backfill fails non-zero with next steps.
+    let out = cli(&url, &["chats", "track", &id, "--backfill"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("Tracking chat"));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("is tracked") && stderr.contains("sync chat"),
+        "{stderr}"
+    );
+    let out = cli(&url, &["--output", "json", "chats", "get", &id]);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&out.stdout).unwrap()["tracked"],
+        true
+    );
+
+    // Without --backfill nothing changes: success and no sync attempt.
+    let out = cli(&url, &["chats", "track", &id]);
+    assert!(out.status.success());
+}
+
+#[tokio::test]
+async fn rest_backfill_runs_a_real_history_job_on_the_sqlite_store() {
+    let rt = runtime().await;
+    let service = router_with_sync(
+        Arc::new(application(&rt.store)),
+        Some(rt.coordinator.clone()),
+    );
+    let (status, body) = send(
+        &service,
+        "PUT",
+        &format!("/api/v1/chats/{}/tracking?backfill=true", private().get()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let job = rt
+        .coordinator
+        .wait_job(body["backfill_job_id"].as_str().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(job.state, SyncJobState::Succeeded);
+    assert_eq!(*rt.gateway.fetched.lock().unwrap(), [private()]);
+    rt.coordinator.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn migration_0004_keeps_job_history_and_allows_the_rate_limited_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let url = url(&directory);
+    let old = directory.path().join("old-migrations");
+    std::fs::create_dir(&old).unwrap();
+    for name in [
+        "0001_archive.sql",
+        "0002_telegram_account_deletions.sql",
+        "0003_chat_tracking.sql",
+    ] {
+        std::fs::copy(Path::new("migrations").join(name), old.join(name)).unwrap();
+    }
+    let options = <sqlx::sqlite::SqliteConnectOptions as std::str::FromStr>::from_str(&url)
+        .unwrap()
+        .create_if_missing(true);
+    let pool = sqlx::SqlitePool::connect_with(options).await.unwrap();
+    sqlx::migrate::Migrator::new(old)
+        .await
+        .unwrap()
+        .run(&pool)
+        .await
+        .unwrap();
+    for sql in [
+        "INSERT INTO chats(id, kind, created_at, updated_at) VALUES (42, 'private', 1, 1)",
+        "INSERT INTO sync_jobs(id, scope, chat_id, state, created_at) VALUES ('old', 'chat', 42, 'failed', 1)",
+        "INSERT INTO sync_job_chats(job_id, chat_id, state, committed_count) VALUES ('old', 42, 'failed', 9)",
+    ] {
+        sqlx::query(sql).execute(&pool).await.unwrap();
+    }
+    pool.close().await;
+
+    let store = SqliteStore::connect(&url).await.unwrap();
+    let chat = ChatId::from_marked(42).unwrap();
+    let old = SyncRepository::get_job(&store, "old")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(old.state, SyncJobState::Failed);
+    let progress = store.list_chat_progress("old").await.unwrap();
+    assert_eq!(progress[0].committed_messages, 9);
+
+    let mut job = SyncJob {
+        id: "new".into(),
+        scope: SyncScope::Chat(chat),
+        state: SyncJobState::Queued,
+        created_at: Utc::now(),
+        started_at: None,
+        completed_at: None,
+        summary_error: None,
+    };
+    store.save_job(job.clone()).await.unwrap();
+    job.state = SyncJobState::Running;
+    store.save_job(job.clone()).await.unwrap();
+    store
+        .write_batch(IngestBatch {
+            job_progress: Some(SyncChatProgress {
+                job_id: "new".into(),
+                chat_id: chat,
+                state: SyncJobState::RateLimited,
+                committed_messages: 3,
+                summary_error: Some("Telegram rate limit: retry after 900 s".into()),
+            }),
+            ..IngestBatch::default()
+        })
+        .await
+        .unwrap();
+    job.state = SyncJobState::RateLimited;
+    job.summary_error = Some("Telegram rate limit: retry after 900 s".into());
+    store.save_job(job).await.unwrap();
+    let saved = SyncRepository::get_job(&store, "new")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.state, SyncJobState::RateLimited);
+    let service = router_with_sync(Arc::new(application(&Arc::new(store))), None);
+    let (_, body) = send(&service, "GET", "/api/v1/status").await;
+    let states: Vec<_> = body["sync_jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|job| job["state"].as_str().unwrap().to_owned())
+        .collect();
+    assert!(states.contains(&"rate_limited".to_owned()), "{states:?}");
 }

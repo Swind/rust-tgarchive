@@ -5,6 +5,7 @@ use crate::{
         ApplicationError, ArchiveWriter, ChatCheckpoint, ChatRepository, IngestBatch,
         ListMessagesQuery, MessagePage, MessageRepository, MessageSource, SearchMessagesQuery,
         SyncJob, SyncRepository, TelegramGateway,
+        pacer::{RateLimitStatus, RatePacer},
     },
     domain::{Chat, ChatId, Message, MessageEvent, MessageId, Sender},
 };
@@ -90,6 +91,8 @@ pub struct ApplicationStatus {
     pub collector: ComponentStatus,
     pub sync_jobs: Vec<SyncJob>,
     pub unresolved_deletions: u64,
+    /// History-request pacing; `None` when this process does not talk to Telegram.
+    pub rate_limit: Option<RateLimitStatus>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -250,11 +253,16 @@ impl RefreshChatsService {
 pub struct SyncStatusService {
     sync: Arc<dyn SyncRepository>,
     collector: CollectorStatusHandle,
+    pacer: Option<Arc<RatePacer>>,
 }
 
 impl SyncStatusService {
     pub fn new(sync: Arc<dyn SyncRepository>, collector: CollectorStatusHandle) -> Self {
-        Self { sync, collector }
+        Self {
+            sync,
+            collector,
+            pacer: None,
+        }
     }
 
     pub async fn get(&self) -> Result<ApplicationStatus, ApplicationError> {
@@ -272,6 +280,7 @@ impl SyncStatusService {
             collector: self.collector.get(),
             sync_jobs,
             unresolved_deletions,
+            rate_limit: self.pacer.as_ref().map(|pacer| pacer.status()),
         })
     }
 }
@@ -300,6 +309,12 @@ impl Application {
             refresh_chats: RefreshChatsService::new(telegram_gateway, chat_repository),
             sync_status: SyncStatusService::new(sync_repository, collector_status.into()),
         }
+    }
+
+    /// Exposes the shared history pacer in `sync_status`.
+    pub fn with_rate_limit(mut self, pacer: Arc<RatePacer>) -> Self {
+        self.sync_status.pacer = Some(pacer);
+        self
     }
 
     pub async fn ingest_event(&self, input: IngestMessageEvent) -> Result<(), ApplicationError> {

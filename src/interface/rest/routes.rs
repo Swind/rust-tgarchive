@@ -13,7 +13,7 @@ use crate::{
 
 use super::{
     ApiError, RequestId, RestState,
-    dto::{ChatDto, HealthDto, MessageDto, MessagePageDto, StatusDto, SyncJobDto},
+    dto::{ChatDto, HealthDto, MessageDto, MessagePageDto, StatusDto, SyncJobDto, TrackChatDto},
     extract::{ApiPath, ApiQuery},
 };
 
@@ -168,19 +168,69 @@ pub(super) async fn get_chat(
         .map_err(|error| ApiError::from_application(error, id.0))
 }
 
-#[utoipa::path(put, path = "/api/v1/chats/{chat_id}/tracking", params(("chat_id" = i64, Path, description = "Marked Telegram chat ID")), responses((status = 200, description = "Chat is now tracked (idempotent)", body = ChatDto), (status = 400, body = super::ErrorEnvelope), (status = 404, body = super::ErrorEnvelope), (status = 503, body = super::ErrorEnvelope)))]
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub(super) struct TrackQuery {
+    /// Also enqueue a history sync for the chat (needs the running collector). Reuses an active job instead of duplicating it.
+    backfill: Option<bool>,
+}
+
+#[utoipa::path(put, path = "/api/v1/chats/{chat_id}/tracking", params(("chat_id" = i64, Path, description = "Marked Telegram chat ID"), TrackQuery), responses((status = 200, description = "Chat is now tracked (idempotent); with backfill=true also carries the history sync job id", body = TrackChatDto), (status = 400, body = super::ErrorEnvelope), (status = 404, body = super::ErrorEnvelope), (status = 503, description = "Storage unavailable, or backfill requested without a running collector / with a full queue", body = super::ErrorEnvelope)))]
 pub(super) async fn track_chat(
     State(state): State<RestState>,
     ApiPath((raw_id,)): ApiPath<(i64,)>,
+    ApiQuery(query): ApiQuery<TrackQuery>,
     Extension(id): Extension<RequestId>,
-) -> Result<Json<ChatDto>, ApiError> {
+) -> Result<Json<TrackChatDto>, ApiError> {
     let chat_id = ChatId::from_marked(raw_id).map_err(|_| ApiError::malformed(id.0.clone()))?;
-    state
+    let coordinator = if query.backfill.unwrap_or(false) {
+        Some(
+            state
+                .sync
+                .clone()
+                .ok_or_else(|| ApiError::from_application(ApplicationError::Busy, id.0.clone()))?,
+        )
+    } else {
+        None
+    };
+    let chat = state
         .application
         .track_chat(chat_id)
         .await
-        .map(|chat| Json(chat.into()))
-        .map_err(|error| ApiError::from_application(error, id.0))
+        .map_err(|error| ApiError::from_application(error, id.0.clone()))?;
+    let mut response = TrackChatDto {
+        chat: chat.into(),
+        backfill_job_id: None,
+        backfill: None,
+    };
+    if let Some(coordinator) = coordinator {
+        match coordinator.submit(SyncScope::Chat(chat_id)).await {
+            Ok(job) => {
+                response.backfill_job_id = Some(job.id);
+                response.backfill = Some("queued".into());
+            }
+            Err(ApplicationError::Conflict) => {
+                let active = state
+                    .application
+                    .sync_status()
+                    .await
+                    .map_err(|error| ApiError::from_application(error, id.0.clone()))?
+                    .sync_jobs
+                    .into_iter()
+                    .find(|job| {
+                        matches!(
+                            job.state,
+                            crate::application::SyncJobState::Queued
+                                | crate::application::SyncJobState::Running
+                        ) && (job.scope == SyncScope::All || job.scope == SyncScope::Chat(chat_id))
+                    });
+                response.backfill_job_id = active.map(|job| job.id);
+                response.backfill = Some("already_running".into());
+            }
+            Err(error) => return Err(ApiError::from_application(error, id.0)),
+        }
+    }
+    Ok(Json(response))
 }
 
 #[utoipa::path(delete, path = "/api/v1/chats/{chat_id}/tracking", params(("chat_id" = i64, Path, description = "Marked Telegram chat ID")), responses((status = 200, description = "Chat is no longer tracked; stored messages are kept (idempotent)", body = ChatDto), (status = 400, body = super::ErrorEnvelope), (status = 404, body = super::ErrorEnvelope), (status = 503, body = super::ErrorEnvelope)))]

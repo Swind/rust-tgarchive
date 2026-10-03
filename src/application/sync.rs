@@ -12,6 +12,7 @@ use tokio::sync::{Mutex, mpsc, watch};
 pub use tokio_util::sync::CancellationToken;
 
 use super::ingestion_worker::IngestSink;
+use super::pacer::RatePacer;
 use super::{
     ApplicationError, ChatRepository, HistoryBoundary, IngestBatch, PageSize, SyncChatProgress,
     SyncJob, SyncJobState, SyncRepository, SyncScope, TelegramError, TelegramGateway,
@@ -24,7 +25,12 @@ pub struct SyncEngine {
     chats: Arc<dyn ChatRepository>,
     sink: IngestSink,
     page_size: PageSize,
+    pacer: Arc<RatePacer>,
+    max_flood_wait: Duration,
 }
+
+/// Longest FLOOD_WAIT that is waited out by default; longer ones pause or skip instead.
+pub const DEFAULT_MAX_FLOOD_WAIT: Duration = Duration::from_secs(300);
 
 impl SyncEngine {
     pub fn new(
@@ -40,7 +46,21 @@ impl SyncEngine {
             chats,
             sink,
             page_size,
+            pacer: Arc::new(RatePacer::disabled()),
+            max_flood_wait: DEFAULT_MAX_FLOOD_WAIT,
         }
+    }
+
+    /// Shares one pacer between history sync and catch-up (both use this engine) and sets
+    /// the longest FLOOD_WAIT that is waited out. `new` defaults to no pacing.
+    pub fn with_rate_control(mut self, pacer: Arc<RatePacer>, max_flood_wait: Duration) -> Self {
+        self.pacer = pacer;
+        self.max_flood_wait = max_flood_wait;
+        self
+    }
+
+    pub fn pacer(&self) -> &Arc<RatePacer> {
+        &self.pacer
     }
 
     /// Refreshes metadata for every dialog (never touching tracking flags), then returns the
@@ -358,16 +378,28 @@ impl SyncEngine {
             if cancel.is_cancelled() {
                 return Err(ApplicationError::Conflict);
             }
+            if self.pacer.acquire(cancel).await {
+                return Err(ApplicationError::Conflict);
+            }
             let response = tokio::select! { _ = cancel.cancelled() => return Err(ApplicationError::Conflict), result = self.gateway.fetch_history(chat, boundary.clone(), page_size) => result };
             match response {
-                Ok(page) => return Ok(page),
+                Ok(page) => {
+                    self.pacer.on_success();
+                    return Ok(page);
+                }
                 Err(TelegramError::FloodWait {
                     retry_after_seconds,
-                }) if flood_attempt < 5 => {
-                    flood_attempt += 1;
-                    if wait_or_cancel(cancel, Duration::from_secs(retry_after_seconds)).await {
-                        return Err(ApplicationError::Conflict);
+                }) => {
+                    let will_wait = flood_attempt < 5
+                        && Duration::from_secs(retry_after_seconds) <= self.max_flood_wait;
+                    self.pacer.on_flood(retry_after_seconds, will_wait);
+                    if !will_wait {
+                        return Err(ApplicationError::TelegramFloodWait {
+                            retry_after_seconds,
+                        });
                     }
+                    // The pacer now holds every history request back until the wait is over.
+                    flood_attempt += 1;
                 }
                 Err(TelegramError::Unavailable(_)) if transient_attempt < 3 => {
                     let wait = Duration::from_millis(250 * (1 << transient_attempt));
@@ -408,6 +440,26 @@ fn record_message_id(record: &super::IngestRecord) -> MessageId {
 
 async fn wait_or_cancel(cancel: &CancellationToken, duration: Duration) -> bool {
     tokio::select! { _ = tokio::time::sleep(duration) => false, _ = cancel.cancelled() => true }
+}
+
+/// A FLOOD_WAIT longer than the configured ceiling ends the job in a resumable state.
+fn failure_state(error: &ApplicationError, cancel: &CancellationToken) -> SyncJobState {
+    if cancel.is_cancelled() {
+        SyncJobState::Interrupted
+    } else if matches!(error, ApplicationError::TelegramFloodWait { .. }) {
+        SyncJobState::RateLimited
+    } else {
+        SyncJobState::Failed
+    }
+}
+
+fn failure_summary(error: &ApplicationError) -> String {
+    match error {
+        ApplicationError::TelegramFloodWait {
+            retry_after_seconds,
+        } => format!("Telegram rate limit: retry after {retry_after_seconds} s"),
+        other => other.to_string(),
+    }
 }
 
 fn cursor_advances(old: Option<MessageId>, new: Option<MessageId>) -> bool {
@@ -507,13 +559,9 @@ impl SyncCoordinator {
                                         job_progress: Some(SyncChatProgress {
                                             job_id: job.id.clone(),
                                             chat_id: id,
-                                            state: if cancel.is_cancelled() {
-                                                SyncJobState::Interrupted
-                                            } else {
-                                                SyncJobState::Failed
-                                            },
+                                            state: failure_state(&error, &cancel),
                                             committed_messages: committed,
-                                            summary_error: Some(error.to_string()),
+                                            summary_error: Some(failure_summary(&error)),
                                         }),
                                         ..Default::default()
                                     })
@@ -527,14 +575,12 @@ impl SyncCoordinator {
                         SyncScope::All => run_all(&engine, &job.id, &cancel).await,
                     };
                     job.completed_at = Some(Utc::now());
-                    job.state = if cancel.is_cancelled() {
-                        SyncJobState::Interrupted
-                    } else if result.is_ok() {
-                        SyncJobState::Succeeded
-                    } else {
-                        SyncJobState::Failed
+                    job.state = match &result {
+                        _ if cancel.is_cancelled() => SyncJobState::Interrupted,
+                        Ok(()) => SyncJobState::Succeeded,
+                        Err(error) => failure_state(error, &cancel),
                     };
-                    job.summary_error = result.err().map(|e| e.to_string());
+                    job.summary_error = result.err().map(|e| failure_summary(&e));
                     if let Err(error) = repository.save_job(job.clone()).await {
                         job.state = SyncJobState::Interrupted;
                         job.summary_error = Some(format!("cannot persist terminal sync job state: {error}"));
@@ -678,7 +724,10 @@ impl SyncCoordinator {
             let job = self.get_job(id).await?;
             if matches!(
                 job.state,
-                SyncJobState::Succeeded | SyncJobState::Failed | SyncJobState::Interrupted
+                SyncJobState::Succeeded
+                    | SyncJobState::Failed
+                    | SyncJobState::Interrupted
+                    | SyncJobState::RateLimited
             ) {
                 return Ok(job);
             }
@@ -824,7 +873,7 @@ async fn run_all(
             return Err(ApplicationError::Conflict);
         }
         if let Err(error) = engine.sync_chat(job_id, id, cancel).await {
-            failures.push(format!("{}: {error}", id.get()));
+            failures.push(format!("{}: {}", id.get(), failure_summary(&error)));
             let committed = engine
                 .repository
                 .list_chat_progress(job_id)
@@ -838,17 +887,18 @@ async fn run_all(
                     job_progress: Some(SyncChatProgress {
                         job_id: job_id.into(),
                         chat_id: id,
-                        state: if cancel.is_cancelled() {
-                            SyncJobState::Interrupted
-                        } else {
-                            SyncJobState::Failed
-                        },
+                        state: failure_state(&error, cancel),
                         committed_messages: committed,
-                        summary_error: Some(error.to_string()),
+                        summary_error: Some(failure_summary(&error)),
                     }),
                     ..Default::default()
                 })
                 .await?;
+            if matches!(error, ApplicationError::TelegramFloodWait { .. }) && !cancel.is_cancelled()
+            {
+                // Remaining chats would hit the same limit; stop and let a later run resume.
+                return Err(error);
+            }
         }
     }
     if failures.is_empty() {

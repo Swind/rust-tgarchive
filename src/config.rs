@@ -8,6 +8,59 @@ const DEFAULT_DATABASE_URL: &str = "sqlite://telegram.db";
 const DEFAULT_SERVER_BIND: &str = "127.0.0.1:8080";
 const DEFAULT_SESSION_FILE: &str = "telegram.session";
 
+const DEFAULT_PAGE_DELAY_MS: u64 = 1000;
+const MAX_PAGE_DELAY_MS: u64 = 60_000;
+const DEFAULT_MAX_FLOOD_WAIT_SECS: u64 = 300;
+const MAX_FLOOD_WAIT_SECS: u64 = 86_400;
+
+/// Pacing of Telegram history requests (`SYNC_PAGE_DELAY_MS`, `SYNC_MAX_FLOOD_WAIT_SECS`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyncPacing {
+    pub page_delay: std::time::Duration,
+    pub max_flood_wait: std::time::Duration,
+}
+
+fn parse_bounded(name: &str, raw: Option<&str>, default: u64, max: u64) -> Result<u64, String> {
+    let Some(raw) = raw else { return Ok(default) };
+    raw.trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|value| *value <= max)
+        .ok_or_else(|| {
+            format!("{name} must be an integer between 0 and {max} (got {raw:?}); fix or unset it")
+        })
+}
+
+impl SyncPacing {
+    pub fn from_values(
+        page_delay_ms: Option<&str>,
+        max_flood_wait_secs: Option<&str>,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            page_delay: std::time::Duration::from_millis(parse_bounded(
+                "SYNC_PAGE_DELAY_MS",
+                page_delay_ms,
+                DEFAULT_PAGE_DELAY_MS,
+                MAX_PAGE_DELAY_MS,
+            )?),
+            max_flood_wait: std::time::Duration::from_secs(parse_bounded(
+                "SYNC_MAX_FLOOD_WAIT_SECS",
+                max_flood_wait_secs,
+                DEFAULT_MAX_FLOOD_WAIT_SECS,
+                MAX_FLOOD_WAIT_SECS,
+            )?),
+        })
+    }
+
+    pub fn from_env() -> Result<Self, String> {
+        let read = |name| env::var(name).ok();
+        Self::from_values(
+            read("SYNC_PAGE_DELAY_MS").as_deref(),
+            read("SYNC_MAX_FLOOD_WAIT_SECS").as_deref(),
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub database_url: String,
@@ -137,6 +190,32 @@ mod tests {
             api_hash: "super-secret-hash".into(),
             session_file: session,
         }
+    }
+
+    #[test]
+    fn sync_pacing_defaults_and_validation() {
+        let ok = SyncPacing::from_values(None, None).unwrap();
+        assert_eq!(ok.page_delay.as_millis(), 1000);
+        assert_eq!(ok.max_flood_wait.as_secs(), 300);
+        assert!(
+            SyncPacing::from_values(Some("0"), Some("0"))
+                .unwrap()
+                .page_delay
+                .is_zero()
+        );
+        assert_eq!(
+            SyncPacing::from_values(Some("60000"), None)
+                .unwrap()
+                .page_delay
+                .as_millis(),
+            60_000
+        );
+        for bad in ["60001", "-1", "abc", "", "1.5"] {
+            let err = SyncPacing::from_values(Some(bad), None).unwrap_err();
+            assert!(err.contains("SYNC_PAGE_DELAY_MS") && err.contains("0 and 60000"));
+        }
+        let err = SyncPacing::from_values(None, Some("x")).unwrap_err();
+        assert!(err.contains("SYNC_MAX_FLOOD_WAIT_SECS"));
     }
 
     #[test]

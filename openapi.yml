@@ -268,13 +268,19 @@ paths:
         schema:
           type: integer
           format: int64
+      - name: backfill
+        in: query
+        description: Also enqueue a history sync for the chat (needs the running collector). Reuses an active job instead of duplicating it.
+        required: false
+        schema:
+          type: boolean
       responses:
         '200':
-          description: Chat is now tracked (idempotent)
+          description: Chat is now tracked (idempotent); with backfill=true also carries the history sync job id
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ChatDto'
+                $ref: '#/components/schemas/TrackChatDto'
         '400':
           description: ''
           content:
@@ -288,7 +294,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorEnvelope'
         '503':
-          description: ''
+          description: Storage unavailable, or backfill requested without a running collector / with a full queue
           content:
             application/json:
               schema:
@@ -776,6 +782,33 @@ components:
           type:
           - string
           - 'null'
+    RateLimitDto:
+      type: object
+      required:
+      - interval_ms
+      - base_interval_ms
+      properties:
+        base_interval_ms:
+          type: integer
+          format: int64
+          description: Configured base interval (`SYNC_PAGE_DELAY_MS`).
+          minimum: 0
+        interval_ms:
+          type: integer
+          format: int64
+          description: Current minimum interval between history requests (grows after FLOOD_WAIT).
+          minimum: 0
+        last_flood_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        last_flood_wait_secs:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
     StatusDto:
       type: object
       required:
@@ -785,6 +818,11 @@ components:
       properties:
         collector:
           $ref: '#/components/schemas/ComponentStatusDto'
+        rate_limit:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/RateLimitDto'
+            description: Pacing of Telegram history requests; absent when this process has no Telegram access.
         sync_jobs:
           type: array
           items:
@@ -824,6 +862,22 @@ components:
           format: date-time
         state:
           type: string
+    TrackChatDto:
+      allOf:
+      - $ref: '#/components/schemas/ChatDto'
+      - type: object
+        properties:
+          backfill:
+            type:
+            - string
+            - 'null'
+            description: '`queued` for a newly enqueued job, `already_running` when an existing job was reused.'
+          backfill_job_id:
+            type:
+            - string
+            - 'null'
+            description: History sync job covering this chat (only with `backfill=true`).
+      description: 'Response of `PUT /chats/{id}/tracking`: the chat, plus backfill info when requested.'
 tags:
 - name: archive
   description: Local Telegram archive queries

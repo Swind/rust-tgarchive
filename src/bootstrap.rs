@@ -8,11 +8,12 @@ use crate::{
     application::{
         ArchiveWriter, PageSize, RepositoryError, SyncJob, SyncJobState, SyncRepository, SyncScope,
         ingestion_worker::{self, IngestSink},
+        pacer::RatePacer,
         realtime::{ReconnectBackoff, supervise_realtime_with_status},
         services::{Application, CollectorStatusHandle, ComponentState, ComponentStatus},
         sync::{CancellationToken, SyncCoordinator, SyncEngine},
     },
-    config::{Config, TelegramConfig},
+    config::{Config, SyncPacing, TelegramConfig},
     domain::Chat,
     infrastructure::persistence::sqlite::SqliteStore,
     infrastructure::telegram::{
@@ -86,9 +87,15 @@ pub async fn run() -> Result<(), CliError> {
         PreparedInvocation::SetTracking {
             chat_id,
             tracked,
+            backfill,
             output,
         } => {
             let config = Config::load(None);
+            let pacing = if backfill {
+                Some(SyncPacing::from_env().map_err(CliError::InvalidInput)?)
+            } else {
+                None
+            };
             let store = open_existing_store(&config.database_url).await?;
             let application = Application::new(
                 store.clone(),
@@ -101,6 +108,9 @@ pub async fn run() -> Result<(), CliError> {
             let result = execute_set_tracking(chat_id, tracked, output, &application).await;
             store.close().await;
             print_output(result?);
+            if pacing.is_some() {
+                backfill_after_track(chat_id, output).await?;
+            }
         }
         PreparedInvocation::Sync { scope, output } => sync_archive(scope, output).await?,
     }
@@ -358,6 +368,7 @@ async fn serve(bind: Option<std::net::SocketAddr>, query_only: bool) -> Result<(
 
     let telegram = Config::telegram().map_err(CliError::InvalidInput)?;
     telegram.validate_paths().map_err(CliError::InvalidInput)?;
+    SyncPacing::from_env().map_err(CliError::InvalidInput)?;
     let adapter = open_authorized_telegram(&telegram).await?;
     let result = serve_with_telegram(listener, &config.database_url, adapter.clone()).await;
     let shutdown = adapter
@@ -391,14 +402,17 @@ async fn serve_with_telegram(
         let collector =
             CollectorStatusHandle::new(ComponentStatus::new(ComponentState::Starting, None));
         runtime.start_realtime(adapter.clone(), store.clone(), collector.clone());
-        let application = Arc::new(Application::new(
-            store.clone(),
-            store.clone(),
-            store.clone(),
-            store.clone(),
-            Some(adapter),
-            collector,
-        ));
+        let application = Arc::new(
+            Application::new(
+                store.clone(),
+                store.clone(),
+                store.clone(),
+                store.clone(),
+                Some(adapter),
+                collector,
+            )
+            .with_rate_limit(Arc::clone(runtime.engine.pacer())),
+        );
         let serving = serve_router(
             listener,
             rest::router_with_sync(application, Some(Arc::clone(&runtime.coordinator))),
@@ -524,6 +538,7 @@ async fn start_sync_runtime(
     store: Arc<SqliteStore>,
     adapter: Arc<TelegramAdapter>,
 ) -> Result<SyncRuntime, CliError> {
+    let pacing = SyncPacing::from_env().map_err(CliError::InvalidInput)?;
     crate::application::SyncRepository::recover_interrupted(store.as_ref())
         .await
         .map_err(|error| CliError::Database(error.to_string()))?;
@@ -532,13 +547,19 @@ async fn start_sync_runtime(
     let chats: Arc<dyn crate::application::ChatRepository> = store;
     let gateway: Arc<dyn crate::application::TelegramGateway> = adapter;
     let (sink, writer_task) = ingestion_worker::spawn(writer, 32);
-    let engine = Arc::new(SyncEngine::new(
-        gateway,
-        repository.clone(),
-        chats,
-        sink.clone(),
-        PageSize::DEFAULT,
-    ));
+    let engine = Arc::new(
+        SyncEngine::new(
+            gateway,
+            repository.clone(),
+            chats,
+            sink.clone(),
+            PageSize::DEFAULT,
+        )
+        .with_rate_control(
+            Arc::new(RatePacer::new(pacing.page_delay)),
+            pacing.max_flood_wait,
+        ),
+    );
     let coordinator = SyncCoordinator::spawn(engine.clone(), repository, 16);
     Ok(SyncRuntime {
         coordinator,
@@ -659,6 +680,24 @@ fn db_error(error: crate::application::RepositoryError) -> CliError {
     CliError::Database(error.to_string())
 }
 
+/// `chats track --backfill` (no server): the chat is already tracked and committed; run the same
+/// in-process history sync as `sync chat`. Missing Telegram credentials leave tracking in place
+/// and fail with instructions for running the sync later.
+async fn backfill_after_track(
+    chat_id: crate::domain::ChatId,
+    output: OutputFormat,
+) -> Result<(), CliError> {
+    if let Err(reason) = Config::telegram() {
+        return Err(CliError::InvalidInput(format!(
+            "chat {} is tracked, but the backfill was not run: {reason}. Set the Telegram credentials and run `telegram-archive sync chat {}` (or track via the running server with PUT /api/v1/chats/{}/tracking?backfill=true)",
+            chat_id.get(),
+            chat_id.get(),
+            chat_id.get()
+        )));
+    }
+    sync_archive(SyncScope::Chat(chat_id), output).await
+}
+
 async fn sync_archive(scope: SyncScope, output: OutputFormat) -> Result<(), CliError> {
     let config = Config::load(None);
     if !sync_scope_allowed(&config.database_url, &scope).await? {
@@ -670,6 +709,7 @@ async fn sync_archive(scope: SyncScope, output: OutputFormat) -> Result<(), CliE
         return Ok(());
     }
     let telegram = Config::telegram().map_err(CliError::InvalidInput)?;
+    SyncPacing::from_env().map_err(CliError::InvalidInput)?;
     let adapter = open_authorized_telegram(&telegram).await?;
     let result = sync_with_adapter(&config.database_url, adapter.clone(), scope).await;
     let shutdown = adapter

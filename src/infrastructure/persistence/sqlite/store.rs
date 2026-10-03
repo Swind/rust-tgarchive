@@ -226,7 +226,10 @@ fn transition_allowed(from: &SyncJobState, to: &SyncJobState) -> bool {
                 SyncJobState::Running | SyncJobState::Failed | SyncJobState::Interrupted
             ) | (
                 SyncJobState::Running,
-                SyncJobState::Succeeded | SyncJobState::Failed | SyncJobState::Interrupted
+                SyncJobState::Succeeded
+                    | SyncJobState::Failed
+                    | SyncJobState::Interrupted
+                    | SyncJobState::RateLimited
             )
         )
 }
@@ -379,6 +382,7 @@ fn job_state(state: SyncJobState) -> &'static str {
         SyncJobState::Succeeded => "succeeded",
         SyncJobState::Failed => "failed",
         SyncJobState::Interrupted => "interrupted",
+        SyncJobState::RateLimited => "rate_limited",
     }
 }
 
@@ -389,6 +393,7 @@ fn parse_job_state(value: &str) -> Result<SyncJobState, RepositoryError> {
         "succeeded" => Ok(SyncJobState::Succeeded),
         "failed" => Ok(SyncJobState::Failed),
         "interrupted" => Ok(SyncJobState::Interrupted),
+        "rate_limited" => Ok(SyncJobState::RateLimited),
         _ => Err(invalid_data(format!("unknown sync job state {value:?}"))),
     }
 }

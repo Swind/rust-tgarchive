@@ -305,6 +305,9 @@ pub enum SyncJobState {
     Succeeded,
     Failed,
     Interrupted,
+    /// Stopped because Telegram asked for a longer wait than allowed; progress is kept and a
+    /// later sync resumes from the checkpoint.
+    RateLimited,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -404,6 +407,7 @@ pub trait SyncRepository: Send + Sync {
 }
 
 pub mod ingestion_worker;
+pub mod pacer;
 pub mod realtime;
 pub mod services;
 pub mod sync;

@@ -662,3 +662,128 @@ async fn status_reports_unresolved_deletions_and_generates_request_ids() {
     let other = get(app(None), "/health/live", None).await;
     assert_ne!(other.headers()["x-request-id"].to_str().unwrap(), id);
 }
+
+async fn call(service: &axum::Router, method: &str, uri: &str) -> (StatusCode, Value) {
+    let response = service
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    (response.status(), json_body(response).await)
+}
+
+#[tokio::test]
+async fn backfill_enqueues_one_job_reuses_active_ones_and_is_opt_in() {
+    let gate = Arc::new(GatewayGate {
+        entered: Semaphore::new(0),
+        release: Semaphore::new(0),
+    });
+    let fake = Arc::new(FakePorts {
+        failure: None,
+        jobs: Mutex::new(HashMap::new()),
+        gateway_gate: Some(gate.clone()),
+    });
+    let application: Arc<Application> = Application::new(
+        fake.clone(),
+        fake.clone(),
+        fake.clone(),
+        fake.clone(),
+        None,
+        ComponentStatus::disabled(),
+    )
+    .into();
+    let (sink, writer) = ingestion_worker::spawn(fake.clone(), 1);
+    let engine = Arc::new(SyncEngine::new(
+        fake.clone(),
+        fake.clone(),
+        fake.clone(),
+        sink.clone(),
+        PageSize::new(50).unwrap(),
+    ));
+    let coordinator = SyncCoordinator::spawn(engine, fake.clone(), 4);
+    let service = router_with_sync(application.clone(), Some(coordinator.clone()));
+
+    // Without the flag nothing is enqueued and the response shape is unchanged.
+    let (status, body) = call(&service, "PUT", "/api/v1/chats/7/tracking").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.get("backfill_job_id").is_none() && body.get("backfill").is_none());
+    assert!(fake.jobs.lock().unwrap().is_empty());
+    let (_, body) = call(&service, "PUT", "/api/v1/chats/7/tracking?backfill=false").await;
+    assert!(body.get("backfill_job_id").is_none());
+    assert!(fake.jobs.lock().unwrap().is_empty());
+
+    let (status, body) = call(&service, "PUT", "/api/v1/chats/7/tracking?backfill=true").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["tracked"], true);
+    assert_eq!(body["backfill"], "queued");
+    let job_id = body["backfill_job_id"].as_str().unwrap().to_owned();
+    gate.entered.acquire().await.unwrap().forget();
+
+    // The job is active: a repeated request reuses it instead of duplicating.
+    let (status, body) = call(&service, "PUT", "/api/v1/chats/7/tracking?backfill=true").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["backfill"], "already_running");
+    assert_eq!(body["backfill_job_id"], job_id);
+    assert_eq!(fake.jobs.lock().unwrap().len(), 1);
+
+    // Unknown chats are rejected before anything is enqueued.
+    let (status, _) = call(&service, "PUT", "/api/v1/chats/8/tracking?backfill=true").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Without a running collector, backfill is refused up front (503) instead of silently skipped.
+    let (status, body) = call(
+        &router(application),
+        "PUT",
+        "/api/v1/chats/7/tracking?backfill=true",
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"]["code"], "busy");
+
+    gate.release.add_permits(2);
+    coordinator.wait_job(&job_id).await.unwrap();
+    coordinator.shutdown().await.unwrap();
+    drop(coordinator);
+    drop(sink);
+    writer.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn status_exposes_the_history_rate_limit_only_when_a_pacer_is_attached() {
+    use telegram_message_archive::application::pacer::RatePacer;
+    let fake = Arc::new(FakePorts {
+        failure: None,
+        jobs: Mutex::new(HashMap::new()),
+        gateway_gate: None,
+    });
+    let build = || {
+        Application::new(
+            fake.clone(),
+            fake.clone(),
+            fake.clone(),
+            fake.clone(),
+            None,
+            ComponentStatus::disabled(),
+        )
+    };
+    let body = json_body(get(Arc::new(build()), "/api/v1/status", None).await).await;
+    assert!(body.get("rate_limit").is_none());
+
+    let pacer = Arc::new(RatePacer::new(std::time::Duration::from_millis(1000)));
+    let application = Arc::new(build().with_rate_limit(pacer.clone()));
+    let body = json_body(get(application.clone(), "/api/v1/status", None).await).await;
+    assert_eq!(body["rate_limit"]["interval_ms"], 1000);
+    assert_eq!(body["rate_limit"]["last_flood_wait_secs"], Value::Null);
+    pacer.on_flood(42, false);
+    let body = json_body(get(application, "/api/v1/status", None).await).await;
+    assert_eq!(body["rate_limit"]["interval_ms"], 2000);
+    assert_eq!(body["rate_limit"]["base_interval_ms"], 1000);
+    assert_eq!(body["rate_limit"]["last_flood_wait_secs"], 42);
+    assert!(body["rate_limit"]["last_flood_at"].is_string());
+}

@@ -64,6 +64,14 @@ Phase 8 supervisor／catch-up：`serve`（已設定 Telegram）啟動 realtime t
 - 已知限制：common 刪除先於訊息存檔到達時不再被記住；讀取端 CLI 需 DB 已套用 0003（執行 `db init` 或任一寫入指令）；track 後的歷史回補須手動 `sync chat`；進行中的歷史 job 不因 untrack 中斷。
 - 因前提「收集所有 chat」而調整的既有測試：`tests/sync.rs`、`tests/realtime_supervisor.rs`、`tests/rest_routes.rs` 的 fake chat 改為 `tracked: true`；`src/infrastructure/telegram/realtime.rs` 既有 stream/crash 測試改帶固定 scope（原更新視為在範圍內）。新測試見 `tests/tracking.rs` 與 realtime 單元測試 `untracked_updates_write_nothing_but_still_advance_the_update_checkpoint`。真實帳號驗證 pending。
 
+## 抓取頻率與限流
+
+- `application/pacer.rs` 的 `RatePacer`（每行程一個，掛在 `SyncEngine`，歷史 job 與 realtime catch-up/baseline 共用）以「預約時槽」方式強制 getHistory 最小間隔（`SYNC_PAGE_DELAY_MS`，預設 1000，0 關閉）；FLOOD_WAIT 時間隔 ×2（上限 10 s）、每 50 次成功減半回基準，並讓所有 history 請求等滿該秒數。`SYNC_MAX_FLOOD_WAIT_SECS`（預設 300）以上、或同頁連續 5 次 FLOOD_WAIT，不再睡等：歷史 job 轉為新狀態 `rate_limited`（可續跑，摘要 `Telegram rate limit: retry after N s`，進度保留），catch-up 略過該 chat（WARN + `last_error`）。
+- Coordinator 本來就是單一 worker，歷史 job 已序列化；新增測試鎖定此行為。
+- Migration `0004_sync_rate_limited_state.sql`：重建 `sync_jobs`／`sync_job_chats` 以放寬 state CHECK（保留資料）。
+- `/api/v1/status` 新增 `rate_limit`；`PUT /chats/{id}/tracking?backfill=true` 與 CLI `chats track --backfill`。
+- 測試：`tests/rate_pacing.rs`（paused time；間隔、共用 pacer、0 關閉、序列化、降速、上限暫停與續跑、catch-up 略過）、`src/application/pacer.rs` 與 `src/config.rs` 單元測試（衰減、取消、env 驗證）、`tests/rest_routes.rs`（status、backfill 不重複）、`tests/tracking.rs`（CLI backfill、migration 0004、真 SQLite backfill）。既有測試未修改。限制：CLI 的程序內 backfill 與真實 FLOOD_WAIT 行為未以真實帳號驗證。
+
 ## Manual acceptance
 
 使用者指定本輪先完成程式與自動測試，真實帳號驗收稍後進行。真實 Telegram credentials 尚未提供。本專案不將 secrets 放入文件或 Git。登入、dialog、真實同步與更新、重啟恢復等人工驗收在取得環境前皆為 pending；自動 tests 不取代這些驗收。
