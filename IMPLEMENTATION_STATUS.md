@@ -102,3 +102,10 @@ P9-T01/T02 自動證據：readiness 在 DB 不可用或 collector `failed` 回 5
 仍 pending（不以 fake tests 取代）：真實即時 new/edit/delete、離線缺口補回、真實斷網重連、update 負載測試、基本群組、fresh-install 走讀。
 
 Update-gap reconciliation：`differenceTooLong`／`channelDifferenceTooLong`（離線過久）不再致命。adapter 重設 `FileSession` update state（account：`updates.getState`＋清除 channel states；channel：移除該 channel），重建 stream，supervisor 對 tracked chats 做 message-level catch-up（untracked channel 不 catch-up），狀態 `degraded`→`running`（附說明與次數）；3 次／10 分鐘後以 backoff 避免空轉。fake 測試涵蓋 account／channel（tracked／untracked）／重複／FileSession 持久化／狀態轉換；真實帳號尚未驗證。限制：gap 期間較舊訊息的編輯與刪除可能遺漏。
+
+## Catch-up gap fix 與 .env 自動載入
+
+- 根因：`sync_chat` 完成歷史後從不寫 `catchup_after_id`，之後 catch-up／`baseline_new_tracked` 以 Telegram 當下最新 ID 作 baseline，歷史同步到 serve 啟動之間的訊息永遠不會被封存；歷史完成後 `sync chat` 立即返回。
+- 修正：歷史第一頁在 `catchup_after_id` 為空時於同一交易寫入該頁最大 ID（空聊天室為 0）；baseline 退路使用新增的 `SyncRepository::newest_archived_id`（`MAX(message_id)`），僅完全無資料且無歷史的聊天室才用 Telegram 最新 ID；歷史完成的 `sync chat` 改跑向前 catch-up。store 的 MAX-merge 為單調，不需修改。
+- `.env`：`dotenvy` 於設定解析前載入 `./.env`，行程環境優先；`TELEGRAM_ARCHIVE_NO_DOTENV=1` 停用；全域 `--env-file <PATH>` 必須存在。所有 CLI 子行程測試設定 `TELEGRAM_ARCHIVE_NO_DOTENV=1`。
+- `sync all`（無 tracked chats）現在先驗證 `SYNC_PAGE_DELAY_MS`／`SYNC_MAX_FLOOD_WAIT_SECS`。

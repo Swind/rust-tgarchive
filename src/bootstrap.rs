@@ -33,13 +33,15 @@ fn log_filter() -> tracing_subscriber::EnvFilter {
 }
 
 pub async fn run() -> Result<(), CliError> {
+    let cli = Cli::parse();
+    crate::config::load_dotenv(cli.env_file.as_deref()).map_err(CliError::InvalidInput)?;
     let _ = tracing_subscriber::fmt()
         .with_env_filter(log_filter())
         .with_writer(std::io::stderr)
         .with_target(false)
         .try_init();
 
-    match prepare(Cli::parse())? {
+    match prepare(cli)? {
         PreparedInvocation::InitializeDatabase {
             output,
             database_url,
@@ -327,7 +329,7 @@ async fn readonly_application(
 const QUERY_ONLY_EXPLICIT_DETAIL: &str =
     "query-only mode (--query-only); realtime collector not started";
 const QUERY_ONLY_UNCONFIGURED_DETAIL: &str = "Telegram not configured (TELEGRAM_API_ID/TELEGRAM_API_HASH not set); realtime collector not started";
-const QUERY_ONLY_UNCONFIGURED_WARNING: &str = "TELEGRAM_API_ID/TELEGRAM_API_HASH not set; serving archive queries only, realtime collection is disabled. Load .env (set -a; . ./.env; set +a) or pass --query-only to silence this.";
+const QUERY_ONLY_UNCONFIGURED_WARNING: &str = "TELEGRAM_API_ID/TELEGRAM_API_HASH not set; serving archive queries only, realtime collection is disabled. Set them in the environment or in ./.env (or --env-file), or pass --query-only to silence this.";
 
 /// Returns (status detail, optional stderr warning) when serving without Telegram.
 fn query_only_notice(
@@ -699,6 +701,7 @@ async fn backfill_after_track(
 }
 
 async fn sync_archive(scope: SyncScope, output: OutputFormat) -> Result<(), CliError> {
+    SyncPacing::from_env().map_err(CliError::InvalidInput)?;
     let config = Config::load(None);
     if !sync_scope_allowed(&config.database_url, &scope).await? {
         print_output(if output == OutputFormat::Json {

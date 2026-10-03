@@ -128,19 +128,25 @@ impl SyncEngine {
             .await?
             .unwrap_or_default();
         if checkpoint.history_complete {
+            // History is done; fill any forward gap (messages newer than the archive).
+            let caught_up = self.catch_up_chat(chat_id, cancel).await?;
             self.sink
                 .submit(IngestBatch {
                     job_progress: Some(SyncChatProgress {
                         job_id: job_id.to_owned(),
                         chat_id,
                         state: SyncJobState::Succeeded,
-                        committed_messages: 0,
+                        committed_messages: caught_up,
                         summary_error: None,
                     }),
                     ..Default::default()
                 })
                 .await?;
-            return Ok(0);
+            return Ok(caught_up);
+        }
+        if checkpoint.catchup_after_id.is_none() && checkpoint.history_before_id.is_some() {
+            // Legacy/partial state: this page is not the newest, so use the archive's top.
+            checkpoint.catchup_after_id = Some(self.archived_baseline(chat_id).await?);
         }
         let mut committed = 0u64;
         loop {
@@ -168,6 +174,17 @@ impl SyncEngine {
             let mut next_checkpoint = checkpoint.clone();
             next_checkpoint.history_before_id = next;
             next_checkpoint.history_complete = page.exhausted;
+            if next_checkpoint.catchup_after_id.is_none() {
+                // The first page of a fresh history walk holds the newest messages; anything
+                // newer than it must later be caught up, never baselined past.
+                next_checkpoint.catchup_after_id = Some(
+                    page.records
+                        .iter()
+                        .map(record_message_id)
+                        .max_by_key(|id| id.get())
+                        .unwrap_or(MessageId::BEFORE_FIRST),
+                );
+            }
             let progress = SyncChatProgress {
                 job_id: job_id.to_owned(),
                 chat_id,
@@ -196,6 +213,16 @@ impl SyncEngine {
             }
         }
         Ok(committed)
+    }
+
+    /// Newest archived ID, or "before the first message" when nothing is archived (safe: it
+    /// only re-fetches, never skips).
+    async fn archived_baseline(&self, chat_id: ChatId) -> Result<MessageId, ApplicationError> {
+        Ok(self
+            .repository
+            .newest_archived_id(chat_id)
+            .await?
+            .unwrap_or(MessageId::BEFORE_FIRST))
     }
 
     /// Fetches messages newer than the persisted `catchup_after_id` for one chat, ascending,
@@ -241,9 +268,17 @@ impl SyncEngine {
             }
             return Ok(0);
         };
+        if checkpoint.catchup_after_id.is_none()
+            && (checkpoint.history_complete || checkpoint.history_before_id.is_some())
+        {
+            checkpoint.catchup_after_id = Some(self.archived_baseline(chat_id).await?);
+        } else if checkpoint.catchup_after_id.is_none()
+            && let Some(archived) = self.repository.newest_archived_id(chat_id).await?
+        {
+            checkpoint.catchup_after_id = Some(archived);
+        }
         let Some(mut after) = checkpoint.catchup_after_id else {
-            // No earlier baseline: history sync owns everything up to now, so start the
-            // catch-up boundary at this round's bound rather than inventing a gap.
+            // Nothing archived and no history yet: start at this round's bound.
             checkpoint.catchup_after_id = Some(upper);
             self.sink
                 .submit(IngestBatch {

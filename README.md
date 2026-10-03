@@ -26,11 +26,12 @@ SYNC_PAGE_DELAY_MS=1000            # 選用；history 請求最小間隔，見�
 SYNC_MAX_FLOOD_WAIT_SECS=300       # 選用；願意等待的 FLOOD_WAIT 上限
 ```
 
-**執行檔不會自動載入 `.env`。** 手動載入到目前 shell：
+**執行檔啟動時會自動載入目前工作目錄的 `.env`**（在解析設定之前）：
 
-```sh
-set -a; . ./.env; set +a
-```
+- 已存在的行程環境變數**優先**，`.env` 不會覆蓋它們。
+- 預設的 `.env` 不存在時靜默略過；以 `--env-file <PATH>` 指定檔案時，檔案必須存在，否則報錯。`--env-file` 為全域旗標，並取代 `./.env`。
+- 設定 `TELEGRAM_ARCHIVE_NO_DOTENV=1` 可停用自動載入 `./.env`（不影響明確指定的 `--env-file`）。
+- 格式為單純的 `KEY=VALUE`（支援註解與引號，不做 shell 展開）；錯誤訊息不會印出值。
 
 下列範例以 `telegram-archive` 代表 `cargo run -q --` 或 `target/debug/telegram-archive`。
 
@@ -63,6 +64,7 @@ telegram-archive serve
 
 - `chats track` 預設**不會**抓取歷史，只決定之後收集哪些聊天室；歷史需手動 `sync chat`／`sync all`，或加 `--backfill`（見「抓取頻率與限流」）。
 - `chats untrack` 停止收集，但保留已存訊息。
+- 歷史已完成的聊天室再執行 `sync chat` 會改為**向前 catch-up**：抓取比 `catchup_after_id`（或已封存的最大訊息 ID）更新的訊息（上界於開始時固定、同樣受 pacing 限制），可在不啟動 `serve` 的情況下補上缺口。歷史回補第一頁會同時記錄 `catchup_after_id`，因此之後 `serve` 的 baseline 不會跳過歷史同步後才出現的訊息；已有封存訊息的聊天室，baseline 取已封存的最大 ID，只有完全沒有資料的新聊天室才以 Telegram 目前最新 ID 作 baseline。
 - 對未 track 的聊天室執行 `sync chat` 會被拒絕（REST 回 409 `chat_not_tracked`）。
 - `serve` 執行期間 track／untrack 不需重啟。
 
@@ -117,7 +119,7 @@ telegram-archive serve --query-only     # 只提供已存資料的查詢，不�
 telegram-archive serve --bind 127.0.0.1:9000
 ```
 
-- 若未設定 `TELEGRAM_API_ID`／`TELEGRAM_API_HASH`（例如忘了載入 `.env`），`serve` 會退回只查詢模式：啟動時於 stderr 印出警告，**即時收集不會執行**，`/api/v1/status` 的 `collector.detail` 會註明 Telegram 未設定。明確指定 `--query-only` 則不印警告，detail 註明為 `--query-only`。
+- 若未設定 `TELEGRAM_API_ID`／`TELEGRAM_API_HASH`（例如 `.env` 不在目前工作目錄），`serve` 會退回只查詢模式：啟動時於 stderr 印出警告，**即時收集不會執行**，`/api/v1/status` 的 `collector.detail` 會註明 Telegram 未設定。明確指定 `--query-only` 則不印警告，detail 註明為 `--query-only`。
 - 只能綁定 loopback 位址；**API 沒有身分驗證**。遠端存取請自行用 SSH tunnel 或有驗證的反向代理。
 - Collector 狀態請查 `GET /api/v1/status`：`starting → catching_up → running → reconnecting → stopped／failed`（`--query-only` 為 `disabled`）。該回應也含 `unresolved_deletions`（無法對應聊天室的刪除數）。`/health/live` 為存活檢查；`/health/ready` 在資料庫不可用或 collector `failed` 時回 503。
 - `telegram-archive status` 是獨立程序，只讀資料庫，**看不到**執行中伺服器的 collector，會顯示 `disabled`；請用 REST。

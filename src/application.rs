@@ -392,6 +392,13 @@ pub trait SyncRepository: Send + Sync {
         &self,
         chat_id: ChatId,
     ) -> Result<Option<ChatCheckpoint>, RepositoryError>;
+    /// Newest message ID archived for the chat; used to baseline catch-up without a gap.
+    async fn newest_archived_id(
+        &self,
+        _chat_id: ChatId,
+    ) -> Result<Option<MessageId>, RepositoryError> {
+        Ok(None)
+    }
     async fn save_job(&self, job: SyncJob) -> Result<(), RepositoryError>;
     async fn get_job(&self, id: &str) -> Result<Option<SyncJob>, RepositoryError>;
     async fn list_jobs(&self) -> Result<Vec<SyncJob>, RepositoryError>;

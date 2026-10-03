@@ -2650,6 +2650,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "clap",
+ "dotenvy",
  "glass_pumpkin",
  "grammers-client",
  "grammers-session",

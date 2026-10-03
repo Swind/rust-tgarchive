@@ -13,6 +13,44 @@ const MAX_PAGE_DELAY_MS: u64 = 60_000;
 const DEFAULT_MAX_FLOOD_WAIT_SECS: u64 = 300;
 const MAX_FLOOD_WAIT_SECS: u64 = 86_400;
 
+/// Loads `.env` values into the process environment without overriding existing variables.
+/// Without `explicit`, `./.env` is read when present (silently skipped if missing) unless
+/// `TELEGRAM_ARCHIVE_NO_DOTENV` is set to a non-empty value other than `0`. An explicit path
+/// must exist. Values are never logged.
+pub fn load_dotenv(explicit: Option<&Path>) -> Result<(), String> {
+    match explicit {
+        Some(path) => dotenvy::from_path(path).map_err(|error| {
+            format!(
+                "cannot load env file {}: {}",
+                path.display(),
+                dotenv_reason(&error)
+            )
+        }),
+        None => {
+            let disabled = env::var("TELEGRAM_ARCHIVE_NO_DOTENV")
+                .is_ok_and(|value| !value.is_empty() && value != "0");
+            if disabled {
+                return Ok(());
+            }
+            match dotenvy::from_path(".env") {
+                Err(dotenvy::Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                    Ok(())
+                }
+                Err(error) => Err(format!("cannot load .env: {}", dotenv_reason(&error))),
+                Ok(()) => Ok(()),
+            }
+        }
+    }
+}
+
+/// Error text that never echoes file contents.
+fn dotenv_reason(error: &dotenvy::Error) -> String {
+    match error {
+        dotenvy::Error::Io(error) => error.to_string(),
+        _ => "invalid syntax".into(),
+    }
+}
+
 /// Pacing of Telegram history requests (`SYNC_PAGE_DELAY_MS`, `SYNC_MAX_FLOOD_WAIT_SECS`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SyncPacing {

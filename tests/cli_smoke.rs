@@ -18,6 +18,7 @@ fn database_url(directory: &TempDir) -> String {
 fn invoke(url: &str, args: &[&str]) -> std::process::Output {
     Command::new(BIN)
         .env_clear()
+        .env("TELEGRAM_ARCHIVE_NO_DOTENV", "1")
         .env("DATABASE_URL", url)
         .args(args)
         .output()
@@ -80,6 +81,7 @@ async fn seed(url: &str) {
 fn help_and_bad_arguments_need_no_database_or_telegram_credentials() {
     let help = Command::new(BIN)
         .env_clear()
+        .env("TELEGRAM_ARCHIVE_NO_DOTENV", "1")
         .arg("--help")
         .output()
         .unwrap();
@@ -88,6 +90,7 @@ fn help_and_bad_arguments_need_no_database_or_telegram_credentials() {
 
     let bad_limit = Command::new(BIN)
         .env_clear()
+        .env("TELEGRAM_ARCHIVE_NO_DOTENV", "1")
         .args(["messages", "list", "--limit", "0"])
         .output()
         .unwrap();
@@ -96,6 +99,7 @@ fn help_and_bad_arguments_need_no_database_or_telegram_credentials() {
 
     let bad_cursor = Command::new(BIN)
         .env_clear()
+        .env("TELEGRAM_ARCHIVE_NO_DOTENV", "1")
         .args(["messages", "list", "--before", "not-a-cursor"])
         .output()
         .unwrap();
@@ -104,6 +108,7 @@ fn help_and_bad_arguments_need_no_database_or_telegram_credentials() {
 
     let openapi = Command::new(BIN)
         .env_clear()
+        .env("TELEGRAM_ARCHIVE_NO_DOTENV", "1")
         .arg("openapi")
         .output()
         .unwrap();
@@ -113,6 +118,7 @@ fn help_and_bad_arguments_need_no_database_or_telegram_credentials() {
 
     let yaml = Command::new(BIN)
         .env_clear()
+        .env("TELEGRAM_ARCHIVE_NO_DOTENV", "1")
         .args(["openapi", "--format", "yaml"])
         .output()
         .unwrap();
@@ -122,6 +128,7 @@ fn help_and_bad_arguments_need_no_database_or_telegram_credentials() {
 
     let rejected_bind = Command::new(BIN)
         .env_clear()
+        .env("TELEGRAM_ARCHIVE_NO_DOTENV", "1")
         .args(["serve", "--bind", "0.0.0.0:8080"])
         .output()
         .unwrap();
@@ -135,6 +142,7 @@ async fn db_init_and_readonly_json_queries_work_without_telegram_environment() {
     let url = database_url(&directory);
     let initialized = Command::new(BIN)
         .env_clear()
+        .env("TELEGRAM_ARCHIVE_NO_DOTENV", "1")
         .args(["--output", "json", "db", "init", "--database-url", &url])
         .output()
         .unwrap();
@@ -287,6 +295,7 @@ async fn readonly_query_does_not_initialize_an_existing_empty_database() {
 fn committed_openapi_yml_matches_generated_output() {
     let output = std::process::Command::new(BIN)
         .env_clear()
+        .env("TELEGRAM_ARCHIVE_NO_DOTENV", "1")
         .args(["openapi", "--format", "yaml"])
         .output()
         .unwrap();
@@ -306,6 +315,7 @@ fn misconfiguration_fails_at_startup_with_a_fix_hint() {
     let missing_db = format!("sqlite://{}/nope/a.db", dir.path().display());
     let out = std::process::Command::new(BIN)
         .env_clear()
+        .env("TELEGRAM_ARCHIVE_NO_DOTENV", "1")
         .env("DATABASE_URL", &missing_db)
         .args(["serve", "--query-only"])
         .output()
@@ -315,6 +325,7 @@ fn misconfiguration_fails_at_startup_with_a_fix_hint() {
 
     let out = std::process::Command::new(BIN)
         .env_clear()
+        .env("TELEGRAM_ARCHIVE_NO_DOTENV", "1")
         .env("TELEGRAM_API_ID", "1")
         .env("TELEGRAM_API_HASH", "SECRET-HASH-VALUE")
         .env("TELEGRAM_SESSION_FILE", dir.path().join("no/dir/s.session"))
@@ -332,6 +343,7 @@ fn misconfiguration_fails_at_startup_with_a_fix_hint() {
 
     let out = std::process::Command::new(BIN)
         .env_clear()
+        .env("TELEGRAM_ARCHIVE_NO_DOTENV", "1")
         .env(
             "DATABASE_URL",
             format!("sqlite://{}/a.db", dir.path().display()),

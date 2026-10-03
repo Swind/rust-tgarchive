@@ -52,6 +52,7 @@ async fn serve_starts_a_loopback_query_server_without_telegram_credentials() {
     let mut server = ChildGuard(Some(
         Command::new(BIN)
             .env_clear()
+            .env("TELEGRAM_ARCHIVE_NO_DOTENV", "1")
             .env("DATABASE_URL", &url)
             .args(["serve", "--bind", &address.to_string()])
             .stdout(Stdio::piped())
@@ -102,6 +103,7 @@ async fn serve_exits_cleanly_after_sigterm() {
     let mut server = ChildGuard(Some(
         Command::new(BIN)
             .env_clear()
+            .env("TELEGRAM_ARCHIVE_NO_DOTENV", "1")
             .env("DATABASE_URL", &url)
             .args(["serve", "--bind", &address.to_string()])
             .stdout(Stdio::null())

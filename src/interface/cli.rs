@@ -22,6 +22,10 @@ use crate::{
 pub struct Cli {
     #[arg(long, global = true, value_enum, default_value = "human")]
     pub output: OutputFormat,
+    /// Load environment variables from this file instead of ./.env (must exist; real
+    /// environment variables still take precedence)
+    #[arg(long, global = true, value_name = "PATH")]
+    pub env_file: Option<std::path::PathBuf>,
     #[command(subcommand)]
     pub command: Command,
 }
@@ -252,7 +256,9 @@ pub enum PreparedCommand {
 }
 
 pub fn prepare(cli: Cli) -> Result<PreparedInvocation, CliError> {
-    let Cli { command, output } = cli;
+    let Cli {
+        command, output, ..
+    } = cli;
     match command {
         Command::Db {
             command: DatabaseCommand::Init { database_url },

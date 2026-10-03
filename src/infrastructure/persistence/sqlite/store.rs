@@ -747,6 +747,17 @@ fn row_job(row: &SqliteRow) -> Result<SyncJob, RepositoryError> {
 
 #[async_trait::async_trait]
 impl SyncRepository for SqliteStore {
+    async fn newest_archived_id(
+        &self,
+        chat_id: ChatId,
+    ) -> Result<Option<MessageId>, RepositoryError> {
+        let newest: Option<i64> =
+            sqlx::query_scalar("SELECT MAX(message_id) FROM messages WHERE chat_id=?")
+                .bind(chat_id.get())
+                .fetch_one(&self.pool)
+                .await?;
+        newest.map(MessageId::new).transpose().map_err(invalid_data)
+    }
     async fn get_checkpoint(
         &self,
         chat_id: ChatId,
