@@ -254,4 +254,16 @@ E2E=1 scripts/check.sh               # 在 check.sh 最後加跑 E2E（需 docke
 
 測試中時間被固定在 2026-03-12、時區 Asia/Taipei，且對外部主機的請求會被中止並使測試失敗。
 
+### 搜尋品質與效能
+
+- **品質評測**（在一般 `cargo test` 中，約 8 秒）：`tests/search_quality.rs` 用固定種子產生 8,000 則寫實的繁中聊天訊息（`tests/support/corpus.rs`＋`vocab.rs`：Zipf 詞頻、約 6,400 個詞／片語、地名／人名／中英技術詞／俚語／emoji／URL／數字、全形與少量簡體、約 5% 編輯、約 2% 軟刪除、多聊天室與寄件人、跨一年），經真實寫入路徑建索引，再以 60 多個查詢（常見／罕見詞、2 字、跨斷詞邊界子字串、單字、連續片語、分散詞、英文精確／前綴／複數、中英混合、全形、無結果、chat／sender／時間／include_deleted 篩選）對照**獨立於索引、直接在文字上計算的 ground truth**。門檻：所有查詢 recall 100%、精確類查詢 precision 100%、無結果 0 筆、兩種排序結果集合相同、time 排序嚴格新到舊；片語類（詞路徑允許「分散」多出的結果）要求多出的結果「可解釋」、relevance 第 1 筆必為連續命中、前 10 筆連續命中比例 ≥ 0.8。定義寫在檔案開頭註解。`cargo test --test search_quality -- --nocapture` 會印出各類別摘要表。
+- **速度基準**（手動，務必 `--release`）：
+
+  ```sh
+  cargo run --release --example search_bench -- --messages 100000 --messages 1000000 --out target/search-bench.md
+  cargo run --release --example search_bench -- --db /path/to/telegram.db   # 或 SEARCH_BENCH_DB=...
+  ```
+
+  會在暫存目錄建立同一份產生語料（`--db`／`SEARCH_BENCH_DB`：先**複製**到暫存目錄，migration／重建索引只動複本，原檔不開啟），回報寫入時間、`rebuild-index` 時間、DB 與 FTS 大小，以及約 25 種查詢（含 1M 時 relevance offset 90000 約 1.1 s 會 WARN）（常見／罕見詞、罕見單字全表 LIKE、無結果、混合、篩選、深 relevance offset、深 time keyset、include_deleted、英文前綴）× 兩種排序的 min／p50／p95／max，並以寬鬆預算標示 PASS／WARN（≤200k 則 p95 < 100 ms、更大 < 500 ms；單字全表 LIKE 放寬 10 倍）。預設只警告，`--strict` 才以非零結束。`cargo test --release --test search_bench_smoke -- --ignored` 以 2 萬則跑一次範例，避免它失修。最近一次結果與解讀見 [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md)。
+
 其他文件：[docs/](docs/)、[migrations 說明](docs/migrations.md)。

@@ -594,19 +594,28 @@ async fn list_messages(
 ) -> Result<crate::application::MessagePage, RepositoryError> {
     let after_direction = after.is_some();
     let mut query = QueryBuilder::<Sqlite>::new(MESSAGE_SELECT);
-    if search.is_some_and(|spec| spec.fts.is_some()) {
+    let fts = search.is_some_and(|spec| spec.fts.is_some());
+    if fts {
         query.push(" JOIN messages_fts ON messages_fts.rowid=m.row_id");
     }
+    // With a MATCH the FTS hits must drive the query. Without statistics the planner would
+    // otherwise walk the chat/sender index and probe the FTS table once per message (O(messages
+    // in the chat), 100-400 ms at 100k); the unary `+` keeps those columns from being indexed.
+    let plus = if fts { "+" } else { "" };
     query.push(if filters.include_deleted {
         " WHERE 1=1"
     } else {
         " WHERE m.is_deleted=0"
     });
     if let Some(chat_id) = filters.chat_id {
-        query.push(" AND m.chat_id=").push_bind(chat_id.get());
+        query
+            .push(format!(" AND {plus}m.chat_id="))
+            .push_bind(chat_id.get());
     }
     if let Some(sender_id) = filters.sender_id {
-        query.push(" AND m.sender_id=").push_bind(sender_id.get());
+        query
+            .push(format!(" AND {plus}m.sender_id="))
+            .push_bind(sender_id.get());
     }
     if let Some(from) = filters.time_range.from {
         query
@@ -652,7 +661,7 @@ async fn list_messages(
         }
     }
     let offset = search.and_then(|spec| spec.offset);
-    if offset.is_some() && search.is_some_and(|spec| spec.fts.is_some()) {
+    if offset.is_some() && fts {
         query.push(" ORDER BY bm25(messages_fts, 5.0, 1.0), m.row_id LIMIT ");
     } else {
         query.push(if after_direction {
