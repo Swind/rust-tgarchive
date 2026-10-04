@@ -122,6 +122,35 @@ test('empty hint, chat filter and deleted messages', async ({ page }) => {
   await expect(page.locator('article.anchor.deleted')).toBeVisible();
 });
 
+test('URL holds search state: deep link, filters, back navigation', async ({ page }) => {
+  await page.goto('/search?q=北咖啡&sort=time');
+  await expect(box(page)).toHaveValue('北咖啡');
+  await expect(page.getByRole('button', { name: '時間', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  const results = page.locator('a.result');
+  await expect(results).toHaveCount(2);
+  await page.getByRole('button', { name: '相關性', exact: true }).click();
+  await expect(page).not.toHaveURL(/sort=/);
+  await page.getByRole('button', { name: '時間', exact: true }).click();
+  await page.getByLabel('包含已刪除').check();
+  await expect(page).toHaveURL(/sort=time/);
+  await expect(page).toHaveURL(/include_deleted=1/);
+  await page.getByLabel('聊天室').selectOption('-1002000002');
+  await expect(page).toHaveURL(/chat=-1002000002/);
+  await page.getByLabel('聊天室').selectOption('');
+  await box(page).fill('咖啡');
+  await expect(page).toHaveURL(/q=%E5%92%96%E5%95%A1(&|$)/);
+  await expect(results).toHaveCount(4);
+  await results.first().click();
+  await expect(page).toHaveURL(/\/chats\//);
+  await page.goBack();
+  await expect(page).toHaveURL(/\/search\?.*sort=time/);
+  await expect(box(page)).toHaveValue('咖啡');
+  await expect(results).toHaveCount(4);
+  await page.goBack();
+  await expect(page.getByLabel('聊天室')).toHaveValue('-1002000002');
+  await expect(page.getByLabel('包含已刪除')).toBeChecked();
+});
+
 for (const width of [360, 768, 1400, 1600]) {
   test(`filter bar stays tidy at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 800 });

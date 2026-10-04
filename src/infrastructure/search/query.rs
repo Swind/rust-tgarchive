@@ -35,6 +35,13 @@ fn quote(term: &str) -> String {
     format!("\"{}\"", term.replace('"', "\"\""))
 }
 
+/// Quoted term; plain ASCII alphanumeric terms of 3+ characters become prefix queries
+/// (`"term"*`) so `benchmark` finds `benchmarks`.
+fn quote_term(term: &str) -> String {
+    let prefix = term.len() >= 3 && term.chars().all(|c| c.is_ascii_alphanumeric());
+    format!("{}{}", quote(term), if prefix { "*" } else { "" })
+}
+
 fn has_alnum(term: &str) -> bool {
     term.chars().any(char::is_alphanumeric)
 }
@@ -106,7 +113,7 @@ pub fn plan_query(tokenizer: &dyn SearchTokenizer, text: &str) -> SearchPlan {
             "words:({})",
             word_terms
                 .iter()
-                .map(|t| quote(t))
+                .map(|t| quote_term(t))
                 .collect::<Vec<_>>()
                 .join(" AND ")
         )
@@ -117,7 +124,7 @@ pub fn plan_query(tokenizer: &dyn SearchTokenizer, text: &str) -> SearchPlan {
             .map(|c| if is_cjk(c) { ' ' } else { c })
             .collect();
         for term in ascii.split_whitespace().filter(|term| has_alnum(term)) {
-            phrases.push(format!("words:{}", quote(term)));
+            phrases.push(format!("words:{}", quote_term(term)));
         }
         format!("({})", phrases.join(" AND "))
     });
@@ -166,14 +173,14 @@ mod tests {
     #[test]
     fn ascii_only_query_uses_words_column() {
         let fts = plan("GitLab Runner").fts.unwrap();
-        assert_eq!(fts, "words:(\"gitlab\" AND \"runner\")");
+        assert_eq!(fts, "words:(\"gitlab\"* AND \"runner\"*)");
     }
 
     #[test]
     fn mixed_query_requires_ascii_terms_on_bigram_path() {
         let fts = plan("gitlab 咖啡").fts.unwrap();
         assert!(
-            fts.contains("(bigrams:\"咖啡\" AND words:\"gitlab\")"),
+            fts.contains("(bigrams:\"咖啡\" AND words:\"gitlab\"*)"),
             "{fts}"
         );
     }
@@ -188,7 +195,14 @@ mod tests {
     }
 
     #[test]
+    fn short_ascii_terms_stay_exact_and_symbols_are_quoted() {
+        assert_eq!(plan("ab").fts.unwrap(), "words:(\"ab\")");
+        let fts = plan("foo*bar a:b").fts.unwrap();
+        assert!(!fts.contains("foo*bar"), "{fts}");
+    }
+
+    #[test]
     fn fullwidth_query_is_normalized() {
-        assert_eq!(plan("ＳＱＬｉｔｅ").fts.unwrap(), "words:(\"sqlite\")");
+        assert_eq!(plan("ＳＱＬｉｔｅ").fts.unwrap(), "words:(\"sqlite\"*)");
     }
 }

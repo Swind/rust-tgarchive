@@ -160,6 +160,37 @@ async fn evaluation_set_finds_expected_messages() {
 }
 
 #[tokio::test]
+async fn ascii_terms_match_by_prefix() {
+    let (_dir, store, _) = store().await;
+    add(
+        &store,
+        vec![
+            message(10, 1, "Some benchmarks of the GitLab runner"),
+            message(10, 2, "abc def"),
+            message(10, 3, "ab only"),
+            message(10, 4, "台北 benchmarks 咖啡"),
+        ],
+    )
+    .await;
+    assert_eq!(ids(&store, "benchmark").await, [1, 4]);
+    assert_eq!(ids(&store, "gitl").await, [1]);
+    assert_eq!(ids(&store, "ab").await, [3], "two characters stay exact");
+    assert_eq!(ids(&store, "benchmark 咖啡").await, [4]);
+    for q in [
+        "bench*",
+        "ben\"",
+        "a:b",
+        "NEAR(ben",
+        "bench OR",
+        "-ben",
+        "\"bench\"*",
+    ] {
+        ids(&store, q).await;
+    }
+    assert!(ids(&store, "bench*").await.len() <= 2);
+}
+
+#[tokio::test]
 async fn bigram_phrase_is_contiguous_not_scattered() {
     let (_dir, store, url) = store().await;
     add(

@@ -93,7 +93,7 @@ tgarchive --output json messages list --limit 5
 
 搜尋詞一律是**純文字**（不開放 FTS5 語法；`"`、`*`、`OR` 都只是一般字元）。查詢與索引使用同一套處理：Unicode NFKC 正規化 + 小寫（全形「ＳＱＬｉｔｅ」可用 `sqlite` 找到）、[jieba-rs](https://crates.io/crates/jieba-rs) 搜尋模式斷詞，以及「相鄰兩個漢字」的 bigram。索引是 SQLite FTS5 contentless-delete 表 `messages_fts(words, bigrams)`，不重複儲存原文。
 
-- **詞彙**：「台北」「咖啡」「GitLab Runner」「chromium」以詞比對（多個詞需同時出現，順序不拘；英文不分大小寫、需完整單字）。
+- **詞彙**：「台北」「咖啡」「GitLab Runner」「chromium」以詞比對（多個詞需同時出現，順序不拘；英文不分大小寫；3 個字元以上的英數詞以前綴比對，`benchmark` 可找到 `benchmarks`，2 字元以下需完整比對）。
 - **中文子字串**：連續中文以 bigram 片語比對（相鄰且依序），因此「北咖啡」可找到「新北咖啡店」，且不會比對到只是各自出現的「台北…咖啡」。
 - **單一漢字**（如「北」）：索引不存單字，改用 `LIKE '%北%'` 掃描訊息文字（較慢，結果依時間排序）。
 - **排序**：有查詢文字時預設 `--sort relevance`（BM25，詞 5：bigram 1），`--sort time` 為新到舊。Relevance 的 `next_cursor` 是不透明、帶版本的位置游標（同樣以 `--before` 傳回，不支援 `--after`）；time 沿用 keyset 游標。REST：`GET /api/v1/messages/search?q=...&sort=relevance|time`，下一頁以 `before=<next_cursor>`。
