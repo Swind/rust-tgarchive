@@ -15,7 +15,7 @@ use crate::{
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "telegram-archive",
+    name = "tgarchive",
     version,
     about = "Archive and query Telegram messages"
 )]

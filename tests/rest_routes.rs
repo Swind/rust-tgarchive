@@ -13,7 +13,7 @@ use axum::{
 use tower::ServiceExt;
 
 use serde_json::{Value, json};
-use telegram_message_archive::{
+use tgarchive::{
     application::{
         ArchiveWriter, ChatCheckpoint, ChatRepository, HistoryBoundary, HistoryPage, IngestBatch,
         ListMessagesQuery, MessagePage, MessageRepository, PageSize, RepositoryError,
@@ -756,7 +756,7 @@ async fn backfill_enqueues_one_job_reuses_active_ones_and_is_opt_in() {
 
 #[tokio::test]
 async fn status_exposes_the_history_rate_limit_only_when_a_pacer_is_attached() {
-    use telegram_message_archive::application::pacer::RatePacer;
+    use tgarchive::application::pacer::RatePacer;
     let fake = Arc::new(FakePorts {
         failure: None,
         jobs: Mutex::new(HashMap::new()),

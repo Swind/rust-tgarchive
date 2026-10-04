@@ -25,7 +25,7 @@ fi
 export TELEGRAM_SESSION_FILE="$driver_session"
 
 cargo build --quiet
-bin=target/debug/telegram-archive
+bin=target/debug/tgarchive
 
 if [ -n "${TELEGRAM_PHONE:-}" ]; then
     "$bin" auth login --phone "$TELEGRAM_PHONE"

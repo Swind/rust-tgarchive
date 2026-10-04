@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use telegram_message_archive::{
+use tgarchive::{
     application::{
         AccountDeletion, ArchiveWriter, IngestBatch, IngestRecord, MessageRepository, MessageSource,
     },
@@ -41,7 +41,7 @@ fn message(marked_chat_id: i64, message_id: i64) -> Message {
         text: Some("fixture".into()),
         reply_to: None,
         attachments: vec![Attachment {
-            kind: telegram_message_archive::domain::AttachmentKind::Other,
+            kind: tgarchive::domain::AttachmentKind::Other,
             telegram_file_id: None,
             mime_type: None,
             file_name: None,
@@ -223,16 +223,15 @@ async fn replaying_the_same_realtime_batch_after_a_crash_leaves_one_row() {
     store.write_batch(batch).await.unwrap();
 
     let page = store
-        .list(telegram_message_archive::application::ListMessagesQuery {
-            filters: telegram_message_archive::application::MessageFilters {
+        .list(tgarchive::application::ListMessagesQuery {
+            filters: tgarchive::application::MessageFilters {
                 chat_id: Some(chat_id),
                 sender_id: None,
-                time_range: telegram_message_archive::application::TimeRange::new(None, None)
-                    .unwrap(),
+                time_range: tgarchive::application::TimeRange::new(None, None).unwrap(),
             },
             before: None,
             after: None,
-            page_size: telegram_message_archive::application::PageSize::DEFAULT,
+            page_size: tgarchive::application::PageSize::DEFAULT,
         })
         .await
         .unwrap();

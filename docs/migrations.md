@@ -1,6 +1,6 @@
 # Migrations
 
-位於 `migrations/`，由 `telegram-archive db init`（及任何寫入型程序）依序套用。只會新增、不刪除資料。
+位於 `migrations/`，由 `tgarchive db init`（及任何寫入型程序）依序套用。只會新增、不刪除資料。
 
 | 檔案 | 內容 |
 |---|---|
@@ -11,7 +11,7 @@
 
 ## 升級指引
 
-- 升級程式後，**先執行 `telegram-archive db init`**，再使用讀取型命令（`chats list`、`messages ...`、`status`）。讀取型命令不會自動套用 migration；舊資料庫（0003 之前）缺少 `tracked` 欄位會出錯或無法查詢。
+- 升級程式後，**先執行 `tgarchive db init`**，再使用讀取型命令（`chats list`、`messages ...`、`status`）。讀取型命令不會自動套用 migration；舊資料庫（0003 之前）缺少 `tracked` 欄位會出錯或無法查詢。
 - 升級前請以 `sqlite3 telegram.db ".backup 'backup.db'"` 備份。
 - 套用 0004 不需任何手動動作，既有 job 紀錄保留。
 - 套用 0003 後所有既有聊天室為 untracked：需要繼續收集的請重新 `chats track <id>`。

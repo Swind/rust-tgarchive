@@ -17,7 +17,7 @@ set +a
 : "${TELEGRAM_API_HASH:?TELEGRAM_API_HASH is missing in .env}"
 
 cargo build --quiet
-bin=target/debug/telegram-archive
+bin=target/debug/tgarchive
 
 "$bin" db init
 

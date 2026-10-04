@@ -15,7 +15,7 @@ const MAX_FLOOD_WAIT_SECS: u64 = 86_400;
 
 /// Loads `.env` values into the process environment without overriding existing variables.
 /// Without `explicit`, `./.env` is read when present (silently skipped if missing) unless
-/// `TELEGRAM_ARCHIVE_NO_DOTENV` is set to a non-empty value other than `0`. An explicit path
+/// `TGARCHIVE_NO_DOTENV` (legacy alias `TELEGRAM_ARCHIVE_NO_DOTENV`) is set to a non-empty value other than `0`. An explicit path
 /// must exist. Values are never logged.
 pub fn load_dotenv(explicit: Option<&Path>) -> Result<(), String> {
     match explicit {
@@ -27,8 +27,9 @@ pub fn load_dotenv(explicit: Option<&Path>) -> Result<(), String> {
             )
         }),
         None => {
-            let disabled = env::var("TELEGRAM_ARCHIVE_NO_DOTENV")
-                .is_ok_and(|value| !value.is_empty() && value != "0");
+            let disabled = ["TGARCHIVE_NO_DOTENV", "TELEGRAM_ARCHIVE_NO_DOTENV"]
+                .iter()
+                .any(|name| env::var(name).is_ok_and(|v| !v.is_empty() && v != "0"));
             if disabled {
                 return Ok(());
             }

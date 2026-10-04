@@ -5,7 +5,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use telegram_message_archive::{
+use tgarchive::{
     application::{
         ArchiveWriter, ChatCheckpoint, ChatRepository, HistoryBoundary, HistoryPage, IngestBatch,
         ListMessagesQuery, MessagePage, MessageRepository, PageSize, RepositoryError,
@@ -290,19 +290,19 @@ async fn coordinator_rejects_unknown_and_duplicate_scope_and_drains_queue_on_shu
                 ChatId::from_telegram(ChatKind::Private, 99).unwrap()
             ))
             .await,
-        Err(telegram_message_archive::application::ApplicationError::NotFound)
+        Err(tgarchive::application::ApplicationError::NotFound)
     ));
     assert!(store.jobs.lock().await.is_empty());
     let first = coordinator.submit(SyncScope::Chat(one.id)).await.unwrap();
     gateway.fetch_started.notified().await;
     assert!(matches!(
         coordinator.submit(SyncScope::Chat(one.id)).await,
-        Err(telegram_message_archive::application::ApplicationError::Conflict)
+        Err(tgarchive::application::ApplicationError::Conflict)
     ));
     let queued = coordinator.submit(SyncScope::Chat(two.id)).await.unwrap();
     assert!(matches!(
         coordinator.submit(SyncScope::Chat(three.id)).await,
-        Err(telegram_message_archive::application::ApplicationError::Busy)
+        Err(tgarchive::application::ApplicationError::Busy)
     ));
     coordinator.shutdown().await.unwrap();
     assert_eq!(

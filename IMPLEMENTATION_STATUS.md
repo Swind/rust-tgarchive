@@ -107,5 +107,5 @@ Update-gap reconciliation：`differenceTooLong`／`channelDifferenceTooLong`（�
 
 - 根因：`sync_chat` 完成歷史後從不寫 `catchup_after_id`，之後 catch-up／`baseline_new_tracked` 以 Telegram 當下最新 ID 作 baseline，歷史同步到 serve 啟動之間的訊息永遠不會被封存；歷史完成後 `sync chat` 立即返回。
 - 修正：歷史第一頁在 `catchup_after_id` 為空時於同一交易寫入該頁最大 ID（空聊天室為 0）；baseline 退路使用新增的 `SyncRepository::newest_archived_id`（`MAX(message_id)`），僅完全無資料且無歷史的聊天室才用 Telegram 最新 ID；歷史完成的 `sync chat` 改跑向前 catch-up。store 的 MAX-merge 為單調，不需修改。
-- `.env`：`dotenvy` 於設定解析前載入 `./.env`，行程環境優先；`TELEGRAM_ARCHIVE_NO_DOTENV=1` 停用；全域 `--env-file <PATH>` 必須存在。所有 CLI 子行程測試設定 `TELEGRAM_ARCHIVE_NO_DOTENV=1`。
+- `.env`：`dotenvy` 於設定解析前載入 `./.env`，行程環境優先；`TGARCHIVE_NO_DOTENV=1` 停用；全域 `--env-file <PATH>` 必須存在。所有 CLI 子行程測試設定 `TGARCHIVE_NO_DOTENV=1`。
 - `sync all`（無 tracked chats）現在先驗證 `SYNC_PAGE_DELAY_MS`／`SYNC_MAX_FLOOD_WAIT_SECS`。

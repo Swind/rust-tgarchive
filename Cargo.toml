@@ -1,15 +1,15 @@
 [package]
-name = "telegram-message-archive"
+name = "tgarchive"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.98"
 
 [lib]
-name = "telegram_message_archive"
+name = "tgarchive"
 path = "src/lib.rs"
 
 [[bin]]
-name = "telegram-archive"
+name = "tgarchive"
 path = "src/main.rs"
 
 [dependencies]

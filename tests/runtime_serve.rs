@@ -6,10 +6,10 @@ use std::{
     time::Duration,
 };
 
-use telegram_message_archive::infrastructure::persistence::sqlite::SqliteStore;
 use tempfile::TempDir;
+use tgarchive::infrastructure::persistence::sqlite::SqliteStore;
 
-const BIN: &str = env!("CARGO_BIN_EXE_telegram-archive");
+const BIN: &str = env!("CARGO_BIN_EXE_tgarchive");
 
 struct ChildGuard(Option<Child>);
 
@@ -52,7 +52,7 @@ async fn serve_starts_a_loopback_query_server_without_telegram_credentials() {
     let mut server = ChildGuard(Some(
         Command::new(BIN)
             .env_clear()
-            .env("TELEGRAM_ARCHIVE_NO_DOTENV", "1")
+            .env("TGARCHIVE_NO_DOTENV", "1")
             .env("DATABASE_URL", &url)
             .args(["serve", "--bind", &address.to_string()])
             .stdout(Stdio::piped())
@@ -103,7 +103,7 @@ async fn serve_exits_cleanly_after_sigterm() {
     let mut server = ChildGuard(Some(
         Command::new(BIN)
             .env_clear()
-            .env("TELEGRAM_ARCHIVE_NO_DOTENV", "1")
+            .env("TGARCHIVE_NO_DOTENV", "1")
             .env("DATABASE_URL", &url)
             .args(["serve", "--bind", &address.to_string()])
             .stdout(Stdio::null())

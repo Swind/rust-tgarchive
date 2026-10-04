@@ -16,10 +16,10 @@ use std::{
 use grammers_client::{Client, SenderPool, message::InputMessage};
 use grammers_session::types::{PeerKind, PeerRef};
 use sqlx::{SqlitePool, sqlite::SqliteConnectOptions};
-use telegram_message_archive::infrastructure::telegram::file_session::FileSession;
+use tgarchive::infrastructure::telegram::file_session::FileSession;
 use tokio::{io::AsyncReadExt, io::AsyncWriteExt, net::TcpStream};
 
-const BIN: &str = env!("CARGO_BIN_EXE_telegram-archive");
+const BIN: &str = env!("CARGO_BIN_EXE_tgarchive");
 
 struct Live {
     api_id: i32,

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use telegram_message_archive::{
+use tgarchive::{
     application::{
         ArchiveWriter, ChatRepository, HistoryBoundary, HistoryPage, IngestBatch, IngestRecord,
         MessageRepository, MessageSource, PageSize, SyncJob, SyncJobState, SyncRepository,

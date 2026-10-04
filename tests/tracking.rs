@@ -15,7 +15,8 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use telegram_message_archive::{
+use tempfile::TempDir;
+use tgarchive::{
     application::{
         AccountDeletion, ApplicationError, ArchiveWriter, ChatCheckpoint, ChatRepository,
         HistoryBoundary, HistoryPage, IngestBatch, IngestRecord, ListMessagesQuery, MessageFilters,
@@ -34,10 +35,9 @@ use telegram_message_archive::{
     infrastructure::persistence::sqlite::SqliteStore,
     interface::rest::router_with_sync,
 };
-use tempfile::TempDir;
 use tower::ServiceExt;
 
-const BIN: &str = env!("CARGO_BIN_EXE_telegram-archive");
+const BIN: &str = env!("CARGO_BIN_EXE_tgarchive");
 
 fn private() -> ChatId {
     ChatId::from_telegram(ChatKind::Private, 5).unwrap()
@@ -575,7 +575,7 @@ async fn rest_tracking_routes_filter_and_sync_rejection() {
 fn cli(url: &str, args: &[&str]) -> std::process::Output {
     Command::new(BIN)
         .env_clear()
-        .env("TELEGRAM_ARCHIVE_NO_DOTENV", "1")
+        .env("TGARCHIVE_NO_DOTENV", "1")
         .env("DATABASE_URL", url)
         .args(args)
         .output()
@@ -669,7 +669,7 @@ async fn cli_backfill_tracks_first_then_explains_missing_credentials_and_validat
     // Invalid pacing config is rejected before tracking changes anything.
     let out = Command::new(BIN)
         .env_clear()
-        .env("TELEGRAM_ARCHIVE_NO_DOTENV", "1")
+        .env("TGARCHIVE_NO_DOTENV", "1")
         .env("DATABASE_URL", &url)
         .env("SYNC_PAGE_DELAY_MS", "70000")
         .args(["chats", "track", &id, "--backfill"])

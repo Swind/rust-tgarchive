@@ -1,4 +1,8 @@
-# Telegram Message Archive
+# tgarchive
+
+> Unofficial archive tool using the Telegram API; not affiliated with Telegram.
+
+> 先前的執行檔名稱為 `telegram-archive`，現已更名為 `tgarchive`。舊環境變數 `TELEGRAM_ARCHIVE_NO_DOTENV` 仍被接受（已棄用），請改用 `TGARCHIVE_NO_DOTENV`。
 
 以 Rust 撰寫的 Telegram 訊息封存工具。使用你自己的 Telegram **使用者帳號**（透過 grammers，不是 bot）登入，把你**明確選擇**的聊天室訊息存入本機 SQLite，並提供 CLI 與僅限本機的 REST API 查詢、全文搜尋。
 
@@ -30,10 +34,10 @@ SYNC_MAX_FLOOD_WAIT_SECS=300       # 選用；願意等待的 FLOOD_WAIT 上限
 
 - 已存在的行程環境變數**優先**，`.env` 不會覆蓋它們。
 - 預設的 `.env` 不存在時靜默略過；以 `--env-file <PATH>` 指定檔案時，檔案必須存在，否則報錯。`--env-file` 為全域旗標，並取代 `./.env`。
-- 設定 `TELEGRAM_ARCHIVE_NO_DOTENV=1` 可停用自動載入 `./.env`（不影響明確指定的 `--env-file`）。
+- 設定 `TGARCHIVE_NO_DOTENV=1` 可停用自動載入 `./.env`（不影響明確指定的 `--env-file`）。
 - 格式為單純的 `KEY=VALUE`（支援註解與引號，不做 shell 展開）；錯誤訊息不會印出值。
 
-下列範例以 `telegram-archive` 代表 `cargo run -q --` 或 `target/debug/telegram-archive`。
+下列範例以 `tgarchive` 代表 `cargo run -q --` 或 `target/debug/tgarchive`。
 
 ## 快速開始
 
@@ -42,22 +46,22 @@ SYNC_MAX_FLOOD_WAIT_SECS=300       # 選用；願意等待的 FLOOD_WAIT 上限
 scripts/login.sh
 
 # 2. 初始化資料庫（login.sh 已做；可重複執行）
-telegram-archive db init
+tgarchive db init
 
 # 3. 抓取聊天室清單（只寫 metadata，不收集訊息、不改 tracking）
-telegram-archive chats refresh
-telegram-archive chats list
+tgarchive chats refresh
+tgarchive chats list
 
 # 4. 選擇要收集的聊天室（chat id 取自 chats list）
-telegram-archive chats track -1001234567890
-telegram-archive chats list --tracked
+tgarchive chats track -1001234567890
+tgarchive chats list --tracked
 
 # 5. 回補歷史訊息
-telegram-archive sync chat -1001234567890
-telegram-archive sync all            # 僅同步已 track 的聊天室；沒有時為成功的 no-op
+tgarchive sync chat -1001234567890
+tgarchive sync all            # 僅同步已 track 的聊天室；沒有時為成功的 no-op
 
 # 6. 啟動伺服器（即時收集 + REST）
-telegram-archive serve
+tgarchive serve
 ```
 
 重點：
@@ -71,10 +75,10 @@ telegram-archive serve
 ## 查詢
 
 ```sh
-telegram-archive messages list --chat-id -1001234567890 --limit 20
-telegram-archive messages get -1001234567890 42
-telegram-archive messages search "keyword" --chat-id -1001234567890 --from 2024-01-01T00:00:00Z --to 2024-02-01T00:00:00Z
-telegram-archive --output json messages list --limit 5
+tgarchive messages list --chat-id -1001234567890 --limit 20
+tgarchive messages get -1001234567890 42
+tgarchive messages search "keyword" --chat-id -1001234567890 --from 2024-01-01T00:00:00Z --to 2024-02-01T00:00:00Z
+tgarchive --output json messages list --limit 5
 ```
 
 - `--from`／`--to` 為 RFC 3339 時間。`--before`／`--after` 為上一頁回傳的 `next_cursor`。`--limit` 1–1000，預設 100。
@@ -99,7 +103,7 @@ Telegram **沒有公開的固定頻率上限**，限制是動態的（依帳號�
 ### 追蹤並回補：`--backfill`
 
 ```sh
-telegram-archive chats track -1001234567890 --backfill
+tgarchive chats track -1001234567890 --backfill
 curl -X PUT "http://127.0.0.1:8080/api/v1/chats/-1001234567890/tracking?backfill=true"
 ```
 
@@ -114,15 +118,15 @@ curl -X PUT "http://127.0.0.1:8080/api/v1/chats/-1001234567890/tracking?backfill
 ## serve 與狀態
 
 ```sh
-telegram-archive serve                  # Telegram 模式：即時收集 + REST
-telegram-archive serve --query-only     # 只提供已存資料的查詢，不連 Telegram
-telegram-archive serve --bind 127.0.0.1:9000
+tgarchive serve                  # Telegram 模式：即時收集 + REST
+tgarchive serve --query-only     # 只提供已存資料的查詢，不連 Telegram
+tgarchive serve --bind 127.0.0.1:9000
 ```
 
 - 若未設定 `TELEGRAM_API_ID`／`TELEGRAM_API_HASH`（例如 `.env` 不在目前工作目錄），`serve` 會退回只查詢模式：啟動時於 stderr 印出警告，**即時收集不會執行**，`/api/v1/status` 的 `collector.detail` 會註明 Telegram 未設定。明確指定 `--query-only` 則不印警告，detail 註明為 `--query-only`。
 - 只能綁定 loopback 位址；**API 沒有身分驗證**。遠端存取請自行用 SSH tunnel 或有驗證的反向代理。
 - Collector 狀態請查 `GET /api/v1/status`：`starting → catching_up → running → reconnecting → stopped／failed`（`--query-only` 為 `disabled`）。該回應也含 `unresolved_deletions`（無法對應聊天室的刪除數）。`/health/live` 為存活檢查；`/health/ready` 在資料庫不可用或 collector `failed` 時回 503。
-- `telegram-archive status` 是獨立程序，只讀資料庫，**看不到**執行中伺服器的 collector，會顯示 `disabled`；請用 REST。
+- `tgarchive status` 是獨立程序，只讀資料庫，**看不到**執行中伺服器的 collector，會顯示 `disabled`；請用 REST。
 
 ```sh
 curl -s http://127.0.0.1:8080/api/v1/status

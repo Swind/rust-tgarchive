@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use telegram_message_archive::application::{
-    ArchiveWriter, IngestBatch, RepositoryError, ingestion_worker,
-};
+use tgarchive::application::{ArchiveWriter, IngestBatch, RepositoryError, ingestion_worker};
 use tokio::sync::Notify;
 
 struct GateWriter {

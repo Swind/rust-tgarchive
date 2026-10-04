@@ -258,7 +258,7 @@ async fn open_authorized_telegram(
         Ok(false) => {
             let _ = adapter.shutdown().await;
             Err(CliError::Telegram(
-                "Telegram session is not authorized; run `telegram-archive auth login`".into(),
+                "Telegram session is not authorized; run `tgarchive auth login`".into(),
             ))
         }
         Err(_) => {
@@ -312,7 +312,7 @@ async fn readonly_application(
             .await
             .map_err(|error| {
                 CliError::Database(format!(
-                    "cannot open archive database ({error}); create it with `telegram-archive db init`"
+                    "cannot open archive database ({error}); create it with `tgarchive db init`"
                 ))
             })?,
     );
@@ -646,7 +646,7 @@ async fn open_existing_store(database_url: &str) -> Result<Arc<SqliteStore>, Cli
         .map(Arc::new)
         .map_err(|error| {
             CliError::Database(format!(
-                "cannot open archive database ({error}); create it with `telegram-archive db init`"
+                "cannot open archive database ({error}); create it with `tgarchive db init`"
             ))
         })
 }
@@ -691,7 +691,7 @@ async fn backfill_after_track(
 ) -> Result<(), CliError> {
     if let Err(reason) = Config::telegram() {
         return Err(CliError::InvalidInput(format!(
-            "chat {} is tracked, but the backfill was not run: {reason}. Set the Telegram credentials and run `telegram-archive sync chat {}` (or track via the running server with PUT /api/v1/chats/{}/tracking?backfill=true)",
+            "chat {} is tracked, but the backfill was not run: {reason}. Set the Telegram credentials and run `tgarchive sync chat {}` (or track via the running server with PUT /api/v1/chats/{}/tracking?backfill=true)",
             chat_id.get(),
             chat_id.get(),
             chat_id.get()

@@ -9,7 +9,7 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::DateTime;
-use telegram_message_archive::{
+use tgarchive::{
     application::{
         ApplicationError, ArchiveWriter, ChatCheckpoint, ChatRepository, HistoryBoundary,
         HistoryPage, IngestBatch, IngestRecord, MessageSource, PageSize, RepositoryError,

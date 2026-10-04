@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use telegram_message_archive::{
+use tgarchive::{
     application::{
         ArchiveWriter, ChatCheckpoint, ChatRepository, IngestBatch, IngestRecord,
         ListMessagesQuery, MessageCursor, MessageFilters, MessageRepository, MessageSource,

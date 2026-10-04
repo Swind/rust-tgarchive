@@ -2,7 +2,7 @@ use std::{path::Path, process::Command};
 
 use tempfile::TempDir;
 
-const BIN: &str = env!("CARGO_BIN_EXE_telegram-archive");
+const BIN: &str = env!("CARGO_BIN_EXE_tgarchive");
 
 /// Runs in `cwd` with a cleared environment so the repo-root `.env` is never read.
 fn run(cwd: &Path, envs: &[(&str, &str)], args: &[&str]) -> std::process::Output {
@@ -65,11 +65,7 @@ fn opt_out_variable_disables_default_dotenv() {
         format!("DATABASE_URL={}\n", sqlite_url(&from_file)),
     )
     .unwrap();
-    let out = run(
-        dir.path(),
-        &[("TELEGRAM_ARCHIVE_NO_DOTENV", "1")],
-        &["db", "init"],
-    );
+    let out = run(dir.path(), &[("TGARCHIVE_NO_DOTENV", "1")], &["db", "init"]);
     assert!(
         out.status.success(),
         "{}",

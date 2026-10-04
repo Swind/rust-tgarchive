@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use telegram_message_archive::{
+use tgarchive::{
     application::services::{Application, ComponentState, ComponentStatus, IngestMessageEvent},
     application::{
         ApplicationError, ArchiveWriter, ChatCheckpoint, ChatRepository, HistoryBoundary,
@@ -223,7 +223,7 @@ fn message() -> Message {
         text: Some("hello".into()),
         reply_to: None,
         attachments: vec![Attachment {
-            kind: telegram_message_archive::domain::AttachmentKind::Photo,
+            kind: tgarchive::domain::AttachmentKind::Photo,
             telegram_file_id: None,
             mime_type: None,
             file_name: None,
@@ -234,7 +234,7 @@ fn message() -> Message {
 
 fn list_query() -> ListMessagesQuery {
     ListMessagesQuery {
-        filters: telegram_message_archive::application::MessageFilters {
+        filters: tgarchive::application::MessageFilters {
             chat_id: None,
             sender_id: None,
             time_range: TimeRange::new(None, None).unwrap(),
@@ -273,13 +273,13 @@ async fn ingestion_uses_one_batch_path_and_propagates_writer_failure() {
             event,
             source: MessageSource::History,
             chats: vec![chat()],
-            senders: vec![telegram_message_archive::domain::Sender {
-                id: telegram_message_archive::domain::SenderId::from_telegram(
-                    telegram_message_archive::domain::SenderKind::User,
+            senders: vec![tgarchive::domain::Sender {
+                id: tgarchive::domain::SenderId::from_telegram(
+                    tgarchive::domain::SenderKind::User,
                     77,
                 )
                 .unwrap(),
-                kind: telegram_message_archive::domain::SenderKind::User,
+                kind: tgarchive::domain::SenderKind::User,
                 display_name: Some("Sender".into()),
                 username: None,
             }],
@@ -419,11 +419,8 @@ async fn message_queries_validate_before_repository_and_report_missing_entities(
     filtered_list.filters.chat_id = Some(chat().id);
     filtered_list.before = Some(cursor());
     filtered_list.filters.sender_id = Some(
-        telegram_message_archive::domain::SenderId::from_telegram(
-            telegram_message_archive::domain::SenderKind::User,
-            77,
-        )
-        .unwrap(),
+        tgarchive::domain::SenderId::from_telegram(tgarchive::domain::SenderKind::User, 77)
+            .unwrap(),
     );
     app.list_messages(filtered_list.clone()).await.unwrap();
     let mut filtered_search = search_query("exact search terms");
@@ -461,7 +458,7 @@ async fn refresh_and_status_report_failures_and_disabled_collector() {
 
     let job = SyncJob {
         id: "sync-1".into(),
-        scope: telegram_message_archive::application::SyncScope::Chat(chat().id),
+        scope: tgarchive::application::SyncScope::Chat(chat().id),
         state: SyncJobState::Succeeded,
         created_at: DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap(),
         started_at: None,
@@ -494,8 +491,8 @@ async fn refresh_and_status_report_failures_and_disabled_collector() {
     );
 }
 
-fn cursor() -> telegram_message_archive::application::MessageCursor {
-    telegram_message_archive::application::MessageCursor {
+fn cursor() -> tgarchive::application::MessageCursor {
+    tgarchive::application::MessageCursor {
         timestamp: DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap(),
         chat_id: chat().id,
         message_id: MessageId::new(2).unwrap(),
