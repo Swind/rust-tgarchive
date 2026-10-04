@@ -94,6 +94,9 @@ pub struct MessageFilters {
     pub chat_id: Option<ChatId>,
     pub sender_id: Option<SenderId>,
     pub time_range: TimeRange,
+    /// Also return messages marked deleted (their bodies are retained); tombstones without a
+    /// stored message are never returned.
+    pub include_deleted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,11 +150,127 @@ impl SearchMessagesQuery {
     }
 }
 
+/// Display info of a message sender, resolved from the `senders` table.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SenderInfo {
+    pub id: SenderId,
+    pub display_name: Option<String>,
+    pub username: Option<String>,
+}
+
+/// A stored message plus read-side details (resolved sender, deletion time).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MessageView {
+    #[serde(flatten)]
+    pub message: Message,
+    pub sender: Option<SenderInfo>,
+    pub deleted_at: Option<DateTime<Utc>>,
+}
+
+impl MessageView {
+    pub fn is_deleted(&self) -> bool {
+        self.deleted_at.is_some()
+    }
+}
+
+impl std::ops::Deref for MessageView {
+    type Target = Message;
+
+    fn deref(&self) -> &Message {
+        &self.message
+    }
+}
+
+impl From<Message> for MessageView {
+    fn from(message: Message) -> Self {
+        Self {
+            message,
+            sender: None,
+            deleted_at: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessagePage {
-    pub items: Vec<Message>,
+    pub items: Vec<MessageView>,
     pub has_more: bool,
     pub next_cursor: Option<MessageCursor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SenderSummary {
+    pub sender: SenderInfo,
+    pub message_count: u64,
+}
+
+pub const MAX_CONTEXT_SIZE: u16 = 100;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageContextQuery {
+    pub chat_id: ChatId,
+    pub message_id: MessageId,
+    pub before: u16,
+    pub after: u16,
+    pub include_deleted: bool,
+}
+
+impl MessageContextQuery {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if self.before > MAX_CONTEXT_SIZE || self.after > MAX_CONTEXT_SIZE {
+            return Err(ValidationError::InvalidContextSize);
+        }
+        Ok(())
+    }
+}
+
+/// Messages around an anchor; both lists are ascending (oldest first). The cursors continue
+/// scrolling through the list endpoint (`before_cursor` -> `before`, `after_cursor` -> `after`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageContext {
+    pub anchor: MessageView,
+    pub before: Vec<MessageView>,
+    pub after: Vec<MessageView>,
+    pub has_more_before: bool,
+    pub has_more_after: bool,
+    pub before_cursor: Option<MessageCursor>,
+    pub after_cursor: Option<MessageCursor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ChatStats {
+    /// Non-deleted messages.
+    pub message_count: u64,
+    pub deleted_count: u64,
+    pub first_message_at: Option<DateTime<Utc>>,
+    pub last_message_at: Option<DateTime<Utc>>,
+    pub history_complete: bool,
+    pub last_sync_completed_at: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatSummary {
+    pub chat: Chat,
+    pub stats: ChatStats,
+}
+
+impl std::ops::Deref for ChatSummary {
+    type Target = Chat;
+
+    fn deref(&self) -> &Chat {
+        &self.chat
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ChatSort {
+    /// By chat ID.
+    #[default]
+    Default,
+    Title,
+    LastMessage,
+    MessageCount,
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -166,6 +285,8 @@ pub enum ValidationError {
     EmptySearch,
     #[error("search query exceeds 4096 bytes")]
     SearchTooLong,
+    #[error("context size must be between 0 and 100")]
+    InvalidContextSize,
 }
 
 #[derive(Debug, Error)]
@@ -342,15 +463,112 @@ pub trait MessageRepository: Send + Sync {
         &self,
         chat_id: ChatId,
         message_id: MessageId,
-    ) -> Result<Option<Message>, RepositoryError>;
+        include_deleted: bool,
+    ) -> Result<Option<MessageView>, RepositoryError>;
     async fn list(&self, query: ListMessagesQuery) -> Result<MessagePage, RepositoryError>;
     async fn search(&self, query: SearchMessagesQuery) -> Result<MessagePage, RepositoryError>;
+
+    /// Senders with messages in the chat, most active first. Default: none.
+    async fn list_senders(
+        &self,
+        _chat_id: ChatId,
+        _limit: PageSize,
+    ) -> Result<Vec<SenderSummary>, RepositoryError> {
+        Ok(Vec::new())
+    }
+
+    /// `None` when the anchor does not exist (or is deleted and `include_deleted` is false).
+    async fn context(
+        &self,
+        query: MessageContextQuery,
+    ) -> Result<Option<MessageContext>, RepositoryError> {
+        let Some(anchor) = self
+            .get(query.chat_id, query.message_id, query.include_deleted)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let cursor = MessageCursor {
+            timestamp: anchor.timestamp,
+            chat_id: query.chat_id,
+            message_id: query.message_id,
+        };
+        let filters = MessageFilters {
+            chat_id: Some(query.chat_id),
+            sender_id: None,
+            time_range: TimeRange {
+                from: None,
+                to: None,
+            },
+            include_deleted: query.include_deleted,
+        };
+        let empty = || MessagePage {
+            items: Vec::new(),
+            has_more: false,
+            next_cursor: None,
+        };
+        let page_size = |count: u16| {
+            PageSize::new(count).map_err(|error| RepositoryError::InvalidData(error.to_string()))
+        };
+        let mut older = empty();
+        if query.before > 0 {
+            older = self
+                .list(ListMessagesQuery {
+                    filters: filters.clone(),
+                    before: Some(cursor.clone()),
+                    after: None,
+                    page_size: page_size(query.before)?,
+                })
+                .await?;
+            older.items.reverse();
+        }
+        let mut newer = empty();
+        if query.after > 0 {
+            newer = self
+                .list(ListMessagesQuery {
+                    filters,
+                    before: None,
+                    after: Some(cursor),
+                    page_size: page_size(query.after)?,
+                })
+                .await?;
+            // `after` pages are newest-first like every list page.
+            newer.items.reverse();
+        }
+        Ok(Some(MessageContext {
+            anchor,
+            before: older.items,
+            after: newer.items,
+            has_more_before: older.has_more,
+            has_more_after: newer.has_more,
+            before_cursor: older.next_cursor,
+            after_cursor: newer.next_cursor,
+        }))
+    }
 }
 
 #[async_trait]
 pub trait ChatRepository: Send + Sync {
     async fn get(&self, id: ChatId) -> Result<Option<Chat>, RepositoryError>;
     async fn list(&self) -> Result<Vec<Chat>, RepositoryError>;
+    /// Chats with aggregate message/sync stats. Default: empty stats.
+    async fn list_with_stats(&self, _sort: ChatSort) -> Result<Vec<ChatSummary>, RepositoryError> {
+        Ok(self
+            .list()
+            .await?
+            .into_iter()
+            .map(|chat| ChatSummary {
+                chat,
+                stats: ChatStats::default(),
+            })
+            .collect())
+    }
+    async fn get_with_stats(&self, id: ChatId) -> Result<Option<ChatSummary>, RepositoryError> {
+        Ok(self.get(id).await?.map(|chat| ChatSummary {
+            chat,
+            stats: ChatStats::default(),
+        }))
+    }
     /// Metadata-only upsert: must never change the tracking flag.
     async fn save_refresh(&self, chats: Vec<Chat>) -> Result<(), RepositoryError>;
     /// Idempotently sets the tracking flag; `None` when the chat is unknown.
@@ -430,6 +648,7 @@ mod tests {
             chat_id: None,
             sender_id: None,
             time_range: TimeRange::new(None, None).unwrap(),
+            include_deleted: false,
         }
     }
 
@@ -467,6 +686,7 @@ mod tests {
                 from: Some(DateTime::from_timestamp(2, 0).unwrap()),
                 to: Some(DateTime::from_timestamp(1, 0).unwrap()),
             },
+            include_deleted: false,
         };
         assert_eq!(
             ListMessagesQuery {
@@ -508,7 +728,12 @@ mod tests {
 
     #[async_trait]
     impl MessageRepository for FakePorts {
-        async fn get(&self, _: ChatId, _: MessageId) -> Result<Option<Message>, RepositoryError> {
+        async fn get(
+            &self,
+            _: ChatId,
+            _: MessageId,
+            _: bool,
+        ) -> Result<Option<MessageView>, RepositoryError> {
             Ok(None)
         }
         async fn list(&self, _: ListMessagesQuery) -> Result<MessagePage, RepositoryError> {

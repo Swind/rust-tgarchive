@@ -71,6 +71,7 @@ fn filters() -> MessageFilters {
         chat_id: None,
         sender_id: None,
         time_range: TimeRange::new(None, None).unwrap(),
+        include_deleted: false,
     }
 }
 
@@ -137,7 +138,7 @@ async fn file_database_reopens_readonly_and_preserves_ft_search() {
 
     let reopened = SqliteStore::open_existing_readonly(&url).await.unwrap();
     assert!(
-        MessageRepository::get(&reopened, chat_id, MessageId::new(2).unwrap())
+        MessageRepository::get(&reopened, chat_id, MessageId::new(2).unwrap(), false)
             .await
             .unwrap()
             .is_some()
@@ -258,7 +259,7 @@ async fn failed_batch_rolls_back_message_attachments_and_checkpoint() {
     ));
     assert!(store.write_batch(batch).await.is_err());
     assert!(
-        MessageRepository::get(&store, chat_id, MessageId::new(8).unwrap())
+        MessageRepository::get(&store, chat_id, MessageId::new(8).unwrap(), false)
             .await
             .unwrap()
             .is_none()
@@ -289,7 +290,7 @@ async fn tombstone_prevents_later_history_from_resurrecting_message() {
         .await
         .unwrap();
     assert!(
-        MessageRepository::get(&store, chat_id, MessageId::new(9).unwrap())
+        MessageRepository::get(&store, chat_id, MessageId::new(9).unwrap(), false)
             .await
             .unwrap()
             .is_none()
@@ -332,7 +333,7 @@ async fn versions_prefer_edits_and_realtime_and_soft_delete_hides_fts() {
         .write_batch(ingest(vec![message(chat_id, 7, "needle stale")]))
         .await
         .unwrap();
-    let saved = MessageRepository::get(&store, chat_id, MessageId::new(7).unwrap())
+    let saved = MessageRepository::get(&store, chat_id, MessageId::new(7).unwrap(), false)
         .await
         .unwrap()
         .unwrap();
@@ -348,7 +349,7 @@ async fn versions_prefer_edits_and_realtime_and_soft_delete_hides_fts() {
         .write_batch(ingest(vec![same_version_history]))
         .await
         .unwrap();
-    let saved = MessageRepository::get(&store, chat_id, MessageId::new(7).unwrap())
+    let saved = MessageRepository::get(&store, chat_id, MessageId::new(7).unwrap(), false)
         .await
         .unwrap()
         .unwrap();
@@ -426,6 +427,7 @@ async fn fractional_time_filters_and_cursors_match_second_precision_storage() {
             chat_id: None,
             sender_id: None,
             time_range: TimeRange::new(Some(half), None).unwrap(),
+            include_deleted: false,
         },
         before: None,
         after: None,
@@ -446,6 +448,7 @@ async fn fractional_time_filters_and_cursors_match_second_precision_storage() {
             chat_id: None,
             sender_id: None,
             time_range: TimeRange::new(None, Some(half)).unwrap(),
+            include_deleted: false,
         },
         before: None,
         after: None,

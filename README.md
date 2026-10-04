@@ -28,6 +28,7 @@ SERVER_BIND=127.0.0.1:8080
 RUST_LOG=info                      # 未設定時預設為 warn
 SYNC_PAGE_DELAY_MS=1000            # 選用；history 請求最小間隔，見「抓取頻率與限流」
 SYNC_MAX_FLOOD_WAIT_SECS=300       # 選用；願意等待的 FLOOD_WAIT 上限
+TGARCHIVE_DEV_CORS_ORIGIN=http://127.0.0.1:5173  # 選用；僅供本機前端開發，見「REST 與 OpenAPI」
 ```
 
 **執行檔啟動時會自動載入目前工作目錄的 `.env`**（在解析設定之前）：
@@ -81,6 +82,7 @@ tgarchive messages search "keyword" --chat-id -1001234567890 --from 2024-01-01T0
 tgarchive --output json messages list --limit 5
 ```
 
+- `--include-deleted`（`messages list`／`get`／`search`）連同已標記刪除的訊息一起顯示（人類輸出以 `[deleted]` 標記；JSON 含 `deleted_at`）；預設隱藏。人類輸出在時間後多一欄寄件人（顯示名稱，否則 username／ID）。
 - `--from`／`--to` 為 RFC 3339 時間。`--before`／`--after` 為上一頁回傳的 `next_cursor`。`--limit` 1–1000，預設 100。
 - 讀取型命令只讀資料庫，不需要 Telegram。若是舊資料庫，請先執行 `db init`（見 [docs/migrations.md](docs/migrations.md)）。
 
@@ -135,7 +137,15 @@ curl -s "http://127.0.0.1:8080/api/v1/messages/search?q=keyword"
 
 ## REST 與 OpenAPI
 
-路由（皆在 `/api/v1`）：`chats`、`chats/refresh`、`chats/{id}`、`chats/{id}/tracking`（PUT 可加 `?backfill=true`／DELETE）、`chats/{id}/messages`、`chats/{id}/sync`、`messages`、`messages/search`、`sync`、`sync/jobs/{id}`、`sync/status`、`status`；另有 `/health/live`、`/health/ready`、`/openapi.json`、`/openapi.yml`。請求逾時 30 秒，query 與 body 有大小上限，每個回應帶 `x-request-id`。
+路由（皆在 `/api/v1`）：`chats`、`chats/refresh`、`chats/{id}`、`chats/{id}/tracking`（PUT 可加 `?backfill=true`／DELETE）、`chats/{id}/messages`、`chats/{id}/messages/{message_id}`、`chats/{id}/messages/{message_id}/context`、`chats/{id}/senders`、`chats/{id}/sync`、`messages`、`messages/search`、`sync`、`sync/jobs/{id}`、`sync/status`、`status`；另有 `/health/live`、`/health/ready`、`/openapi.json`、`/openapi.yml`。請求逾時 30 秒，query 與 body 有大小上限，每個回應帶 `x-request-id`。
+
+供 Web UI 使用的讀取能力：
+
+- **寄件人**：`MessageDto.sender` 為 `{ id, display_name, username }`（無寄件人時為 `null`；頻道以自身名義發文時 `display_name` 取聊天室標題），由查詢 JOIN `senders` 取得，無額外 N+1 查詢。`GET /chats/{id}/senders?limit=`（預設 100、最大 1000）回傳 `[{ id, display_name, username, message_count }]`，依 `message_count` 由大到小，不含已刪除訊息。
+- **已刪除訊息**：`messages`、`chats/{id}/messages`、`messages/search`、`chats/{id}/messages/{message_id}`、`.../context` 皆支援 `include_deleted=true`（預設 `false`，行為不變）。`MessageDto` 一律含 `is_deleted` 與 `deleted_at`。只有墓碑（沒有保存訊息本文）的刪除不會出現。
+- **聊天室統計**：`ChatDto.stats`（`GET /chats`、`GET /chats/{id}`、tracking 回應；`POST /chats/refresh` 省略）含 `message_count`（未刪除）、`deleted_count`、`first_message_at`、`last_message_at`、`history_complete`、`last_sync_completed_at`、`last_error`（已清理，可為 `null`）。`GET /chats?sort=title|last_message|message_count`（預設依 chat ID）。
+- **訊息脈絡**：`GET /chats/{id}/messages/{message_id}/context?before=20&after=20`（各 0–100，超過回 400 `invalid_context_size`）回傳 `{ anchor, before, after, has_more_before, has_more_after, before_cursor, after_cursor }`，`before`／`after` 皆由舊到新排序；`before_cursor` 可直接作為 list 端點的 `before`、`after_cursor` 作為 `after` 繼續捲動。錨點不存在（或已刪除且未帶 `include_deleted`）回 404。
+- **CORS（僅本機前端開發）**：預設關閉。設定 `TGARCHIVE_DEV_CORS_ORIGIN=http://127.0.0.1:5173` 後 `serve` 只對該確切 origin 開啟 CORS（GET/POST/PUT/DELETE，標頭 `content-type`、`x-request-id`）。值必須是 loopback 的 `http://` origin（`127.0.0.1`／`localhost`／`[::1]`，可含 port，不可有路徑），否則 `serve` 啟動失敗。API 本身仍無驗證，僅綁定 loopback。
 
 規格檔為根目錄的 [`openapi.yml`](openapi.yml)，由程式產生，請勿手改：
 

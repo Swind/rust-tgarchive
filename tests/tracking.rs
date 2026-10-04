@@ -210,6 +210,7 @@ async fn track_and_untrack_are_idempotent_keep_messages_and_survive_refresh() {
                 chat_id: Some(private()),
                 sender_id: None,
                 time_range: TimeRange::new(None, None).unwrap(),
+                include_deleted: false,
             },
             before: None,
             after: None,

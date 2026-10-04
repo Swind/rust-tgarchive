@@ -18,6 +18,12 @@ paths:
         required: false
         schema:
           type: boolean
+      - name: sort
+        in: query
+        description: Sort order; default is by chat ID.
+        required: false
+        schema:
+          $ref: '#/components/schemas/ChatSortDto'
       responses:
         '200':
           description: ''
@@ -144,6 +150,12 @@ paths:
           type: integer
           format: int32
           minimum: 0
+      - name: include_deleted
+        in: query
+        description: Also return deleted messages (flagged with `is_deleted`/`deleted_at`).
+        required: false
+        schema:
+          type: boolean
       responses:
         '200':
           description: ''
@@ -187,6 +199,12 @@ paths:
         schema:
           type: integer
           format: int64
+      - name: include_deleted
+        in: query
+        description: Also return the message if it was deleted.
+        required: false
+        schema:
+          type: boolean
       responses:
         '200':
           description: ''
@@ -194,6 +212,117 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/MessageDto'
+        '400':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /api/v1/chats/{chat_id}/messages/{message_id}/context:
+    get:
+      tags:
+      - routes
+      operationId: message_context
+      parameters:
+      - name: chat_id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      - name: message_id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      - name: before
+        in: query
+        description: Messages older than the anchor (0-100, default 20).
+        required: false
+        schema:
+          type: integer
+          format: int32
+          minimum: 0
+      - name: after
+        in: query
+        description: Messages newer than the anchor (0-100, default 20).
+        required: false
+        schema:
+          type: integer
+          format: int32
+          minimum: 0
+      - name: include_deleted
+        in: query
+        required: false
+        schema:
+          type: boolean
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageContextDto'
+        '400':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: Anchor message not found (or deleted without include_deleted)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /api/v1/chats/{chat_id}/senders:
+    get:
+      tags:
+      - routes
+      operationId: list_chat_senders
+      parameters:
+      - name: chat_id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      - name: limit
+        in: query
+        description: Maximum senders returned (1-1000, default 100).
+        required: false
+        schema:
+          type: integer
+          format: int32
+          minimum: 0
+      responses:
+        '200':
+          description: Senders with non-deleted messages in the chat, most messages first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SenderSummaryDto'
         '400':
           description: ''
           content:
@@ -383,6 +512,12 @@ paths:
           type: integer
           format: int32
           minimum: 0
+      - name: include_deleted
+        in: query
+        description: Also return deleted messages (flagged with `is_deleted`/`deleted_at`).
+        required: false
+        schema:
+          type: boolean
       responses:
         '200':
           description: ''
@@ -460,6 +595,12 @@ paths:
           type: integer
           format: int32
           minimum: 0
+      - name: include_deleted
+        in: query
+        description: Also return deleted messages (flagged with `is_deleted`/`deleted_at`).
+        required: false
+        schema:
+          type: boolean
       responses:
         '200':
           description: ''
@@ -666,6 +807,11 @@ components:
           format: int64
         kind:
           $ref: '#/components/schemas/ChatKindDto'
+        stats:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/ChatStatsDto'
+            description: Aggregate archive/sync stats; omitted by `POST /chats/refresh`.
         title:
           type:
           - string
@@ -684,6 +830,53 @@ components:
       - group
       - supergroup
       - channel
+    ChatSortDto:
+      type: string
+      description: Sort order of `GET /chats`.
+      enum:
+      - title
+      - last_message
+      - message_count
+    ChatStatsDto:
+      type: object
+      required:
+      - message_count
+      - deleted_count
+      - history_complete
+      properties:
+        deleted_count:
+          type: integer
+          format: int64
+          minimum: 0
+        first_message_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+          description: Timestamps of the oldest / newest non-deleted message.
+        history_complete:
+          type: boolean
+          description: Whether history backfill reached the start of the chat.
+        last_error:
+          type:
+          - string
+          - 'null'
+          description: Sanitized reason of the last failed sync, cleared by the next successful checkpoint.
+        last_message_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        last_sync_completed_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        message_count:
+          type: integer
+          format: int64
+          description: Non-deleted archived messages.
+          minimum: 0
     ComponentStatusDto:
       type: object
       required:
@@ -722,6 +915,40 @@ components:
       properties:
         status:
           type: string
+    MessageContextDto:
+      type: object
+      description: Messages around an anchor, both lists oldest first.
+      required:
+      - anchor
+      - before
+      - after
+      - has_more_before
+      - has_more_after
+      properties:
+        after:
+          type: array
+          items:
+            $ref: '#/components/schemas/MessageDto'
+        after_cursor:
+          type:
+          - string
+          - 'null'
+          description: Pass as `after` to `GET .../messages` to keep scrolling to newer messages.
+        anchor:
+          $ref: '#/components/schemas/MessageDto'
+        before:
+          type: array
+          items:
+            $ref: '#/components/schemas/MessageDto'
+        before_cursor:
+          type:
+          - string
+          - 'null'
+          description: Pass as `before` to `GET .../messages` to keep scrolling to older messages.
+        has_more_after:
+          type: boolean
+        has_more_before:
+          type: boolean
     MessageDto:
       type: object
       required:
@@ -730,6 +957,7 @@ components:
       - timestamp
       - collected_at
       - attachments
+      - is_deleted
       properties:
         attachments:
           type: array
@@ -741,6 +969,12 @@ components:
         collected_at:
           type: string
           format: date-time
+        deleted_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+          description: Set when the message was deleted on Telegram (only returned with `include_deleted=true`).
         edited_at:
           type:
           - string
@@ -749,11 +983,18 @@ components:
         id:
           type: integer
           format: int64
+        is_deleted:
+          type: boolean
         reply_to:
           type:
           - integer
           - 'null'
           format: int64
+        sender:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/SenderDto'
+            description: Resolved sender; null for messages without a sender.
         sender_id:
           type:
           - integer
@@ -809,6 +1050,45 @@ components:
           - 'null'
           format: int64
           minimum: 0
+    SenderDto:
+      type: object
+      required:
+      - id
+      properties:
+        display_name:
+          type:
+          - string
+          - 'null'
+          description: Profile name; for a chat/channel posting as itself, the chat title.
+        id:
+          type: integer
+          format: int64
+        username:
+          type:
+          - string
+          - 'null'
+    SenderSummaryDto:
+      type: object
+      required:
+      - id
+      - message_count
+      properties:
+        display_name:
+          type:
+          - string
+          - 'null'
+        id:
+          type: integer
+          format: int64
+        message_count:
+          type: integer
+          format: int64
+          description: Non-deleted messages by this sender in the chat.
+          minimum: 0
+        username:
+          type:
+          - string
+          - 'null'
     StatusDto:
       type: object
       required:

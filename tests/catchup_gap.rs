@@ -172,7 +172,7 @@ impl Fixture {
 async fn archived(store: &SqliteStore, ids: impl IntoIterator<Item = i64>) -> Vec<i64> {
     let mut present = vec![];
     for raw in ids {
-        if MessageRepository::get(store, chat_id(), MessageId::new(raw).unwrap())
+        if MessageRepository::get(store, chat_id(), MessageId::new(raw).unwrap(), false)
             .await
             .unwrap()
             .is_some()

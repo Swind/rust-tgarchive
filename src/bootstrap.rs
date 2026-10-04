@@ -354,6 +354,7 @@ async fn serve(bind: Option<std::net::SocketAddr>, query_only: bool) -> Result<(
         .validate_database_path()
         .map_err(CliError::InvalidInput)?;
     let bind = Config::server_bind(bind).map_err(CliError::InvalidInput)?;
+    let cors = rest::dev_cors_from_env().map_err(CliError::InvalidInput)?;
     rest::validate_loopback_bind(bind).map_err(|error| CliError::InvalidInput(error.into()))?;
     let listener = TcpListener::bind(bind)
         .await
@@ -365,14 +366,19 @@ async fn serve(bind: Option<std::net::SocketAddr>, query_only: bool) -> Result<(
         }
         let application = readonly_application(&config.database_url, detail).await?;
         tracing::info!(address = %listener.local_addr().unwrap_or(bind), mode = "query_only", "REST server listening");
-        return serve_router(listener, rest::router(application), None).await;
+        return serve_router(
+            listener,
+            rest::apply_dev_cors(rest::router(application), cors),
+            None,
+        )
+        .await;
     }
 
     let telegram = Config::telegram().map_err(CliError::InvalidInput)?;
     telegram.validate_paths().map_err(CliError::InvalidInput)?;
     SyncPacing::from_env().map_err(CliError::InvalidInput)?;
     let adapter = open_authorized_telegram(&telegram).await?;
-    let result = serve_with_telegram(listener, &config.database_url, adapter.clone()).await;
+    let result = serve_with_telegram(listener, &config.database_url, adapter.clone(), cors).await;
     let shutdown = adapter
         .shutdown()
         .await
@@ -386,6 +392,7 @@ async fn serve_with_telegram(
     listener: TcpListener,
     database_url: &str,
     adapter: Arc<TelegramAdapter>,
+    cors: Option<tower_http::cors::CorsLayer>,
 ) -> Result<(), CliError> {
     let store = Arc::new(
         SqliteStore::connect(database_url)
@@ -417,7 +424,10 @@ async fn serve_with_telegram(
         );
         let serving = serve_router(
             listener,
-            rest::router_with_sync(application, Some(Arc::clone(&runtime.coordinator))),
+            rest::apply_dev_cors(
+                rest::router_with_sync(application, Some(Arc::clone(&runtime.coordinator))),
+                cors,
+            ),
             Some(&runtime),
         )
         .await;

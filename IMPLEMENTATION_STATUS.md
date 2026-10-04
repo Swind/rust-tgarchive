@@ -109,3 +109,10 @@ Update-gap reconciliation：`differenceTooLong`／`channelDifferenceTooLong`（�
 - 修正：歷史第一頁在 `catchup_after_id` 為空時於同一交易寫入該頁最大 ID（空聊天室為 0）；baseline 退路使用新增的 `SyncRepository::newest_archived_id`（`MAX(message_id)`），僅完全無資料且無歷史的聊天室才用 Telegram 最新 ID；歷史完成的 `sync chat` 改跑向前 catch-up。store 的 MAX-merge 為單調，不需修改。
 - `.env`：`dotenvy` 於設定解析前載入 `./.env`，行程環境優先；`TGARCHIVE_NO_DOTENV=1` 停用；全域 `--env-file <PATH>` 必須存在。所有 CLI 子行程測試設定 `TGARCHIVE_NO_DOTENV=1`。
 - `sync all`（無 tracked chats）現在先驗證 `SYNC_PAGE_DELAY_MS`／`SYNC_MAX_FLOOD_WAIT_SECS`。
+
+## Web UI 讀取 API（寄件人、已刪除、統計、脈絡、dev CORS）
+
+- 新增（皆經 application services，CLI 共用）：`MessageDto.sender`／`is_deleted`／`deleted_at`；`include_deleted`（list／chat messages／search／get／context，預設 false，CLI `--include-deleted`）；`GET /chats/{id}/senders`；`ChatDto.stats` 與 `GET /chats?sort=`；`GET /chats/{id}/messages/{mid}/context`；`TGARCHIVE_DEV_CORS_ORIGIN`（loopback http origin，預設關閉，無效值使 `serve` 啟動失敗）。`openapi.yml` 已重新產生。
+- Migration `0005_read_indexes.sql`（僅 index，見 docs/migrations.md）。
+- 設計：`MessageView`／`ChatSummary` 為 application 層讀取模型；寄件人以 LEFT JOIN 解析、聊天室統計為單一 GROUP BY 子查詢（無逐列查詢）；context 以既有 list 查詢（cursor 相容）組成，預設 trait 實作。
+- Tests：`tests/read_api.rs`（sender join／senders、include_deleted、stats 與 sort、context 與 cursor 銜接、CORS 開／關／無效值、0004→0005 升級）、`tests/cli_smoke.rs` 新增 CLI 測試。

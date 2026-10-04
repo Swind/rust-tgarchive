@@ -3,8 +3,9 @@ use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool, Transaction, sqlite::SqliteRow
 
 use crate::{
     application::{
-        ArchiveWriter, ChatCheckpoint, ChatRepository, IngestBatch, MessageRepository,
-        RepositoryError, SyncChatProgress, SyncJob, SyncJobState, SyncRepository, SyncScope,
+        ArchiveWriter, ChatCheckpoint, ChatRepository, ChatSort, ChatStats, ChatSummary,
+        IngestBatch, MessageRepository, MessageView, PageSize, RepositoryError, SenderInfo,
+        SenderSummary, SyncChatProgress, SyncJob, SyncJobState, SyncRepository, SyncScope,
         TrackingScope,
     },
     domain::{
@@ -462,6 +463,8 @@ async fn attachments_for(
     Ok(attachments)
 }
 
+const MESSAGE_SELECT: &str = "SELECT m.row_id, m.chat_id, m.message_id, m.sender_id, m.timestamp, m.edited_at, m.collected_at, m.text, m.reply_to, CASE WHEN m.is_deleted=1 THEN COALESCE(m.deleted_at, 0) END AS deleted_at, s.display_name AS sender_name, s.username AS sender_username, c.title AS chat_title FROM messages m LEFT JOIN senders s ON s.id=m.sender_id LEFT JOIN chats c ON c.id=m.chat_id";
+
 fn row_message(row: &SqliteRow, attachments: Vec<Attachment>) -> Result<Message, RepositoryError> {
     let sender: Option<i64> = row.try_get("sender_id").map_err(storage_error)?;
     let edited: Option<i64> = row.try_get("edited_at").map_err(storage_error)?;
@@ -487,10 +490,33 @@ fn row_message(row: &SqliteRow, attachments: Vec<Attachment>) -> Result<Message,
     })
 }
 
+fn row_view(row: &SqliteRow, attachments: Vec<Attachment>) -> Result<MessageView, RepositoryError> {
+    let message = row_message(row, attachments)?;
+    let deleted_at: Option<i64> = row.try_get("deleted_at").map_err(storage_error)?;
+    let name: Option<String> = row.try_get("sender_name").map_err(storage_error)?;
+    let username: Option<String> = row.try_get("sender_username").map_err(storage_error)?;
+    let chat_title: Option<String> = row.try_get("chat_title").map_err(storage_error)?;
+    let sender = message.sender_id.map(|id| SenderInfo {
+        id,
+        // A chat/channel posting as itself has no profile name of its own: use the chat title.
+        display_name: name.or_else(|| {
+            (id.get() == message.chat_id.get())
+                .then_some(chat_title)
+                .flatten()
+        }),
+        username,
+    });
+    Ok(MessageView {
+        message,
+        sender,
+        deleted_at: deleted_at.map(timestamp).transpose()?,
+    })
+}
+
 async fn load_messages(
     tx: &mut Transaction<'_, Sqlite>,
     rows: Vec<SqliteRow>,
-) -> Result<Vec<Message>, RepositoryError> {
+) -> Result<Vec<MessageView>, RepositoryError> {
     let row_ids = rows
         .iter()
         .map(|row| row.try_get("row_id").map_err(storage_error))
@@ -498,9 +524,7 @@ async fn load_messages(
     let attachments = attachments_for(tx, &row_ids).await?;
     rows.iter()
         .zip(row_ids)
-        .map(|(row, row_id)| {
-            row_message(row, attachments.get(&row_id).cloned().unwrap_or_default())
-        })
+        .map(|(row, row_id)| row_view(row, attachments.get(&row_id).cloned().unwrap_or_default()))
         .collect()
 }
 
@@ -513,13 +537,15 @@ async fn list_messages(
     search: Option<&str>,
 ) -> Result<crate::application::MessagePage, RepositoryError> {
     let after_direction = after.is_some();
-    let mut query = QueryBuilder::<Sqlite>::new(
-        "SELECT m.row_id, m.chat_id, m.message_id, m.sender_id, m.timestamp, m.edited_at, m.collected_at, m.text, m.reply_to FROM messages m",
-    );
+    let mut query = QueryBuilder::<Sqlite>::new(MESSAGE_SELECT);
     if search.is_some() {
         query.push(" JOIN messages_fts ON messages_fts.rowid=m.row_id");
     }
-    query.push(" WHERE m.is_deleted=0");
+    query.push(if filters.include_deleted {
+        " WHERE 1=1"
+    } else {
+        " WHERE m.is_deleted=0"
+    });
     if let Some(chat_id) = filters.chat_id {
         query.push(" AND m.chat_id=").push_bind(chat_id.get());
     }
@@ -603,10 +629,17 @@ impl MessageRepository for SqliteStore {
         &self,
         chat_id: ChatId,
         message_id: MessageId,
-    ) -> Result<Option<Message>, RepositoryError> {
+        include_deleted: bool,
+    ) -> Result<Option<MessageView>, RepositoryError> {
         let mut tx = self.pool.begin().await?;
-        let row = sqlx::query("SELECT row_id, chat_id, message_id, sender_id, timestamp, edited_at, collected_at, text, reply_to FROM messages WHERE chat_id=? AND message_id=? AND is_deleted=0")
-            .bind(chat_id.get()).bind(message_id.get()).fetch_optional(&mut *tx).await?;
+        let row = sqlx::query(&format!(
+            "{MESSAGE_SELECT} WHERE m.chat_id=? AND m.message_id=? AND (m.is_deleted=0 OR ?)"
+        ))
+        .bind(chat_id.get())
+        .bind(message_id.get())
+        .bind(include_deleted)
+        .fetch_optional(&mut *tx)
+        .await?;
         let message = match row {
             Some(row) => load_messages(&mut tx, vec![row]).await?.pop(),
             None => None,
@@ -652,10 +685,97 @@ impl MessageRepository for SqliteStore {
         tx.commit().await.map_err(storage_error)?;
         Ok(page)
     }
+
+    async fn list_senders(
+        &self,
+        chat_id: ChatId,
+        limit: PageSize,
+    ) -> Result<Vec<SenderSummary>, RepositoryError> {
+        let rows = sqlx::query("SELECT m.sender_id, COALESCE(s.display_name, CASE WHEN m.sender_id=m.chat_id THEN c.title END) AS display_name, s.username, COUNT(*) AS message_count FROM messages m LEFT JOIN senders s ON s.id=m.sender_id LEFT JOIN chats c ON c.id=m.chat_id WHERE m.chat_id=? AND m.is_deleted=0 AND m.sender_id IS NOT NULL GROUP BY m.sender_id ORDER BY message_count DESC, m.sender_id LIMIT ?")
+            .bind(chat_id.get())
+            .bind(i64::from(limit.get()))
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter()
+            .map(|row| {
+                let count: i64 = row.try_get("message_count").map_err(storage_error)?;
+                Ok(SenderSummary {
+                    sender: SenderInfo {
+                        id: SenderId::from_marked(row.try_get("sender_id").map_err(storage_error)?)
+                            .map_err(invalid_data)?,
+                        display_name: row.try_get("display_name").map_err(storage_error)?,
+                        username: row.try_get("username").map_err(storage_error)?,
+                    },
+                    message_count: u64::try_from(count).map_err(invalid_data)?,
+                })
+            })
+            .collect()
+    }
+}
+
+fn chat_summary_query(single: bool, sort: ChatSort) -> String {
+    let filter = if single { " WHERE chat_id=?" } else { "" };
+    let order = match sort {
+        ChatSort::Default => "c.id",
+        ChatSort::Title => "c.title IS NULL, LOWER(c.title), c.id",
+        ChatSort::LastMessage => "a.last_ts IS NULL, a.last_ts DESC, c.id",
+        ChatSort::MessageCount => "COALESCE(a.message_count, 0) DESC, c.id",
+    };
+    format!(
+        "SELECT c.id, c.kind, c.title, c.username, c.tracked, COALESCE(a.message_count, 0) AS message_count, COALESCE(a.deleted_count, 0) AS deleted_count, a.first_ts, a.last_ts, COALESCE(st.history_complete, 0) AS history_complete, st.last_sync_completed_at, st.last_error FROM chats c LEFT JOIN (SELECT chat_id, SUM(is_deleted=0) AS message_count, SUM(is_deleted) AS deleted_count, MIN(CASE WHEN is_deleted=0 THEN timestamp END) AS first_ts, MAX(CASE WHEN is_deleted=0 THEN timestamp END) AS last_ts FROM messages{filter} GROUP BY chat_id) a ON a.chat_id=c.id LEFT JOIN chat_sync_state st ON st.chat_id=c.id{} ORDER BY {order}",
+        if single { " WHERE c.id=?" } else { "" }
+    )
+}
+
+fn row_summary(row: &SqliteRow) -> Result<ChatSummary, RepositoryError> {
+    let opt_time = |name: &str| -> Result<Option<DateTime<Utc>>, RepositoryError> {
+        row.try_get::<Option<i64>, _>(name)
+            .map_err(storage_error)?
+            .map(timestamp)
+            .transpose()
+    };
+    let count = |name: &str| -> Result<u64, RepositoryError> {
+        u64::try_from(row.try_get::<i64, _>(name).map_err(storage_error)?).map_err(invalid_data)
+    };
+    Ok(ChatSummary {
+        chat: row_chat(row)?,
+        stats: ChatStats {
+            message_count: count("message_count")?,
+            deleted_count: count("deleted_count")?,
+            first_message_at: opt_time("first_ts")?,
+            last_message_at: opt_time("last_ts")?,
+            history_complete: row
+                .try_get::<i64, _>("history_complete")
+                .map_err(storage_error)?
+                != 0,
+            last_sync_completed_at: opt_time("last_sync_completed_at")?,
+            last_error: row.try_get("last_error").map_err(storage_error)?,
+        },
+    })
 }
 
 #[async_trait::async_trait]
 impl ChatRepository for SqliteStore {
+    async fn list_with_stats(&self, sort: ChatSort) -> Result<Vec<ChatSummary>, RepositoryError> {
+        sqlx::query(&chat_summary_query(false, sort))
+            .fetch_all(&self.pool)
+            .await?
+            .iter()
+            .map(row_summary)
+            .collect()
+    }
+
+    async fn get_with_stats(&self, id: ChatId) -> Result<Option<ChatSummary>, RepositoryError> {
+        sqlx::query(&chat_summary_query(true, ChatSort::Default))
+            .bind(id.get())
+            .bind(id.get())
+            .fetch_optional(&self.pool)
+            .await?
+            .as_ref()
+            .map(row_summary)
+            .transpose()
+    }
+
     async fn get(&self, id: ChatId) -> Result<Option<Chat>, RepositoryError> {
         let row = sqlx::query("SELECT id, kind, title, username, tracked FROM chats WHERE id=?")
             .bind(id.get())

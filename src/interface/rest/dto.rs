@@ -1,10 +1,13 @@
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::{
-    application::{MessagePage, SyncJob, SyncJobState, services::ApplicationStatus},
-    domain::{Attachment, AttachmentKind, Chat, ChatKind, Message, SenderId},
+    application::{
+        ChatSort, ChatStats, ChatSummary, MessageContext, MessagePage, MessageView, SenderInfo,
+        SenderSummary, SyncJob, SyncJobState, services::ApplicationStatus,
+    },
+    domain::{Attachment, AttachmentKind, Chat, ChatKind, SenderId},
 };
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -15,6 +18,60 @@ pub struct ChatDto {
     pub username: Option<String>,
     /// Whether the chat is opted in for collection.
     pub tracked: bool,
+    /// Aggregate archive/sync stats; omitted by `POST /chats/refresh`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stats: Option<ChatStatsDto>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct ChatStatsDto {
+    /// Non-deleted archived messages.
+    pub message_count: u64,
+    pub deleted_count: u64,
+    /// Timestamps of the oldest / newest non-deleted message.
+    pub first_message_at: Option<DateTime<Utc>>,
+    pub last_message_at: Option<DateTime<Utc>>,
+    /// Whether history backfill reached the start of the chat.
+    pub history_complete: bool,
+    pub last_sync_completed_at: Option<DateTime<Utc>>,
+    /// Sanitized reason of the last failed sync, cleared by the next successful checkpoint.
+    pub last_error: Option<String>,
+}
+
+impl From<ChatStats> for ChatStatsDto {
+    fn from(stats: ChatStats) -> Self {
+        Self {
+            message_count: stats.message_count,
+            deleted_count: stats.deleted_count,
+            first_message_at: stats.first_message_at,
+            last_message_at: stats.last_message_at,
+            history_complete: stats.history_complete,
+            last_sync_completed_at: stats.last_sync_completed_at,
+            last_error: stats.last_error,
+        }
+    }
+}
+
+/// Sort order of `GET /chats`.
+#[derive(Debug, Clone, Copy, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatSortDto {
+    /// Title, case-insensitive ascending (untitled last).
+    Title,
+    /// Newest last message first (chats without messages last).
+    LastMessage,
+    /// Most messages first.
+    MessageCount,
+}
+
+impl From<ChatSortDto> for ChatSort {
+    fn from(sort: ChatSortDto) -> Self {
+        match sort {
+            ChatSortDto::Title => Self::Title,
+            ChatSortDto::LastMessage => Self::LastMessage,
+            ChatSortDto::MessageCount => Self::MessageCount,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, ToSchema)]
@@ -26,9 +83,18 @@ pub enum ChatKindDto {
     Channel,
 }
 
+impl From<ChatSummary> for ChatDto {
+    fn from(summary: ChatSummary) -> Self {
+        let mut dto = Self::from(summary.chat);
+        dto.stats = Some(summary.stats.into());
+        dto
+    }
+}
+
 impl From<Chat> for ChatDto {
     fn from(chat: Chat) -> Self {
         Self {
+            stats: None,
             id: chat.id.get(),
             kind: match chat.kind {
                 ChatKind::Private => ChatKindDto::Private,
@@ -48,12 +114,55 @@ pub struct MessageDto {
     pub id: i64,
     pub chat_id: i64,
     pub sender_id: Option<i64>,
+    /// Resolved sender; null for messages without a sender.
+    pub sender: Option<SenderDto>,
     pub timestamp: DateTime<Utc>,
     pub edited_at: Option<DateTime<Utc>>,
     pub collected_at: DateTime<Utc>,
     pub text: Option<String>,
     pub reply_to: Option<i64>,
     pub attachments: Vec<AttachmentDto>,
+    pub is_deleted: bool,
+    /// Set when the message was deleted on Telegram (only returned with `include_deleted=true`).
+    pub deleted_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct SenderDto {
+    pub id: i64,
+    /// Profile name; for a chat/channel posting as itself, the chat title.
+    pub display_name: Option<String>,
+    pub username: Option<String>,
+}
+
+impl From<SenderInfo> for SenderDto {
+    fn from(sender: SenderInfo) -> Self {
+        Self {
+            id: sender.id.get(),
+            display_name: sender.display_name,
+            username: sender.username,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct SenderSummaryDto {
+    pub id: i64,
+    pub display_name: Option<String>,
+    pub username: Option<String>,
+    /// Non-deleted messages by this sender in the chat.
+    pub message_count: u64,
+}
+
+impl From<SenderSummary> for SenderSummaryDto {
+    fn from(summary: SenderSummary) -> Self {
+        Self {
+            id: summary.sender.id.get(),
+            display_name: summary.sender.display_name,
+            username: summary.sender.username,
+            message_count: summary.message_count,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -99,9 +208,17 @@ impl From<Attachment> for AttachmentDto {
     }
 }
 
-impl From<Message> for MessageDto {
-    fn from(message: Message) -> Self {
+impl From<MessageView> for MessageDto {
+    fn from(view: MessageView) -> Self {
+        let MessageView {
+            message,
+            sender,
+            deleted_at,
+        } = view;
         Self {
+            sender: sender.map(Into::into),
+            is_deleted: deleted_at.is_some(),
+            deleted_at,
             id: message.id.get(),
             chat_id: message.chat_id.get(),
             sender_id: message.sender_id.map(SenderId::get),
@@ -134,6 +251,42 @@ impl TryFrom<MessagePage> for MessagePageDto {
                 .as_ref()
                 .map(crate::interface::cursor::encode)
                 .transpose()?,
+        })
+    }
+}
+
+/// Messages around an anchor, both lists oldest first.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct MessageContextDto {
+    pub anchor: MessageDto,
+    pub before: Vec<MessageDto>,
+    pub after: Vec<MessageDto>,
+    pub has_more_before: bool,
+    pub has_more_after: bool,
+    /// Pass as `before` to `GET .../messages` to keep scrolling to older messages.
+    pub before_cursor: Option<String>,
+    /// Pass as `after` to `GET .../messages` to keep scrolling to newer messages.
+    pub after_cursor: Option<String>,
+}
+
+impl TryFrom<MessageContext> for MessageContextDto {
+    type Error = crate::interface::cursor::CursorError;
+
+    fn try_from(context: MessageContext) -> Result<Self, Self::Error> {
+        let encode = |cursor: Option<crate::application::MessageCursor>| {
+            cursor
+                .as_ref()
+                .map(crate::interface::cursor::encode)
+                .transpose()
+        };
+        Ok(Self {
+            anchor: context.anchor.into(),
+            before: context.before.into_iter().map(Into::into).collect(),
+            after: context.after.into_iter().map(Into::into).collect(),
+            has_more_before: context.has_more_before,
+            has_more_after: context.has_more_after,
+            before_cursor: encode(context.before_cursor)?,
+            after_cursor: encode(context.after_cursor)?,
         })
     }
 }

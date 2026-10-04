@@ -41,14 +41,16 @@ impl MessageRepository for Fakes {
         &self,
         chat_id: ChatId,
         message_id: MessageId,
-    ) -> Result<Option<Message>, RepositoryError> {
+        _include_deleted: bool,
+    ) -> Result<Option<tgarchive::application::MessageView>, RepositoryError> {
         Ok(self
             .0
             .lock()
             .await
             .messages
             .get(&(chat_id, message_id))
-            .cloned())
+            .cloned()
+            .map(Into::into))
     }
 
     async fn list(&self, query: ListMessagesQuery) -> Result<MessagePage, RepositoryError> {
@@ -238,6 +240,7 @@ fn list_query() -> ListMessagesQuery {
             chat_id: None,
             sender_id: None,
             time_range: TimeRange::new(None, None).unwrap(),
+            include_deleted: false,
         },
         before: None,
         after: None,
@@ -390,7 +393,7 @@ async fn message_queries_validate_before_repository_and_report_missing_entities(
     }
 
     assert!(matches!(
-        app.get_message(chat().id, message().id).await,
+        app.get_message(chat().id, message().id, false).await,
         Err(ApplicationError::NotFound)
     ));
     assert!(matches!(
@@ -410,8 +413,10 @@ async fn message_queries_validate_before_repository_and_report_missing_entities(
         state.messages.insert((chat().id, message().id), message());
     }
     assert_eq!(
-        app.get_message(chat().id, message().id).await.unwrap(),
-        message()
+        app.get_message(chat().id, message().id, false)
+            .await
+            .unwrap(),
+        message().into()
     );
     assert_eq!(app.get_chat(chat().id).await.unwrap(), chat());
 

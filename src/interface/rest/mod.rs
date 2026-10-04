@@ -23,7 +23,12 @@ use axum::{
     routing::get,
 };
 use std::time::Duration;
-use tower_http::{limit::RequestBodyLimitLayer, timeout::TimeoutLayer, trace::TraceLayer};
+use tower_http::{
+    cors::{AllowOrigin, CorsLayer},
+    limit::RequestBodyLimitLayer,
+    timeout::TimeoutLayer,
+    trace::TraceLayer,
+};
 
 use crate::application::{services::Application, sync::SyncCoordinator};
 
@@ -62,6 +67,11 @@ pub fn router_with_sync(
             axum::routing::put(routes::track_chat).delete(routes::untrack_chat),
         )
         .route("/api/v1/chats/{chat_id}/messages", get(routes::list_chat_messages))
+        .route("/api/v1/chats/{chat_id}/senders", get(routes::list_chat_senders))
+        .route(
+            "/api/v1/chats/{chat_id}/messages/{message_id}/context",
+            get(routes::message_context),
+        )
         .route("/api/v1/messages", get(routes::list_messages))
         .route("/api/v1/messages/search", get(routes::search_messages))
         .route(
@@ -96,6 +106,68 @@ pub fn router_with_sync(
             )
         }))
         .layer(middleware::from_fn(request_id))
+}
+
+/// Environment variable enabling CORS for one local frontend dev origin (default: off).
+pub const DEV_CORS_ENV: &str = "TGARCHIVE_DEV_CORS_ORIGIN";
+
+/// Parses a loopback `http` origin such as `http://127.0.0.1:5173`: scheme + host (+ port) only.
+pub fn parse_dev_cors_origin(value: &str) -> Result<HeaderValue, String> {
+    let invalid = || {
+        format!(
+            "{DEV_CORS_ENV} must be a loopback http origin like http://127.0.0.1:5173 (got {value:?})"
+        )
+    };
+    let authority = value.strip_prefix("http://").ok_or_else(invalid)?;
+    let (host, tail) = match authority.strip_prefix('[') {
+        Some(rest) => rest.split_once(']').ok_or_else(invalid)?,
+        None => authority.split_at(authority.find(':').unwrap_or(authority.len())),
+    };
+    if !tail.is_empty()
+        && tail
+            .strip_prefix(':')
+            .is_none_or(|port| port.parse::<u16>().is_err())
+    {
+        return Err(invalid());
+    }
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback());
+    if !loopback {
+        return Err(invalid());
+    }
+    HeaderValue::from_str(value).map_err(|_| invalid())
+}
+
+/// Reads [`DEV_CORS_ENV`]; unset or empty disables CORS, anything else must validate.
+pub fn dev_cors_from_env() -> Result<Option<CorsLayer>, String> {
+    match std::env::var(DEV_CORS_ENV) {
+        Ok(value) if !value.is_empty() => Ok(Some(dev_cors_layer(parse_dev_cors_origin(&value)?))),
+        _ => Ok(None),
+    }
+}
+
+pub fn dev_cors_layer(origin: HeaderValue) -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::predicate(move |request_origin, _| {
+            *request_origin == origin
+        }))
+        .allow_methods([
+            axum::http::Method::GET,
+            axum::http::Method::POST,
+            axum::http::Method::PUT,
+            axum::http::Method::DELETE,
+        ])
+        .allow_headers([axum::http::header::CONTENT_TYPE, REQUEST_ID])
+        .expose_headers([REQUEST_ID])
+}
+
+pub fn apply_dev_cors(router: axum::Router, cors: Option<CorsLayer>) -> axum::Router {
+    match cors {
+        Some(cors) => router.layer(cors),
+        None => router,
+    }
 }
 
 pub fn validate_loopback_bind(address: SocketAddr) -> Result<(), &'static str> {

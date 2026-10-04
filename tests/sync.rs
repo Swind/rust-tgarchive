@@ -13,7 +13,7 @@ use tgarchive::{
         TelegramError, TelegramGateway, ingestion_worker,
         sync::{CancellationToken, SyncCoordinator, SyncEngine},
     },
-    domain::{Chat, ChatId, ChatKind, Message, MessageId},
+    domain::{Chat, ChatId, ChatKind, MessageId},
 };
 use tokio::sync::Mutex;
 
@@ -110,7 +110,12 @@ impl SyncRepository for Store {
 }
 #[async_trait]
 impl MessageRepository for Store {
-    async fn get(&self, _: ChatId, _: MessageId) -> Result<Option<Message>, RepositoryError> {
+    async fn get(
+        &self,
+        _: ChatId,
+        _: MessageId,
+        _: bool,
+    ) -> Result<Option<tgarchive::application::MessageView>, RepositoryError> {
         Ok(None)
     }
     async fn list(&self, _: ListMessagesQuery) -> Result<MessagePage, RepositoryError> {

@@ -92,8 +92,8 @@ async fn unknown_common_deletion_is_durable_and_blocks_later_history_without_tou
         .await
         .unwrap();
 
-    assert!(store.get(common_chat, id).await.unwrap().is_none());
-    assert!(store.get(channel_chat, id).await.unwrap().is_some());
+    assert!(store.get(common_chat, id, false).await.unwrap().is_none());
+    assert!(store.get(channel_chat, id, false).await.unwrap().is_some());
     assert_eq!(store.unresolved_common_deletion_count().await.unwrap(), 1);
 }
 
@@ -126,14 +126,14 @@ async fn common_deletion_marks_existing_common_message_but_not_same_id_in_channe
 
     assert!(
         store
-            .get(common_chat, MessageId::new(18).unwrap())
+            .get(common_chat, MessageId::new(18).unwrap(), false)
             .await
             .unwrap()
             .is_none()
     );
     assert!(
         store
-            .get(channel_chat, MessageId::new(18).unwrap())
+            .get(channel_chat, MessageId::new(18).unwrap(), false)
             .await
             .unwrap()
             .is_some()
@@ -169,12 +169,12 @@ async fn ambiguous_common_id_is_tombstoned_but_never_guessed() {
         .await
         .unwrap();
 
-    assert!(store.get(first_chat, id).await.unwrap().is_some());
-    assert!(store.get(second_chat, id).await.unwrap().is_some());
+    assert!(store.get(first_chat, id, false).await.unwrap().is_some());
+    assert!(store.get(second_chat, id, false).await.unwrap().is_some());
     assert_eq!(store.unresolved_common_deletion_count().await.unwrap(), 1);
     assert!(
         store
-            .get(ChatId::from_marked(-1_000_000_000_201).unwrap(), id)
+            .get(ChatId::from_marked(-1_000_000_000_201).unwrap(), id, false)
             .await
             .unwrap()
             .is_none()
@@ -228,6 +228,7 @@ async fn replaying_the_same_realtime_batch_after_a_crash_leaves_one_row() {
                 chat_id: Some(chat_id),
                 sender_id: None,
                 time_range: tgarchive::application::TimeRange::new(None, None).unwrap(),
+                include_deleted: false,
             },
             before: None,
             after: None,

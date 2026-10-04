@@ -22,7 +22,7 @@ use tgarchive::{
         services::{Application, CollectorStatusHandle, ComponentState, ComponentStatus},
         sync::{SyncCoordinator, SyncEngine},
     },
-    domain::{Chat, ChatId, ChatKind, Message, MessageId},
+    domain::{Chat, ChatId, ChatKind, MessageId},
     interface::rest::{
         OpenApiFormat, export_openapi, router, router_with_sync, validate_loopback_bind,
     },
@@ -56,7 +56,12 @@ impl FakePorts {
 
 #[async_trait]
 impl MessageRepository for FakePorts {
-    async fn get(&self, _: ChatId, _: MessageId) -> Result<Option<Message>, RepositoryError> {
+    async fn get(
+        &self,
+        _: ChatId,
+        _: MessageId,
+        _: bool,
+    ) -> Result<Option<tgarchive::application::MessageView>, RepositoryError> {
         if let Some(error) = self.repo_error() {
             return Err(error);
         }

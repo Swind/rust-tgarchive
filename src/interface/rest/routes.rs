@@ -5,15 +5,18 @@ use utoipa::IntoParams;
 
 use crate::{
     application::{
-        ApplicationError, ListMessagesQuery, MessageFilters, PageSize, SearchMessagesQuery,
-        SyncScope, TimeRange,
+        ApplicationError, ChatSort, ListMessagesQuery, MessageContextQuery, MessageFilters,
+        PageSize, SearchMessagesQuery, SyncScope, TimeRange,
     },
     domain::{ChatId, MessageId, SenderId},
 };
 
 use super::{
     ApiError, RequestId, RestState,
-    dto::{ChatDto, HealthDto, MessageDto, MessagePageDto, StatusDto, SyncJobDto, TrackChatDto},
+    dto::{
+        ChatDto, ChatSortDto, HealthDto, MessageContextDto, MessageDto, MessagePageDto,
+        SenderSummaryDto, StatusDto, SyncJobDto, TrackChatDto,
+    },
     extract::{ApiPath, ApiQuery},
 };
 
@@ -27,6 +30,8 @@ pub(super) struct MessageQuery {
     before: Option<String>,
     after: Option<String>,
     limit: Option<u16>,
+    /// Also return deleted messages (flagged with `is_deleted`/`deleted_at`).
+    include_deleted: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, IntoParams)]
@@ -40,6 +45,8 @@ pub(super) struct SearchQuery {
     before: Option<String>,
     after: Option<String>,
     limit: Option<u16>,
+    /// Also return deleted messages (flagged with `is_deleted`/`deleted_at`).
+    include_deleted: Option<bool>,
 }
 
 #[utoipa::path(get, path = "/api/v1/status", responses((status = 200, body = StatusDto), (status = 503, body = super::ErrorEnvelope)))]
@@ -61,6 +68,8 @@ pub(super) async fn status(
 pub(super) struct ChatListQuery {
     /// Only return tracked (collected) chats.
     tracked: Option<bool>,
+    /// Sort order; default is by chat ID.
+    sort: Option<ChatSortDto>,
 }
 
 #[utoipa::path(get, path = "/api/v1/chats", params(ChatListQuery), responses((status = 200, body = [ChatDto]), (status = 400, body = super::ErrorEnvelope), (status = 503, body = super::ErrorEnvelope)))]
@@ -71,7 +80,10 @@ pub(super) async fn list_chats(
 ) -> Result<Json<Vec<ChatDto>>, ApiError> {
     state
         .application
-        .list_chats(query.tracked.unwrap_or(false))
+        .list_chat_summaries(
+            query.tracked.unwrap_or(false),
+            query.sort.map_or(ChatSort::Default, Into::into),
+        )
         .await
         .map(|chats| Json(chats.into_iter().map(Into::into).collect()))
         .map_err(|error| ApiError::from_application(error, id.0))
@@ -162,7 +174,7 @@ pub(super) async fn get_chat(
     let chat_id = ChatId::from_marked(raw_id).map_err(|_| ApiError::malformed(id.0.clone()))?;
     state
         .application
-        .get_chat(chat_id)
+        .get_chat_summary(chat_id)
         .await
         .map(|chat| Json(chat.into()))
         .map_err(|error| ApiError::from_application(error, id.0))
@@ -193,9 +205,14 @@ pub(super) async fn track_chat(
     } else {
         None
     };
-    let chat = state
+    state
         .application
         .track_chat(chat_id)
+        .await
+        .map_err(|error| ApiError::from_application(error, id.0.clone()))?;
+    let chat = state
+        .application
+        .get_chat_summary(chat_id)
         .await
         .map_err(|error| ApiError::from_application(error, id.0.clone()))?;
     let mut response = TrackChatDto {
@@ -243,6 +260,11 @@ pub(super) async fn untrack_chat(
     state
         .application
         .untrack_chat(chat_id)
+        .await
+        .map_err(|error| ApiError::from_application(error, id.0.clone()))?;
+    state
+        .application
+        .get_chat_summary(chat_id)
         .await
         .map(|chat| Json(chat.into()))
         .map_err(|error| ApiError::from_application(error, id.0))
@@ -306,10 +328,35 @@ pub(super) async fn search_messages(
         .map_err(|_| ApiError::internal(id.0))
 }
 
-#[utoipa::path(get, path = "/api/v1/chats/{chat_id}/messages/{message_id}", params(("chat_id" = i64, Path), ("message_id" = i64, Path)), responses((status = 200, body = MessageDto), (status = 400, body = super::ErrorEnvelope), (status = 404, body = super::ErrorEnvelope), (status = 503, body = super::ErrorEnvelope)))]
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub(super) struct GetMessageQuery {
+    /// Also return the message if it was deleted.
+    include_deleted: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub(super) struct ContextQuery {
+    /// Messages older than the anchor (0-100, default 20).
+    before: Option<u16>,
+    /// Messages newer than the anchor (0-100, default 20).
+    after: Option<u16>,
+    include_deleted: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub(super) struct SendersQuery {
+    /// Maximum senders returned (1-1000, default 100).
+    limit: Option<u16>,
+}
+
+#[utoipa::path(get, path = "/api/v1/chats/{chat_id}/messages/{message_id}", params(("chat_id" = i64, Path), ("message_id" = i64, Path), GetMessageQuery), responses((status = 200, body = MessageDto), (status = 400, body = super::ErrorEnvelope), (status = 404, body = super::ErrorEnvelope), (status = 503, body = super::ErrorEnvelope)))]
 pub(super) async fn get_message(
     State(state): State<RestState>,
     ApiPath((raw_chat_id, raw_message_id)): ApiPath<(i64, i64)>,
+    ApiQuery(query): ApiQuery<GetMessageQuery>,
     Extension(id): Extension<RequestId>,
 ) -> Result<Json<MessageDto>, ApiError> {
     let chat_id =
@@ -318,9 +365,55 @@ pub(super) async fn get_message(
         MessageId::new(raw_message_id).map_err(|_| ApiError::malformed(id.0.clone()))?;
     state
         .application
-        .get_message(chat_id, message_id)
+        .get_message(chat_id, message_id, query.include_deleted.unwrap_or(false))
         .await
         .map(|message| Json(message.into()))
+        .map_err(|error| ApiError::from_application(error, id.0))
+}
+
+#[utoipa::path(get, path = "/api/v1/chats/{chat_id}/messages/{message_id}/context", params(("chat_id" = i64, Path), ("message_id" = i64, Path), ContextQuery), responses((status = 200, body = MessageContextDto), (status = 400, body = super::ErrorEnvelope), (status = 404, description = "Anchor message not found (or deleted without include_deleted)", body = super::ErrorEnvelope), (status = 503, body = super::ErrorEnvelope)))]
+pub(super) async fn message_context(
+    State(state): State<RestState>,
+    ApiPath((raw_chat_id, raw_message_id)): ApiPath<(i64, i64)>,
+    ApiQuery(query): ApiQuery<ContextQuery>,
+    Extension(id): Extension<RequestId>,
+) -> Result<Json<MessageContextDto>, ApiError> {
+    let chat_id =
+        ChatId::from_marked(raw_chat_id).map_err(|_| ApiError::malformed(id.0.clone()))?;
+    let message_id =
+        MessageId::new(raw_message_id).map_err(|_| ApiError::malformed(id.0.clone()))?;
+    let context = state
+        .application
+        .message_context(MessageContextQuery {
+            chat_id,
+            message_id,
+            before: query.before.unwrap_or(20),
+            after: query.after.unwrap_or(20),
+            include_deleted: query.include_deleted.unwrap_or(false),
+        })
+        .await
+        .map_err(|error| ApiError::from_application(error, id.0.clone()))?;
+    MessageContextDto::try_from(context)
+        .map(Json)
+        .map_err(|_| ApiError::internal(id.0))
+}
+
+#[utoipa::path(get, path = "/api/v1/chats/{chat_id}/senders", params(("chat_id" = i64, Path), SendersQuery), responses((status = 200, description = "Senders with non-deleted messages in the chat, most messages first", body = [SenderSummaryDto]), (status = 400, body = super::ErrorEnvelope), (status = 404, body = super::ErrorEnvelope), (status = 503, body = super::ErrorEnvelope)))]
+pub(super) async fn list_chat_senders(
+    State(state): State<RestState>,
+    ApiPath((raw_chat_id,)): ApiPath<(i64,)>,
+    ApiQuery(query): ApiQuery<SendersQuery>,
+    Extension(id): Extension<RequestId>,
+) -> Result<Json<Vec<SenderSummaryDto>>, ApiError> {
+    let chat_id =
+        ChatId::from_marked(raw_chat_id).map_err(|_| ApiError::malformed(id.0.clone()))?;
+    let limit = PageSize::new(query.limit.unwrap_or(PageSize::DEFAULT.get()))
+        .map_err(|error| ApiError::from_application(error.into(), id.0.clone()))?;
+    state
+        .application
+        .chat_senders(chat_id, limit)
+        .await
+        .map(|senders| Json(senders.into_iter().map(Into::into).collect()))
         .map_err(|error| ApiError::from_application(error, id.0))
 }
 
@@ -368,6 +461,7 @@ fn build_list_query(
         query.sender_id,
         query.from,
         query.to,
+        query.include_deleted,
         request_id.clone(),
     )?;
     let before = decode_cursor(query.before, request_id.clone())?;
@@ -395,6 +489,7 @@ fn build_search_query(
         query.sender_id,
         query.from,
         query.to,
+        query.include_deleted,
         request_id.clone(),
     )?;
     let result = SearchMessagesQuery {
@@ -415,6 +510,7 @@ fn filters(
     sender_id: Option<i64>,
     from: Option<DateTime<Utc>>,
     to: Option<DateTime<Utc>>,
+    include_deleted: Option<bool>,
     request_id: String,
 ) -> Result<MessageFilters, ApiError> {
     let chat_id = chat_id
@@ -431,6 +527,7 @@ fn filters(
         chat_id,
         sender_id,
         time_range,
+        include_deleted: include_deleted.unwrap_or(false),
     })
 }
 

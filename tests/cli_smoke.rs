@@ -353,3 +353,89 @@ fn misconfiguration_fails_at_startup_with_a_fix_hint() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("loopback"));
 }
+
+#[tokio::test]
+async fn include_deleted_flag_and_sender_names_work_in_the_cli() {
+    let directory = tempfile::tempdir().unwrap();
+    let url = database_url(&directory);
+    seed(&url).await;
+    let (chat, message) = fixture();
+    let sender =
+        tgarchive::domain::SenderId::from_telegram(tgarchive::domain::SenderKind::User, 9).unwrap();
+    let store = SqliteStore::connect(&url).await.unwrap();
+    store
+        .write_batch(IngestBatch {
+            senders: vec![tgarchive::domain::Sender {
+                id: sender,
+                kind: tgarchive::domain::SenderKind::User,
+                display_name: Some("Dana".into()),
+                username: None,
+            }],
+            records: vec![
+                IngestRecord {
+                    event: MessageEvent::Created(Message {
+                        sender_id: Some(sender),
+                        ..message.clone()
+                    }),
+                    source: MessageSource::Realtime,
+                },
+                IngestRecord {
+                    event: MessageEvent::Deleted {
+                        chat_id: chat.id,
+                        message_id: MessageId::new(6).unwrap(),
+                        deleted_at: message.timestamp + chrono::Duration::seconds(5),
+                    },
+                    source: MessageSource::Realtime,
+                },
+            ],
+            ..IngestBatch::default()
+        })
+        .await
+        .unwrap();
+    store.close().await;
+    let chat_id = chat.id.get().to_string();
+
+    let hidden = invoke(&url, &["messages", "list", "--chat-id", &chat_id]);
+    let hidden = String::from_utf8_lossy(&hidden.stdout).into_owned();
+    assert!(hidden.contains("Dana\thello from fixture"), "{hidden}");
+    assert!(!hidden.contains("older message"), "{hidden}");
+
+    let shown = invoke(
+        &url,
+        &[
+            "messages",
+            "list",
+            "--chat-id",
+            &chat_id,
+            "--include-deleted",
+        ],
+    );
+    assert!(String::from_utf8_lossy(&shown.stdout).contains("[deleted] older message"));
+    let search = invoke(&url, &["messages", "search", "older", "--include-deleted"]);
+    assert!(String::from_utf8_lossy(&search.stdout).contains("[deleted] older message"));
+    let search_hidden = invoke(&url, &["messages", "search", "older"]);
+    assert!(!String::from_utf8_lossy(&search_hidden.stdout).contains("older message"));
+
+    let missing = invoke(&url, &["messages", "get", &chat_id, "6"]);
+    assert!(!missing.status.success());
+    let got = invoke(
+        &url,
+        &[
+            "--output",
+            "json",
+            "messages",
+            "get",
+            &chat_id,
+            "6",
+            "--include-deleted",
+        ],
+    );
+    assert!(
+        got.status.success(),
+        "{}",
+        String::from_utf8_lossy(&got.stderr)
+    );
+    let json: Value = serde_json::from_slice(&got.stdout).unwrap();
+    assert_eq!(json["text"], "older message");
+    assert!(json["deleted_at"].is_string());
+}

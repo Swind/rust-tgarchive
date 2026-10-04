@@ -7,10 +7,10 @@ use thiserror::Error;
 use crate::{
     application::services::Application,
     application::{
-        ApplicationError, ListMessagesQuery, MessageFilters, MessagePage, PageSize,
+        ApplicationError, ListMessagesQuery, MessageFilters, MessagePage, MessageView, PageSize,
         SearchMessagesQuery, SyncJob, SyncScope, TimeRange, ValidationError,
     },
-    domain::{Chat, ChatId, IdError, Message, MessageId, SenderId},
+    domain::{Chat, ChatId, IdError, MessageId, SenderId},
 };
 
 #[derive(Debug, Parser)]
@@ -131,6 +131,9 @@ pub enum MessagesCommand {
         chat_id: i64,
         #[arg(value_parser = parse_message_id)]
         message_id: MessageId,
+        /// Also show the message if it was deleted.
+        #[arg(long)]
+        include_deleted: bool,
     },
     Search {
         query: String,
@@ -155,6 +158,9 @@ pub struct MessageFilterArgs {
     pub to: Option<DateTime<Utc>>,
     #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(1..=1000))]
     pub limit: u16,
+    /// Also include messages deleted on Telegram.
+    #[arg(long)]
+    pub include_deleted: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -195,7 +201,7 @@ pub enum CliError {
 
 #[derive(Serialize)]
 struct MessagePageOutput {
-    items: Vec<Message>,
+    items: Vec<MessageView>,
     has_more: bool,
     next_cursor: Option<String>,
 }
@@ -250,7 +256,7 @@ pub enum PreparedCommand {
     ChatsList { tracked_only: bool },
     ChatGet(ChatId),
     MessagesList(ListMessagesQuery),
-    MessageGet(ChatId, MessageId),
+    MessageGet(ChatId, MessageId, bool),
     MessagesSearch(SearchMessagesQuery),
     Status,
 }
@@ -322,9 +328,11 @@ fn prepare_query(command: Command) -> Result<PreparedCommand, CliError> {
             MessagesCommand::Get {
                 chat_id,
                 message_id,
+                include_deleted,
             } => Ok(PreparedCommand::MessageGet(
                 ChatId::from_marked(chat_id)?,
                 message_id,
+                include_deleted,
             )),
             MessagesCommand::Search { query, filters } => Ok(PreparedCommand::MessagesSearch(
                 search_query(query, filters)?,
@@ -362,8 +370,10 @@ pub async fn execute_prepared(
         PreparedCommand::MessagesList(query) => {
             render_message_page(output, app.list_messages(query).await?)
         }
-        PreparedCommand::MessageGet(chat_id, message_id) => {
-            let message = app.get_message(chat_id, message_id).await?;
+        PreparedCommand::MessageGet(chat_id, message_id, include_deleted) => {
+            let message = app
+                .get_message(chat_id, message_id, include_deleted)
+                .await?;
             if output == OutputFormat::Json {
                 json(&message)
             } else {
@@ -498,6 +508,7 @@ fn convert_filters(
         chat_id: args.chat_id.map(ChatId::from_marked).transpose()?,
         sender_id: args.sender_id.map(SenderId::from_marked).transpose()?,
         time_range: TimeRange::new(args.from, args.to)?,
+        include_deleted: args.include_deleted,
     };
     let before = args
         .before
@@ -579,12 +590,30 @@ fn human_chat(chat: &Chat) -> String {
     )
 }
 
-fn human_message(message: &Message) -> String {
+fn human_message(message: &MessageView) -> String {
+    let sender = message
+        .sender
+        .as_ref()
+        .and_then(|sender| {
+            sender
+                .display_name
+                .as_deref()
+                .or(sender.username.as_deref())
+        })
+        .map(str::to_owned)
+        .or_else(|| message.sender_id.map(|id| id.get().to_string()))
+        .unwrap_or_default();
     format!(
-        "{}\t{}\t{}\t{}",
+        "{}\t{}\t{}\t{}\t{}{}",
         message.chat_id.get(),
         message.id.get(),
         message.timestamp.to_rfc3339(),
+        sender,
+        if message.is_deleted() {
+            "[deleted] "
+        } else {
+            ""
+        },
         message.text.as_deref().unwrap_or("")
     )
 }

@@ -2,12 +2,13 @@ use std::sync::Arc;
 
 use crate::{
     application::{
-        ApplicationError, ArchiveWriter, ChatCheckpoint, ChatRepository, IngestBatch,
-        ListMessagesQuery, MessagePage, MessageRepository, MessageSource, SearchMessagesQuery,
-        SyncJob, SyncRepository, TelegramGateway,
+        ApplicationError, ArchiveWriter, ChatCheckpoint, ChatRepository, ChatSort, ChatSummary,
+        IngestBatch, ListMessagesQuery, MessageContext, MessageContextQuery, MessagePage,
+        MessageRepository, MessageSource, MessageView, PageSize, SearchMessagesQuery,
+        SenderSummary, SyncJob, SyncRepository, TelegramGateway,
         pacer::{RateLimitStatus, RatePacer},
     },
-    domain::{Chat, ChatId, Message, MessageEvent, MessageId, Sender},
+    domain::{Chat, ChatId, MessageEvent, MessageId, Sender},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,12 +149,37 @@ impl MessageService {
         &self,
         chat_id: ChatId,
         message_id: MessageId,
-    ) -> Result<Message, ApplicationError> {
+        include_deleted: bool,
+    ) -> Result<MessageView, ApplicationError> {
         self.messages
-            .get(chat_id, message_id)
+            .get(chat_id, message_id, include_deleted)
             .await
             .map_err(ApplicationError::from)?
             .ok_or(ApplicationError::NotFound)
+    }
+
+    pub async fn context(
+        &self,
+        query: MessageContextQuery,
+    ) -> Result<MessageContext, ApplicationError> {
+        query.validate()?;
+        self.messages
+            .context(query)
+            .await
+            .map_err(ApplicationError::from)?
+            .ok_or(ApplicationError::NotFound)
+    }
+
+    pub async fn list_senders(
+        &self,
+        chat_id: ChatId,
+        limit: PageSize,
+    ) -> Result<Vec<SenderSummary>, ApplicationError> {
+        self.ensure_chat_exists(Some(chat_id)).await?;
+        self.messages
+            .list_senders(chat_id, limit)
+            .await
+            .map_err(ApplicationError::from)
     }
 
     pub async fn list(&self, query: ListMessagesQuery) -> Result<MessagePage, ApplicationError> {
@@ -211,6 +237,30 @@ impl ChatService {
 
     pub async fn list(&self, tracked_only: bool) -> Result<Vec<Chat>, ApplicationError> {
         let mut chats = self.chats.list().await.map_err(ApplicationError::from)?;
+        if tracked_only {
+            chats.retain(|chat| chat.tracked);
+        }
+        Ok(chats)
+    }
+
+    pub async fn get_summary(&self, id: ChatId) -> Result<ChatSummary, ApplicationError> {
+        self.chats
+            .get_with_stats(id)
+            .await
+            .map_err(ApplicationError::from)?
+            .ok_or(ApplicationError::NotFound)
+    }
+
+    pub async fn list_summaries(
+        &self,
+        tracked_only: bool,
+        sort: ChatSort,
+    ) -> Result<Vec<ChatSummary>, ApplicationError> {
+        let mut chats = self
+            .chats
+            .list_with_stats(sort)
+            .await
+            .map_err(ApplicationError::from)?;
         if tracked_only {
             chats.retain(|chat| chat.tracked);
         }
@@ -329,8 +379,38 @@ impl Application {
         &self,
         chat_id: ChatId,
         message_id: MessageId,
-    ) -> Result<Message, ApplicationError> {
-        self.messages.get(chat_id, message_id).await
+        include_deleted: bool,
+    ) -> Result<MessageView, ApplicationError> {
+        self.messages
+            .get(chat_id, message_id, include_deleted)
+            .await
+    }
+
+    pub async fn message_context(
+        &self,
+        query: MessageContextQuery,
+    ) -> Result<MessageContext, ApplicationError> {
+        self.messages.context(query).await
+    }
+
+    pub async fn chat_senders(
+        &self,
+        chat_id: ChatId,
+        limit: PageSize,
+    ) -> Result<Vec<SenderSummary>, ApplicationError> {
+        self.messages.list_senders(chat_id, limit).await
+    }
+
+    pub async fn get_chat_summary(&self, id: ChatId) -> Result<ChatSummary, ApplicationError> {
+        self.chats.get_summary(id).await
+    }
+
+    pub async fn list_chat_summaries(
+        &self,
+        tracked_only: bool,
+        sort: ChatSort,
+    ) -> Result<Vec<ChatSummary>, ApplicationError> {
+        self.chats.list_summaries(tracked_only, sort).await
     }
 
     pub async fn list_messages(
