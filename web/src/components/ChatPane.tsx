@@ -143,9 +143,9 @@ export default function ChatPane({ chatId }: { chatId: number }) {
         </div>
       </header>
       {messageId !== undefined ? (
-        <ContextTimeline key={`${messageId}-${includeDeleted}`} chatId={chatId} messageId={messageId} includeDeleted={includeDeleted} />
+        <ContextTimeline key={`${messageId}-${includeDeleted}`} chatId={chatId} messageId={messageId} includeDeleted={includeDeleted} chatTitle={c.title} />
       ) : (
-        <ListTimeline key={`${sender}-${date}-${includeDeleted}`} chatId={chatId} filters={filters} />
+        <ListTimeline key={`${sender}-${date}-${includeDeleted}`} chatId={chatId} filters={filters} chatTitle={c.title} />
       )}
     </div>
   );

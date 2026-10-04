@@ -12,3 +12,6 @@
 !.env.example
 *.session.lock
 /web/node_modules/
+/web/e2e/node_modules/
+/web/e2e/test-results/
+/web/e2e/playwright-report/

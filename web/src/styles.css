@@ -76,5 +76,17 @@ mark { background: var(--mark); color: inherit; }
 .job { border: 1px solid var(--border); border-radius: 6px; margin: 6px 0; }
 .job-head { display: flex; width: 100%; gap: 10px; align-items: center; border: none; background: none; text-align: left; }
 .detail { display: grid; grid-template-columns: 140px 1fr; gap: 4px 12px; padding: 4px 12px; } .detail dt { color: var(--muted); } .detail dd { margin: 0; }
+.placeholder { margin: 2px 0; font-style: italic; }
+.search-filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), max-content)); gap: 8px 16px; align-items: center; }
+.search-filters select { max-width: 100%; min-width: 0; }
+.date-range { display: flex; gap: 8px 12px; align-items: center; flex-wrap: wrap; }
+.date-range label { white-space: nowrap; }
+.date-range input { min-width: 0; }
+.job-summary { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; padding: 0 12px 6px; }
+.job-actions { display: flex; gap: 8px; align-items: center; padding-right: 8px; }
+.job-actions .job-head { flex: 1; }
+.error-inline { color: var(--red); }
+.chat-progress { list-style: none; margin: 4px 12px 8px; padding: 0; }
+.chat-progress li { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; border-top: 1px solid var(--border); padding: 4px 0; }
 .note { color: var(--muted); }
 @media (max-width: 720px) { .split { flex-direction: column; } .sidebar { width: auto; max-height: 40%; } }

@@ -462,13 +462,31 @@ export interface components {
              */
             unresolved_deletions: number;
         };
+        SyncJobChatDto: {
+            /** Format: int64 */
+            chat_id: number;
+            /** Format: int64 */
+            committed_count: number;
+            error_summary?: string | null;
+            state: string;
+            title?: string | null;
+        };
         SyncJobDto: {
+            /** @description Per-chat progress; only present on `GET /sync/jobs/{id}`. */
+            chats?: components["schemas"]["SyncJobChatDto"][] | null;
             /** Format: date-time */
             completed_at?: string | null;
             /** Format: date-time */
             created_at: string;
+            /** @description Sanitized single-line failure reason (at most 300 chars; never message text). */
+            error_summary?: string | null;
             has_error: boolean;
             id: string;
+            /**
+             * Format: int64
+             * @description Seconds Telegram asked to wait, for `rate_limited` jobs.
+             */
+            retry_after_secs?: number | null;
             scope: string;
             /** Format: date-time */
             started_at?: string | null;
@@ -1125,6 +1143,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
+            /** @description Job with per-chat progress */
             200: {
                 headers: {
                     [name: string]: unknown;

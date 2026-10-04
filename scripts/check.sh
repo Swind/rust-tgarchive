@@ -18,3 +18,12 @@ if command -v npm >/dev/null 2>&1; then
 else
   echo "npm not found: skipping web checks"
 fi
+
+# Browser E2E (optional: E2E=1 and docker; uses the Playwright image, see README)
+if [ "${E2E:-0}" = "1" ]; then
+  if command -v docker >/dev/null 2>&1; then
+    scripts/e2e.sh
+  else
+    echo "docker not found: skipping E2E" >&2
+  fi
+fi

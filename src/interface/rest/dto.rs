@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -5,7 +7,7 @@ use utoipa::ToSchema;
 use crate::{
     application::{
         ChatSort, ChatStats, ChatSummary, MessageContext, MessagePage, MessageView, SenderInfo,
-        SenderSummary, SyncJob, SyncJobState, services::ApplicationStatus,
+        SenderSummary, SyncChatProgress, SyncJob, SyncJobState, services::ApplicationStatus,
     },
     domain::{Attachment, AttachmentKind, Chat, ChatKind, SenderId},
 };
@@ -341,6 +343,61 @@ pub struct SyncJobDto {
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
     pub has_error: bool,
+    /// Sanitized single-line failure reason (at most 300 chars; never message text).
+    pub error_summary: Option<String>,
+    /// Seconds Telegram asked to wait, for `rate_limited` jobs.
+    pub retry_after_secs: Option<u64>,
+    /// Per-chat progress; only present on `GET /sync/jobs/{id}`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chats: Option<Vec<SyncJobChatDto>>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct SyncJobChatDto {
+    pub chat_id: i64,
+    pub title: Option<String>,
+    pub state: String,
+    pub committed_count: u64,
+    pub error_summary: Option<String>,
+}
+
+const MAX_SUMMARY_CHARS: usize = 300;
+
+fn bound_summary(text: String) -> String {
+    let single_line = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>();
+    let single_line = single_line.split_whitespace().collect::<Vec<_>>().join(" ");
+    single_line.chars().take(MAX_SUMMARY_CHARS).collect()
+}
+
+/// Parses the `retry after N s` produced for FLOOD_WAIT failures.
+fn parse_retry_after(summary: &str) -> Option<u64> {
+    let rest = summary.split("retry after ").nth(1)?;
+    rest.split_whitespace().next()?.parse().ok()
+}
+
+impl SyncJobDto {
+    pub fn with_chats(
+        mut self,
+        progress: Vec<SyncChatProgress>,
+        titles: &HashMap<i64, String>,
+    ) -> Self {
+        self.chats = Some(
+            progress
+                .into_iter()
+                .map(|p| SyncJobChatDto {
+                    chat_id: p.chat_id.get(),
+                    title: titles.get(&p.chat_id.get()).cloned(),
+                    state: job_state(p.state),
+                    committed_count: p.committed_messages,
+                    error_summary: p.summary_error.map(bound_summary),
+                })
+                .collect(),
+        );
+        self
+    }
 }
 
 impl From<ApplicationStatus> for StatusDto {
@@ -364,7 +421,17 @@ impl From<ApplicationStatus> for StatusDto {
 
 impl From<SyncJob> for SyncJobDto {
     fn from(job: SyncJob) -> Self {
+        let error_summary = job.summary_error.map(bound_summary);
+        let retry_after_secs = if job.state == SyncJobState::RateLimited {
+            error_summary.as_deref().and_then(parse_retry_after)
+        } else {
+            None
+        };
         Self {
+            has_error: error_summary.is_some(),
+            error_summary,
+            retry_after_secs,
+            chats: None,
             id: job.id,
             scope: match job.scope {
                 crate::application::SyncScope::All => "all".to_owned(),
@@ -374,7 +441,6 @@ impl From<SyncJob> for SyncJobDto {
             created_at: job.created_at,
             started_at: job.started_at,
             completed_at: job.completed_at,
-            has_error: job.summary_error.is_some(),
         }
     }
 }
@@ -394,4 +460,20 @@ fn job_state(state: SyncJobState) -> String {
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct HealthDto {
     pub status: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn summaries_are_single_line_bounded_and_retry_after_is_parsed() {
+        assert_eq!(bound_summary("a\nb\tc".into()), "a b c");
+        assert_eq!(bound_summary("x".repeat(500)).chars().count(), 300);
+        assert_eq!(
+            parse_retry_after("Telegram rate limit: retry after 42 s"),
+            Some(42)
+        );
+        assert_eq!(parse_retry_after("boom"), None);
+    }
 }

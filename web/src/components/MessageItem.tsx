@@ -12,8 +12,13 @@ export function Highlighted({ text, query }: { text: string; query?: string }) {
   );
 }
 
-export function senderName(m: Message): string {
-  return m.sender?.display_name || (m.sender?.username ? `@${m.sender.username}` : String(m.sender?.id ?? m.sender_id ?? '未知'));
+/** display name → @username → chat title (when the sender is the chat itself) → 未知 (id). */
+export function senderName(m: Message, chatTitle?: string | null): string {
+  const id = m.sender?.id ?? m.sender_id;
+  if (m.sender?.display_name) return m.sender.display_name;
+  if (m.sender?.username) return `@${m.sender.username}`;
+  if (id != null && id === m.chat_id && chatTitle) return chatTitle;
+  return id != null ? `未知 (${id})` : '未知';
 }
 
 export default function MessageItem({
@@ -21,11 +26,13 @@ export default function MessageItem({
   anchor,
   query,
   showChat,
+  chatTitle,
 }: {
   message: Message;
   anchor?: boolean;
   query?: string;
   showChat?: string;
+  chatTitle?: string | null;
 }) {
   return (
     <article
@@ -35,7 +42,7 @@ export default function MessageItem({
     >
       <header>
         {showChat && <span className="chat-title">{showChat}</span>}
-        <strong>{senderName(m)}</strong>
+        <strong>{senderName(m, chatTitle)}</strong>
         <time dateTime={m.timestamp} title={formatDateTime(m.timestamp)}>
           {formatTime(m.timestamp)}
         </time>
@@ -56,6 +63,7 @@ export default function MessageItem({
           <Highlighted text={m.text} query={query} />
         </p>
       )}
+      {!m.text && m.attachments.length === 0 && <p className="placeholder muted">（系統訊息或無文字內容）</p>}
       {m.attachments.length > 0 && (
         <ul className="chips">
           {m.attachments.map((a, i) => (

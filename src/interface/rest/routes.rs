@@ -149,20 +149,26 @@ pub(super) async fn sync_status(
         .map_err(|error| ApiError::from_application(error, id.0))
 }
 
-#[utoipa::path(get, path = "/api/v1/sync/jobs/{job_id}", params(("job_id" = String, Path)), responses((status = 200, body = SyncJobDto), (status = 404, body = super::ErrorEnvelope), (status = 503, body = super::ErrorEnvelope)))]
+#[utoipa::path(get, path = "/api/v1/sync/jobs/{job_id}", params(("job_id" = String, Path)), responses((status = 200, description = "Job with per-chat progress", body = SyncJobDto), (status = 404, body = super::ErrorEnvelope), (status = 503, body = super::ErrorEnvelope)))]
 pub(super) async fn get_sync_job(
     State(state): State<RestState>,
     ApiPath((job_id,)): ApiPath<(String,)>,
     Extension(id): Extension<RequestId>,
 ) -> Result<Json<SyncJobDto>, ApiError> {
-    let coordinator = state
-        .sync
-        .ok_or_else(|| ApiError::from_application(ApplicationError::Busy, id.0.clone()))?;
-    coordinator
-        .get_job(&job_id)
+    let (job, progress) = state
+        .application
+        .sync_job_detail(&job_id)
         .await
-        .map(|job| Json(job.into()))
-        .map_err(|error| ApiError::from_application(error, id.0))
+        .map_err(|error| ApiError::from_application(error, id.0.clone()))?;
+    let titles = state
+        .application
+        .list_chat_summaries(false, ChatSort::Default)
+        .await
+        .map_err(|error| ApiError::from_application(error, id.0))?
+        .into_iter()
+        .filter_map(|c| c.chat.title.map(|t| (c.chat.id.get(), t)))
+        .collect();
+    Ok(Json(SyncJobDto::from(job).with_chats(progress, &titles)))
 }
 
 #[utoipa::path(get, path = "/api/v1/chats/{chat_id}", params(("chat_id" = i64, Path, description = "Marked Telegram chat ID")), responses((status = 200, body = ChatDto), (status = 400, body = super::ErrorEnvelope), (status = 404, body = super::ErrorEnvelope)))]

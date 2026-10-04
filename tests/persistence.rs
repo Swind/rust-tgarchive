@@ -648,3 +648,56 @@ async fn last_error(url: &str, chat_id: ChatId) -> Option<String> {
         .unwrap()
         .get("last_error")
 }
+
+#[tokio::test]
+async fn successful_chat_progress_records_sync_start_and_completion_times() {
+    let (_dir, store, _) = store().await;
+    let chat_id = ChatId::from_marked(81).unwrap();
+    store
+        .write_batch(ingest(vec![message(chat_id, 1, "x")]))
+        .await
+        .unwrap();
+    let now = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap();
+    SyncRepository::save_job(
+        &store,
+        SyncJob {
+            id: "j".into(),
+            scope: SyncScope::Chat(chat_id),
+            state: SyncJobState::Running,
+            created_at: now,
+            started_at: Some(now),
+            completed_at: None,
+            summary_error: None,
+        },
+    )
+    .await
+    .unwrap();
+    let progress = |state| IngestBatch {
+        job_progress: Some(SyncChatProgress {
+            job_id: "j".into(),
+            chat_id,
+            state,
+            committed_messages: 1,
+            summary_error: None,
+        }),
+        ..IngestBatch::default()
+    };
+    let times = || async {
+        let stats = ChatRepository::get_with_stats(&store, chat_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .stats;
+        stats.last_sync_completed_at
+    };
+    store
+        .write_batch(progress(SyncJobState::Running))
+        .await
+        .unwrap();
+    assert!(times().await.is_none());
+    store
+        .write_batch(progress(SyncJobState::Succeeded))
+        .await
+        .unwrap();
+    assert!(times().await.is_some());
+}

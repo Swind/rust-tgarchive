@@ -225,4 +225,17 @@ sqlite3 telegram.db "VACUUM INTO 'backup.db'"
 scripts/check.sh   # fmt、test、clippy（有 npm 時另含 web typecheck／lint／test／build 與 dist 一致性）
 ```
 
+### E2E 測試
+
+瀏覽器 E2E（Playwright，`web/e2e/`）不需要 Telegram：`scripts/e2e.sh` 會 `cargo build`、用 `cargo run --example seed_fixture -- <db>` 建立固定時間戳的 fixture 資料庫（7 個聊天室、250+ 則訊息、已刪除／編輯／回覆／附件／系統訊息、各狀態的同步工作與未歸屬刪除），以 `serve --query-only` 在隨機 loopback 埠啟動，再於官方映像 `mcr.microsoft.com/playwright:v<版本>-noble`（版本與 `web/e2e/package.json` 的 `@playwright/test` 相同）內以 `--network host` 執行測試；結束時一律關閉伺服器。需要 docker；沒有 docker 時改用本機已安裝瀏覽器（略過截圖比對），都沒有則印出訊息並略過。
+
+```sh
+scripts/e2e.sh                       # 執行全部
+scripts/e2e.sh -g search             # 額外參數傳給 playwright test
+scripts/e2e.sh --update-snapshots    # 重新產生截圖基準（務必在容器內，字型才一致）後提交 web/e2e/__screenshots__
+E2E=1 scripts/check.sh               # 在 check.sh 最後加跑 E2E（需 docker）
+```
+
+測試中時間被固定在 2026-03-12、時區 Asia/Taipei，且對外部主機的請求會被中止並使測試失敗。
+
 其他文件：[docs/](docs/)、[migrations 說明](docs/migrations.md)。

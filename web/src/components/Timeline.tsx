@@ -8,7 +8,7 @@ import { mergeMessages, nextOlderCursor } from '../lib/messages';
 
 export type TimelineFilters = { senderId?: number; toIso?: string; includeDeleted: boolean };
 
-function Rows({ messages, anchorId }: { messages: Message[]; anchorId?: number }) {
+function Rows({ messages, anchorId, chatTitle }: { messages: Message[]; anchorId?: number; chatTitle?: string | null }) {
   let last = '';
   return (
     <>
@@ -19,7 +19,7 @@ function Rows({ messages, anchorId }: { messages: Message[]; anchorId?: number }
         return (
           <div key={m.id}>
             {sep && <div className="date-sep">{formatDate(m.timestamp)}</div>}
-            <MessageItem message={m} anchor={m.id === anchorId} />
+            <MessageItem message={m} anchor={m.id === anchorId} chatTitle={chatTitle} />
           </div>
         );
       })}
@@ -63,7 +63,7 @@ function TopSentinel({ onVisible, disabled }: { onVisible: () => void; disabled:
   return <div ref={ref} aria-hidden="true" style={{ height: 1 }} />;
 }
 
-export function ListTimeline({ chatId, filters }: { chatId: number; filters: TimelineFilters }) {
+export function ListTimeline({ chatId, filters, chatTitle }: { chatId: number; filters: TimelineFilters; chatTitle?: string | null }) {
   const q = useInfiniteQuery({
     queryKey: ['messages', chatId, filters],
     initialPageParam: undefined as string | undefined,
@@ -93,7 +93,7 @@ export function ListTimeline({ chatId, filters }: { chatId: number; filters: Tim
       <TopSentinel onVisible={loadOlder} disabled={!q.hasNextPage} />
       {q.isFetchingNextPage && <div className="muted center">載入較舊訊息…</div>}
       {!q.hasNextPage && messages.length > 0 && <div className="muted center">已到最早的訊息</div>}
-      {messages.length === 0 ? <Empty>沒有符合的訊息</Empty> : <Rows messages={messages} />}
+      {messages.length === 0 ? <Empty>沒有符合的訊息</Empty> : <Rows messages={messages} chatTitle={chatTitle} />}
     </div>
   );
 }
@@ -102,10 +102,12 @@ export function ContextTimeline({
   chatId,
   messageId,
   includeDeleted,
+  chatTitle,
 }: {
   chatId: number;
   messageId: number;
   includeDeleted: boolean;
+  chatTitle?: string | null;
 }) {
   const ctx = useQuery({
     queryKey: ['context', chatId, messageId, includeDeleted],
@@ -158,7 +160,7 @@ export function ContextTimeline({
           載入更早的訊息
         </button>
       )}
-      <Rows messages={messages} anchorId={data.anchor.id} />
+      <Rows messages={messages} anchorId={data.anchor.id} chatTitle={chatTitle} />
       {hasNewer && newerCursor && (
         <button className="more" disabled={busy} onClick={() => void load('newer')}>
           載入較新的訊息

@@ -57,6 +57,7 @@ pub enum SpecError {
         TrackChatDto,
         ComponentStatusDto,
         SyncJobDto,
+        SyncJobChatDto,
         HealthDto,
         ErrorEnvelope,
         ErrorDetail

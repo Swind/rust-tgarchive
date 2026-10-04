@@ -122,4 +122,13 @@ Update-gap reconciliation：`differenceTooLong`／`channelDifferenceTooLong`（�
 - `web/`：React 19 + Vite + TypeScript strict、react-router、TanStack Query；型別由 `openapi.yml` 經 `openapi-typescript` 產生（`npm run gen:api`），搭配小型 fetch 封裝。頁面：對話（篩選／排序／kind／收集中、無限捲動時間軸、context 檢視、已刪除、寄件人、日期跳轉、開始／停止收集、同步）、搜尋、同步（輪詢 2 秒）、狀態；頂欄 collector 徽章每 5 秒輪詢；深／淺主題可手動切換並存 localStorage。
 - 嵌入：`web/dist` 提交進 repo，`build.rs` 產生 `include_bytes!` 表（無新增 Rust 依賴），`src/interface/rest/web.rs` 作為 router fallback：`/assets/*` 長快取 immutable、`index.html` no-cache、非 `/api`／`/health`／`/openapi` 的無副檔名路徑回 index（SPA）、API 404 仍為 JSON envelope；附 nosniff／no-referrer／CSP 標頭。
 - 選擇提交 dist 而非 feature flag：Rust-only 流程零 Node 依賴；`tests/rest_routes.rs::web_ui` 在 dist 缺失時失敗，`scripts/check.sh` 驗證 dist 與原始碼一致。
-- 限制：`SyncJobDto` 只有 `has_error` 布林，UI 無法顯示錯誤摘要；無 Telegram 即時驗證（僅以 `--query-only` + curl 驗證靜態服務），瀏覽器互動未做自動化 e2e。
+- 限制：無 Telegram 即時驗證；`--query-only` 為唯讀，追蹤／同步／重試在該模式只會顯示友善錯誤。
+
+## Web UI 修正與 E2E
+
+- 寄件人：Telegram 對私訊（對方發出）與頻道貼文省略 `from_id`，mapper 現在以聊天室本身為寄件人（自己發出的私訊仍為 null）；API 對無 `senders` 列且 sender==chat 者以聊天室標題為顯示名；UI 順序為 display_name → @username → 聊天室標題 → `未知 (id)`。舊資料中 sender 為 NULL 者仍顯示「未知」（無法得知方向）。
+- 無文字且無附件的訊息（系統訊息）顯示斜體提示；封存目前不儲存 service action，故僅有提示文字。
+- `last_sync_completed_at`／`last_sync_started_at` 先前從未被寫入；現在在 `write_batch` 的 job progress（與最終進度同一交易）寫入：第一次進度寫 started，`Succeeded` 寫 completed。
+- `SyncJobDto` 新增 `error_summary`（≤300 字、單行）、`retry_after_secs`（由 rate_limited 摘要解析）；`GET /sync/jobs/{id}` 另含 `chats[{chat_id,title,state,committed_count,error_summary}]`，且改由 application 讀取，query-only 也可用。`failure_summary` 現在經 `sanitize_reason`。UI：行內摘要、可展開每聊天室進度、failed／rate_limited／interrupted 的「重試」。
+- 搜尋頁篩選列改為 grid，日期區間為一個不拆行單元。
+- E2E：`examples/seed_fixture.rs`（走 store API，固定時間戳；選 example 而非 CLI 子命令，避免正式 binary 帶測試資料碼）、`web/e2e/*.spec.ts`（34 個測試含 3 張截圖）、`scripts/e2e.sh`；見 README「E2E 測試」。

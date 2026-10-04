@@ -675,7 +675,7 @@ paths:
           type: string
       responses:
         '200':
-          description: ''
+          description: Job with per-chat progress
           content:
             application/json:
               schema:
@@ -1112,6 +1112,30 @@ components:
           format: int64
           description: Deletions that could not be attributed to a chat (kept as tombstones).
           minimum: 0
+    SyncJobChatDto:
+      type: object
+      required:
+      - chat_id
+      - state
+      - committed_count
+      properties:
+        chat_id:
+          type: integer
+          format: int64
+        committed_count:
+          type: integer
+          format: int64
+          minimum: 0
+        error_summary:
+          type:
+          - string
+          - 'null'
+        state:
+          type: string
+        title:
+          type:
+          - string
+          - 'null'
     SyncJobDto:
       type: object
       required:
@@ -1121,6 +1145,13 @@ components:
       - created_at
       - has_error
       properties:
+        chats:
+          type:
+          - array
+          - 'null'
+          items:
+            $ref: '#/components/schemas/SyncJobChatDto'
+          description: Per-chat progress; only present on `GET /sync/jobs/{id}`.
         completed_at:
           type:
           - string
@@ -1129,10 +1160,22 @@ components:
         created_at:
           type: string
           format: date-time
+        error_summary:
+          type:
+          - string
+          - 'null'
+          description: Sanitized single-line failure reason (at most 300 chars; never message text).
         has_error:
           type: boolean
         id:
           type: string
+        retry_after_secs:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: Seconds Telegram asked to wait, for `rate_limited` jobs.
+          minimum: 0
         scope:
           type: string
         started_at:

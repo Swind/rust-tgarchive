@@ -247,6 +247,20 @@ async fn save_progress(
     .bind(progress.chat_id.get())
     .fetch_optional(&mut **tx)
     .await?;
+    if old.is_none() {
+        sqlx::query("UPDATE chat_sync_state SET last_sync_started_at=unixepoch() WHERE chat_id=?")
+            .bind(progress.chat_id.get())
+            .execute(&mut **tx)
+            .await?;
+    }
+    if progress.state == SyncJobState::Succeeded {
+        sqlx::query(
+            "UPDATE chat_sync_state SET last_sync_completed_at=unixepoch() WHERE chat_id=?",
+        )
+        .bind(progress.chat_id.get())
+        .execute(&mut **tx)
+        .await?;
+    }
     if let Some(row) = old {
         let state = parse_job_state(row.try_get("state").map_err(storage_error)?)?;
         let old_count: i64 = row.try_get("committed_count").map_err(storage_error)?;

@@ -335,6 +335,26 @@ impl SyncStatusService {
     }
 }
 
+impl SyncStatusService {
+    pub async fn job_detail(
+        &self,
+        id: &str,
+    ) -> Result<(SyncJob, Vec<crate::application::SyncChatProgress>), ApplicationError> {
+        let job = self
+            .sync
+            .get_job(id)
+            .await
+            .map_err(ApplicationError::from)?
+            .ok_or(ApplicationError::NotFound)?;
+        let chats = self
+            .sync
+            .list_chat_progress(id)
+            .await
+            .map_err(ApplicationError::from)?;
+        Ok((job, chats))
+    }
+}
+
 pub struct Application {
     ingestion: IngestionService,
     messages: MessageService,
@@ -449,5 +469,13 @@ impl Application {
 
     pub async fn sync_status(&self) -> Result<ApplicationStatus, ApplicationError> {
         self.sync_status.get().await
+    }
+
+    /// A sync job with its per-chat progress (readable without a running collector).
+    pub async fn sync_job_detail(
+        &self,
+        id: &str,
+    ) -> Result<(SyncJob, Vec<crate::application::SyncChatProgress>), ApplicationError> {
+        self.sync_status.job_detail(id).await
     }
 }

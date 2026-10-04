@@ -109,37 +109,46 @@ pub fn map_raw_message(
 ) -> Result<Message, MappingError> {
     use grammers_client::tl::enums::Message as RawMessage;
 
-    let (id, raw_peer, raw_sender_id, date, edited_at, text, reply_to, raw_media) = match raw {
-        RawMessage::Message(message) => (
-            message.id,
-            &message.peer_id,
-            message.from_id.as_ref(),
-            message.date,
-            message.edit_date,
-            Some(message.message.clone()),
-            message.reply_to.as_ref().and_then(reply_message_id),
-            message.media.clone(),
-        ),
-        RawMessage::Service(message) => (
-            message.id,
-            &message.peer_id,
-            message.from_id.as_ref(),
-            message.date,
-            None,
-            None,
-            message.reply_to.as_ref().and_then(reply_message_id),
-            None,
-        ),
-        RawMessage::Empty(_) => return Err(MappingError::UnsupportedMessage),
-    };
+    let (id, raw_peer, raw_sender_id, outgoing, date, edited_at, text, reply_to, raw_media) =
+        match raw {
+            RawMessage::Message(message) => (
+                message.id,
+                &message.peer_id,
+                message.from_id.as_ref(),
+                message.out,
+                message.date,
+                message.edit_date,
+                Some(message.message.clone()),
+                message.reply_to.as_ref().and_then(reply_message_id),
+                message.media.clone(),
+            ),
+            RawMessage::Service(message) => (
+                message.id,
+                &message.peer_id,
+                message.from_id.as_ref(),
+                message.out,
+                message.date,
+                None,
+                None,
+                message.reply_to.as_ref().and_then(reply_message_id),
+                None,
+            ),
+            RawMessage::Empty(_) => return Err(MappingError::UnsupportedMessage),
+        };
     let timestamp =
         DateTime::from_timestamp(i64::from(date), 0).ok_or(MappingError::InvalidTimestamp)?;
     let peer_id = raw_peer_id(raw_peer)?;
-    let sender_id = raw_sender_id
-        .map(raw_peer_id)
-        .transpose()?
-        .map(sender_id)
-        .transpose()?;
+    // Telegram omits `from_id` for incoming private messages and channel posts: the sender is
+    // the chat itself.
+    let sender_id = match raw_sender_id {
+        Some(raw) => Some(sender_id(raw_peer_id(raw)?)?),
+        None if matches!(peer_id.kind(), PeerKind::Channel)
+            || (matches!(peer_id.kind(), PeerKind::User) && !outgoing) =>
+        {
+            Some(sender_id(peer_id)?)
+        }
+        None => None,
+    };
     let attachments = raw_media
         .and_then(Media::from_raw)
         .into_iter()
@@ -434,5 +443,34 @@ mod tests {
         assert_eq!(mapped.sender_id.unwrap().get(), 5);
         assert_eq!(mapped.text, None);
         assert!(mapped.attachments.is_empty());
+    }
+
+    #[test]
+    fn incoming_private_message_without_from_id_is_attributed_to_the_peer() {
+        use grammers_client::tl::{enums::Peer, types};
+
+        let mut service = types::MessageService {
+            out: false,
+            mentioned: false,
+            media_unread: false,
+            reactions_are_possible: false,
+            silent: false,
+            post: false,
+            legacy: false,
+            id: 1,
+            from_id: None,
+            peer_id: Peer::User(types::PeerUser { user_id: 777_000 }),
+            saved_peer_id: None,
+            reply_to: None,
+            date: 1_700_000_001,
+            action: grammers_client::tl::enums::MessageAction::PinMessage,
+            reactions: None,
+            ttl_period: None,
+        };
+        let mapped = map_raw_message(&service.clone().into(), Utc::now()).unwrap();
+        assert_eq!(mapped.sender_id.unwrap().get(), 777_000);
+        service.out = true;
+        let mapped = map_raw_message(&service.into(), Utc::now()).unwrap();
+        assert_eq!(mapped.sender_id, None);
     }
 }

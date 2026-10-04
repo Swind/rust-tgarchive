@@ -493,7 +493,7 @@ fn failure_summary(error: &ApplicationError) -> String {
         ApplicationError::TelegramFloodWait {
             retry_after_seconds,
         } => format!("Telegram rate limit: retry after {retry_after_seconds} s"),
-        other => other.to_string(),
+        other => sanitize_reason(&other.to_string()),
     }
 }
 
