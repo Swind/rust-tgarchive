@@ -3,6 +3,7 @@ mod error;
 mod extract;
 mod openapi;
 mod routes;
+mod web;
 
 use std::{
     net::SocketAddr,
@@ -89,7 +90,7 @@ pub fn router_with_sync(
         .route("/health/ready", get(routes::ready))
         .route("/openapi.json", get(openapi::json_endpoint))
         .route("/openapi.yml", get(openapi::yaml_endpoint))
-        .fallback(routes::not_found)
+        .fallback(web::fallback)
         .with_state(state)
         .layer(middleware::from_fn(request_limits))
         .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))

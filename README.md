@@ -135,6 +135,16 @@ curl -s http://127.0.0.1:8080/api/v1/status
 curl -s "http://127.0.0.1:8080/api/v1/messages/search?q=keyword"
 ```
 
+## Web UI
+
+`tgarchive serve`（含 `--query-only`）會在 `/` 提供內嵌的 Web UI（React + Vite + TypeScript），API 仍在 `/api/v1`、`/health/*`、`/openapi.*`。啟動後開啟 <http://127.0.0.1:8080/>：對話（時間軸、無限捲動、脈絡檢視、開始／停止收集）、搜尋、同步、狀態。UI 與 API 同源，不使用任何外部 CDN／字型；UI 回應帶 `X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer` 與僅允許 self 的 CSP。仍只綁定 loopback 且**沒有身分驗證**。
+
+- 建置產物 `web/dist` **已提交**並由 `build.rs` 以 `include_bytes!` 嵌入執行檔，所以 `cargo build` 不需要 Node。
+- 前端開發：先 `tgarchive serve`，再 `npm --prefix web ci && npm --prefix web run dev`，開 <http://127.0.0.1:5173/>；Vite 會把 `/api`、`/health`、`/openapi.*` proxy 到 `127.0.0.1:8080`，不需要 CORS（也可改用 `TGARCHIVE_DEV_CORS_ORIGIN`）。
+- 重新建置並提交：`npm --prefix web run build`（含 typecheck）。`openapi.yml` 變更後執行 `npm --prefix web run gen:api` 重新產生 `web/src/api/schema.d.ts`。
+- 檢查：`npm --prefix web run typecheck`、`lint`、`test`；`scripts/check.sh` 在有 `npm` 時會執行並確認 `web/dist` 與原始碼一致。
+- 中文全文檢索限制：FTS5 `unicode61` 只能比對完整詞元，連續中文不會斷詞。
+
 ## REST 與 OpenAPI
 
 路由（皆在 `/api/v1`）：`chats`、`chats/refresh`、`chats/{id}`、`chats/{id}/tracking`（PUT 可加 `?backfill=true`／DELETE）、`chats/{id}/messages`、`chats/{id}/messages/{message_id}`、`chats/{id}/messages/{message_id}/context`、`chats/{id}/senders`、`chats/{id}/sync`、`messages`、`messages/search`、`sync`、`sync/jobs/{id}`、`sync/status`、`status`；另有 `/health/live`、`/health/ready`、`/openapi.json`、`/openapi.yml`。請求逾時 30 秒，query 與 body 有大小上限，每個回應帶 `x-request-id`。
@@ -212,7 +222,7 @@ sqlite3 telegram.db "VACUUM INTO 'backup.db'"
 ## 開發
 
 ```sh
-scripts/check.sh   # fmt、test、clippy
+scripts/check.sh   # fmt、test、clippy（有 npm 時另含 web typecheck／lint／test／build 與 dist 一致性）
 ```
 
 其他文件：[docs/](docs/)、[migrations 說明](docs/migrations.md)。

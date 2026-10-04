@@ -446,10 +446,6 @@ pub(super) async fn ready(State(state): State<RestState>) -> (StatusCode, Json<H
     )
 }
 
-pub(super) async fn not_found(Extension(id): Extension<RequestId>) -> ApiError {
-    ApiError::not_found(id.0)
-}
-
 fn build_list_query(
     query: MessageQuery,
     request_id: String,

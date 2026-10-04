@@ -116,3 +116,10 @@ Update-gap reconciliation：`differenceTooLong`／`channelDifferenceTooLong`（�
 - Migration `0005_read_indexes.sql`（僅 index，見 docs/migrations.md）。
 - 設計：`MessageView`／`ChatSummary` 為 application 層讀取模型；寄件人以 LEFT JOIN 解析、聊天室統計為單一 GROUP BY 子查詢（無逐列查詢）；context 以既有 list 查詢（cursor 相容）組成，預設 trait 實作。
 - Tests：`tests/read_api.rs`（sender join／senders、include_deleted、stats 與 sort、context 與 cursor 銜接、CORS 開／關／無效值、0004→0005 升級）、`tests/cli_smoke.rs` 新增 CLI 測試。
+
+## Web UI（內嵌前端）
+
+- `web/`：React 19 + Vite + TypeScript strict、react-router、TanStack Query；型別由 `openapi.yml` 經 `openapi-typescript` 產生（`npm run gen:api`），搭配小型 fetch 封裝。頁面：對話（篩選／排序／kind／收集中、無限捲動時間軸、context 檢視、已刪除、寄件人、日期跳轉、開始／停止收集、同步）、搜尋、同步（輪詢 2 秒）、狀態；頂欄 collector 徽章每 5 秒輪詢；深／淺主題可手動切換並存 localStorage。
+- 嵌入：`web/dist` 提交進 repo，`build.rs` 產生 `include_bytes!` 表（無新增 Rust 依賴），`src/interface/rest/web.rs` 作為 router fallback：`/assets/*` 長快取 immutable、`index.html` no-cache、非 `/api`／`/health`／`/openapi` 的無副檔名路徑回 index（SPA）、API 404 仍為 JSON envelope；附 nosniff／no-referrer／CSP 標頭。
+- 選擇提交 dist 而非 feature flag：Rust-only 流程零 Node 依賴；`tests/rest_routes.rs::web_ui` 在 dist 缺失時失敗，`scripts/check.sh` 驗證 dist 與原始碼一致。
+- 限制：`SyncJobDto` 只有 `has_error` 布林，UI 無法顯示錯誤摘要；無 Telegram 即時驗證（僅以 `--query-only` + curl 驗證靜態服務），瀏覽器互動未做自動化 e2e。

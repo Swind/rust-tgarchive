@@ -792,3 +792,102 @@ async fn status_exposes_the_history_rate_limit_only_when_a_pacer_is_attached() {
     assert_eq!(body["rate_limit"]["last_flood_wait_secs"], 42);
     assert!(body["rate_limit"]["last_flood_at"].is_string());
 }
+
+mod web_ui {
+    use super::*;
+
+    async fn get(path: &str) -> axum::http::Response<Body> {
+        get_with(path, "GET").await
+    }
+
+    async fn get_with(path: &str, method: &str) -> axum::http::Response<Body> {
+        let app = super::app(None);
+        router(app)
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    fn header<'a>(response: &'a axum::http::Response<Body>, name: &str) -> &'a str {
+        response.headers().get(name).unwrap().to_str().unwrap()
+    }
+
+    #[test]
+    fn dist_is_committed() {
+        let index = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/web/dist/index.html"))
+            .expect("web/dist is missing: run `npm --prefix web ci && npm --prefix web run build` and commit it");
+        assert!(index.contains("<div id=\"root\">"));
+    }
+
+    #[tokio::test]
+    async fn serves_index_with_security_headers() {
+        let response = get("/").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(header(&response, "content-type").starts_with("text/html"));
+        assert_eq!(header(&response, "cache-control"), "no-cache");
+        assert_eq!(header(&response, "x-content-type-options"), "nosniff");
+        assert_eq!(header(&response, "referrer-policy"), "no-referrer");
+        assert!(header(&response, "content-security-policy").contains("default-src 'self'"));
+    }
+
+    #[tokio::test]
+    async fn spa_routes_fall_back_to_index() {
+        let index = to_bytes(get("/").await.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        for path in ["/chats/123", "/search", "/chats/-100123?message=5"] {
+            let response = get(path).await;
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            assert_eq!(
+                to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+                index
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn hashed_assets_are_immutable_with_content_type() {
+        let index = String::from_utf8(
+            to_bytes(get("/").await.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        for (ext, content_type) in [("js", "text/javascript"), ("css", "text/css")] {
+            let path = index
+                .split('"')
+                .find(|part| part.starts_with("/assets/") && part.ends_with(ext))
+                .unwrap_or_else(|| panic!("index.html references no .{ext} asset"));
+            let response = get(path).await;
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            assert!(header(&response, "content-type").starts_with(content_type));
+            assert!(header(&response, "cache-control").contains("immutable"));
+        }
+        assert_eq!(
+            get("/assets/missing.js").await.status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn api_paths_keep_json_not_found() {
+        for path in ["/api/v1/nope", "/api", "/openapi.txt", "/health/other"] {
+            let response = get(path).await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+            let body: Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                    .unwrap();
+            assert_eq!(body["error"]["code"], "not_found", "{path}");
+        }
+        let response = get_with("/chats/1", "POST").await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(header(&response, "content-type").contains("json"));
+    }
+}

@@ -11,3 +11,4 @@
 .env.*
 !.env.example
 *.session.lock
+/web/node_modules/
