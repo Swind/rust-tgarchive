@@ -70,6 +70,8 @@ input[type='checkbox'] { padding: 0; }
 .chat-title { color: var(--accent); }
 .more { display: block; margin: 8px auto; }
 mark { background: var(--mark); color: inherit; }
+.banner { border: 1px solid var(--amber, #b7791f); border-radius: 6px; padding: 6px 10px; margin: 6px 0; font-size: 13px; }
+.sort-toggle { display: inline-flex; gap: 4px; align-items: center; }
 .results, .jobs { list-style: none; padding: 0; }
 .result { display: block; padding: 8px; border: 1px solid var(--border); border-radius: 6px; margin: 6px 0; text-decoration: none; color: inherit; }
 .result:hover { background: var(--bg2); } .result.deleted { opacity: 0.6; }

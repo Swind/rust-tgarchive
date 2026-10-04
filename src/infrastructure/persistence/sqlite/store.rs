@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use chrono::{DateTime, Utc};
 use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool, Transaction, sqlite::SqliteRow};
 
@@ -14,25 +16,40 @@ use crate::{
     },
 };
 
-use super::{open_existing_pool, open_pool, open_readonly_pool, storage_error};
+use super::{
+    open_existing_pool, open_pool, open_readonly_pool,
+    search::{index_message, read_state},
+    storage_error,
+};
+use crate::infrastructure::search::{SearchTokenizer, default_tokenizer, make_snippet, plan_query};
 
 #[derive(Clone)]
 pub struct SqliteStore {
-    pool: SqlitePool,
+    pub(super) pool: SqlitePool,
+    pub(super) tokenizer: Arc<dyn SearchTokenizer>,
 }
 
 impl SqliteStore {
+    fn with_pool(pool: SqlitePool) -> Self {
+        Self {
+            pool,
+            tokenizer: default_tokenizer(),
+        }
+    }
+
+    /// Replaces the shared jieba tokenizer (tests).
+    pub fn with_tokenizer(mut self, tokenizer: Arc<dyn SearchTokenizer>) -> Self {
+        self.tokenizer = tokenizer;
+        self
+    }
+
     pub async fn connect(database_url: &str) -> Result<Self, RepositoryError> {
-        Ok(Self {
-            pool: open_pool(database_url).await?,
-        })
+        Ok(Self::with_pool(open_pool(database_url).await?))
     }
 
     /// Like [`Self::connect`] (applies migrations) but fails instead of creating a new database.
     pub async fn open_existing(database_url: &str) -> Result<Self, RepositoryError> {
-        Ok(Self {
-            pool: open_existing_pool(database_url).await?,
-        })
+        Ok(Self::with_pool(open_existing_pool(database_url).await?))
     }
 
     pub async fn close(&self) {
@@ -76,9 +93,7 @@ impl SqliteStore {
 
 impl SqliteStore {
     pub async fn open_existing_readonly(database_url: &str) -> Result<Self, RepositoryError> {
-        Ok(Self {
-            pool: open_readonly_pool(database_url).await?,
-        })
+        Ok(Self::with_pool(open_readonly_pool(database_url).await?))
     }
 }
 
@@ -341,6 +356,13 @@ impl ArchiveWriter for SqliteStore {
                         } else {
                             0
                         };
+                    let previous: Option<(i64, Option<String>)> = sqlx::query_as(
+                        "SELECT row_id, text FROM messages WHERE chat_id=? AND message_id=?",
+                    )
+                    .bind(message.chat_id.get())
+                    .bind(message.id.get())
+                    .fetch_optional(&mut *tx)
+                    .await?;
                     let result = sqlx::query("INSERT INTO messages(chat_id, message_id, sender_id, timestamp, edited_at, collected_at, created_at, updated_at, text, reply_to, version_at, source_priority) SELECT ?, ?, ?, ?, ?, ?, unixepoch(), unixepoch(), ?, ?, ?, ? WHERE NOT EXISTS(SELECT 1 FROM message_tombstones WHERE chat_id=? AND message_id=?) AND NOT (? > -1000000000000 AND EXISTS(SELECT 1 FROM common_message_tombstones WHERE message_id=?)) ON CONFLICT(chat_id, message_id) DO UPDATE SET sender_id=excluded.sender_id, timestamp=excluded.timestamp, edited_at=excluded.edited_at, collected_at=excluded.collected_at, updated_at=unixepoch(), text=excluded.text, reply_to=excluded.reply_to, version_at=excluded.version_at, source_priority=excluded.source_priority WHERE (excluded.version_at > messages.version_at OR (excluded.version_at = messages.version_at AND excluded.source_priority >= messages.source_priority)) AND messages.is_deleted=0")
                         .bind(message.chat_id.get()).bind(message.id.get()).bind(message.sender_id.map(SenderId::get))
                         .bind(seconds(message.timestamp)).bind(message.edited_at.map(seconds)).bind(seconds(message.collected_at))
@@ -356,6 +378,16 @@ impl ArchiveWriter for SqliteStore {
                         .bind(message.id.get())
                         .fetch_one(&mut *tx)
                         .await?;
+                        // The guarded upsert changed the row: re-index only if the text did.
+                        let new_text = message.text.as_deref().filter(|text| !text.is_empty());
+                        let old_text = previous
+                            .as_ref()
+                            .and_then(|(_, text)| text.as_deref())
+                            .filter(|text| !text.is_empty());
+                        if new_text != old_text {
+                            index_message(&mut tx, self.tokenizer.as_ref(), row_id, new_text)
+                                .await?;
+                        }
                         replace_attachments(&mut tx, row_id, &message.attachments).await?;
                         sqlx::query("UPDATE chat_sync_state SET oldest_message_id=CASE WHEN oldest_message_id IS NULL OR ?<oldest_message_id THEN ? ELSE oldest_message_id END, newest_message_id=CASE WHEN newest_message_id IS NULL OR ?>newest_message_id THEN ? ELSE newest_message_id END, updated_at=unixepoch() WHERE chat_id=?")
                             .bind(message.id.get()).bind(message.id.get()).bind(message.id.get()).bind(message.id.get()).bind(message.chat_id.get())
@@ -431,21 +463,6 @@ fn row_chat(row: &SqliteRow) -> Result<Chat, RepositoryError> {
         username: row.try_get("username").map_err(storage_error)?,
         tracked: row.try_get::<i64, _>("tracked").map_err(storage_error)? != 0,
     })
-}
-
-fn literal_fts_query(text: &str) -> Result<String, RepositoryError> {
-    if text.len() > 512 {
-        return Err(invalid_data("search query exceeds 512 bytes"));
-    }
-    let terms: Vec<_> = text.split_whitespace().collect();
-    if terms.is_empty() {
-        return Err(invalid_data("search query cannot be empty"));
-    }
-    Ok(terms
-        .into_iter()
-        .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
-        .collect::<Vec<_>>()
-        .join(" AND "))
 }
 
 async fn attachments_for(
@@ -524,6 +541,7 @@ fn row_view(row: &SqliteRow, attachments: Vec<Attachment>) -> Result<MessageView
         message,
         sender,
         deleted_at: deleted_at.map(timestamp).transpose()?,
+        snippet: None,
     })
 }
 
@@ -542,17 +560,41 @@ async fn load_messages(
         .collect()
 }
 
+/// Text-search restrictions added to the message listing query.
+#[derive(Default)]
+struct SearchSpec {
+    /// FTS5 `MATCH` expression (index must be ready).
+    fts: Option<String>,
+    /// Substrings `m.text` must contain.
+    like_terms: Vec<String>,
+    /// Relevance paging: skip this many results and order by rank (FTS) or newest first (LIKE)
+    /// instead of using keyset cursors.
+    offset: Option<u64>,
+}
+
+fn like_pattern(term: &str) -> String {
+    let mut pattern = String::from("%");
+    for ch in term.chars() {
+        if matches!(ch, '%' | '_' | '\\') {
+            pattern.push('\\');
+        }
+        pattern.push(ch);
+    }
+    pattern.push('%');
+    pattern
+}
+
 async fn list_messages(
     tx: &mut Transaction<'_, Sqlite>,
     filters: &crate::application::MessageFilters,
     before: Option<&crate::application::MessageCursor>,
     after: Option<&crate::application::MessageCursor>,
     page_size: crate::application::PageSize,
-    search: Option<&str>,
+    search: Option<&SearchSpec>,
 ) -> Result<crate::application::MessagePage, RepositoryError> {
     let after_direction = after.is_some();
     let mut query = QueryBuilder::<Sqlite>::new(MESSAGE_SELECT);
-    if search.is_some() {
+    if search.is_some_and(|spec| spec.fts.is_some()) {
         query.push(" JOIN messages_fts ON messages_fts.rowid=m.row_id");
     }
     query.push(if filters.include_deleted {
@@ -574,10 +616,16 @@ async fn list_messages(
     if let Some(to) = filters.time_range.to {
         query.push(" AND m.timestamp<").push_bind(ceil_seconds(to)?);
     }
-    if let Some(text) = search {
-        query
-            .push(" AND messages_fts MATCH ")
-            .push_bind(literal_fts_query(text)?);
+    if let Some(spec) = search {
+        if let Some(expression) = &spec.fts {
+            query.push(" AND messages_fts MATCH ").push_bind(expression);
+        }
+        for term in &spec.like_terms {
+            query
+                .push(" AND m.text LIKE ")
+                .push_bind(like_pattern(term))
+                .push(" ESCAPE '\\'");
+        }
     }
     if let Some(cursor) = before.or(after) {
         if cursor.timestamp.timestamp_subsec_nanos() == 0 {
@@ -603,12 +651,22 @@ async fn list_messages(
                 .push_bind(seconds(cursor.timestamp));
         }
     }
-    query.push(if after_direction {
-        " ORDER BY m.timestamp ASC, m.chat_id ASC, m.message_id ASC LIMIT "
+    let offset = search.and_then(|spec| spec.offset);
+    if offset.is_some() && search.is_some_and(|spec| spec.fts.is_some()) {
+        query.push(" ORDER BY bm25(messages_fts, 5.0, 1.0), m.row_id LIMIT ");
     } else {
-        " ORDER BY m.timestamp DESC, m.chat_id DESC, m.message_id DESC LIMIT "
-    });
+        query.push(if after_direction {
+            " ORDER BY m.timestamp ASC, m.chat_id ASC, m.message_id ASC LIMIT "
+        } else {
+            " ORDER BY m.timestamp DESC, m.chat_id DESC, m.message_id DESC LIMIT "
+        });
+    }
     query.push_bind(i64::from(page_size.get()) + 1);
+    if let Some(offset) = offset {
+        query
+            .push(" OFFSET ")
+            .push_bind(i64::try_from(offset).map_err(invalid_data)?);
+    }
     let mut rows = query.build().fetch_all(&mut **tx).await?;
     let has_more = rows.len() > usize::from(page_size.get());
     rows.truncate(usize::from(page_size.get()));
@@ -616,7 +674,11 @@ async fn list_messages(
         rows.reverse();
     }
     let items = load_messages(tx, rows).await?;
-    let next_cursor = if has_more {
+    let next_offset = match offset {
+        Some(offset) if has_more => Some(offset + u64::from(page_size.get())),
+        _ => None,
+    };
+    let next_cursor = if has_more && offset.is_none() {
         let item = if after_direction {
             items.first()
         } else {
@@ -634,6 +696,7 @@ async fn list_messages(
         items,
         has_more,
         next_cursor,
+        next_offset,
     })
 }
 
@@ -686,18 +749,51 @@ impl MessageRepository for SqliteStore {
         query: crate::application::SearchMessagesQuery,
     ) -> Result<crate::application::MessagePage, RepositoryError> {
         query.validate().map_err(invalid_data)?;
+        let plan = plan_query(self.tokenizer.as_ref(), &query.text);
+        if plan.is_empty() {
+            return Err(invalid_data("search query cannot be empty"));
+        }
+        let relevance = query.sort == crate::application::SearchSort::Relevance;
         let mut tx = self.pool.begin().await?;
-        let page = list_messages(
+        let ready = read_state(&mut tx).await?.1 == crate::application::SearchIndexState::Ready;
+        let spec = if ready {
+            SearchSpec {
+                fts: plan.fts.clone(),
+                like_terms: plan.like_terms.clone(),
+                offset: relevance.then_some(query.offset),
+            }
+        } else {
+            // Index missing, outdated or being rebuilt: substring scan over the source text.
+            SearchSpec {
+                fts: None,
+                like_terms: plan.fallback_terms.clone(),
+                offset: relevance.then_some(query.offset),
+            }
+        };
+        let mut page = list_messages(
             &mut tx,
             &query.filters,
             query.before.as_ref(),
             query.after.as_ref(),
             query.page_size,
-            Some(&query.text),
+            Some(&spec),
         )
         .await?;
         tx.commit().await.map_err(storage_error)?;
+        for item in &mut page.items {
+            item.snippet = item
+                .message
+                .text
+                .as_deref()
+                .and_then(|text| make_snippet(text, &plan.highlight));
+        }
         Ok(page)
+    }
+
+    async fn search_index_status(
+        &self,
+    ) -> Result<crate::application::SearchIndexStatus, RepositoryError> {
+        SqliteStore::search_index_status(self).await
     }
 
     async fn list_senders(

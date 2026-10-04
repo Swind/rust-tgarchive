@@ -8,7 +8,8 @@ import { formatDateTime, localDayToIso } from '../lib/format';
 import { nextOlderCursor } from '../lib/messages';
 import { chatTitle } from './ChatsPage';
 
-const MIN_LEN = 2;
+type Sort = 'relevance' | 'time';
+const SORTS: [Sort, string][] = [['relevance', '相關性'], ['time', '時間']];
 
 export default function SearchPage() {
   const [text, setText] = useState('');
@@ -16,14 +17,15 @@ export default function SearchPage() {
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
   const [deleted, setDeleted] = useState(false);
+  const [sort, setSort] = useState<Sort>('relevance');
   const q = useDebounced(text.trim());
-  const enabled = q.length >= MIN_LEN;
+  const enabled = q.length > 0;
 
   const chats = useQuery({ queryKey: ['chats', 'title'], queryFn: () => api.chats('title') });
   const titles = useMemo(() => new Map((chats.data ?? []).map((c) => [c.id, chatTitle(c)])), [chats.data]);
 
   const results = useInfiniteQuery({
-    queryKey: ['search', q, chatId, from, to, deleted],
+    queryKey: ['search', q, chatId, from, to, deleted, sort],
     enabled,
     initialPageParam: undefined as string | undefined,
     queryFn: ({ pageParam }) =>
@@ -33,12 +35,16 @@ export default function SearchPage() {
         from: localDayToIso(from, false),
         to: localDayToIso(to, true),
         include_deleted: deleted || undefined,
+        sort,
         before: pageParam,
         limit: 30,
       }),
     getNextPageParam: nextOlderCursor,
   });
   const items = results.data?.pages.flatMap((p) => p.items) ?? [];
+  const status = useQuery({ queryKey: ['status'], queryFn: api.status, refetchInterval: 15000 });
+  const index = status.data?.search_index;
+  const singleChar = [...q].length === 1 && /\p{Script=Han}/u.test(q);
 
   return (
     <div className="page">
@@ -48,7 +54,7 @@ export default function SearchPage() {
         autoFocus
         className="wide"
         aria-label="搜尋關鍵字"
-        placeholder={`輸入關鍵字（至少 ${MIN_LEN} 字）`}
+        placeholder="輸入關鍵字（中文可搜尋詞中的部分字）"
         value={text}
         onChange={(e) => setText(e.target.value)}
       />
@@ -65,10 +71,28 @@ export default function SearchPage() {
         </div>
         <label><input type="checkbox" checked={deleted} onChange={(e) => setDeleted(e.target.checked)} /> 包含已刪除</label>
       </div>
+      <div className="sort-toggle" role="group" aria-label="排序">
+        <span className="muted small">排序</span>
+        {SORTS.map(([value, label]) => (
+          <button key={value} type="button" className="pill" aria-pressed={sort === value} onClick={() => setSort(value)}>
+            {label}
+          </button>
+        ))}
+      </div>
+      {index && index.state !== 'ready' && (
+        <div className="banner" role="status">
+          搜尋索引{index.state === 'rebuilding' ? '重建中' : '尚未建立或已過期'}（{index.indexed.toLocaleString()}／{index.total.toLocaleString()}）：
+          暫時改用較慢的子字串掃描，結果依時間排序。請執行 <code>tgarchive search rebuild-index</code>。
+        </div>
+      )}
+      {singleChar && (
+        <div className="banner" role="status">單字查詢會逐筆掃描訊息文字（較慢），結果依時間排序。</div>
+      )}
       <p className="muted small">
-        注意：全文檢索採 SQLite FTS5 unicode61，以「完整詞元」比對；中文沒有斷詞，連續中文字串會被視為一個詞元，因此只能比對整段（或以空白分隔的）詞，無法搜尋詞中的部分字。
+        全文檢索支援中文：以結巴斷詞比對詞彙，並以相鄰字元（bigram）比對任意中文子字串，例如「北咖啡」可找到「新北咖啡店」。
+        預設依相關性排序，可切換為時間排序；英文以完整單字比對，不分大小寫與全形／半形。
       </p>
-      {!enabled && <Empty>{q ? `請至少輸入 ${MIN_LEN} 個字元` : '輸入關鍵字開始搜尋'}</Empty>}
+      {!enabled && <Empty>輸入關鍵字開始搜尋</Empty>}
       <ErrorBox error={results.error} />
       {enabled && results.isPending && !results.error && <Empty>搜尋中…</Empty>}
       {enabled && results.data && items.length === 0 && <Empty>找不到符合的訊息</Empty>}
@@ -80,7 +104,7 @@ export default function SearchPage() {
                 <strong>{titles.get(m.chat_id) ?? m.chat_id}</strong> · {senderName(m, titles.get(m.chat_id))} · {formatDateTime(m.timestamp)}
                 {m.is_deleted && <span className="badge red">已刪除</span>}
               </div>
-              <div className="text"><Highlighted text={m.text ?? ''} query={q} /></div>
+              <div className="text"><Highlighted text={m.snippet ?? m.text ?? ''} query={q} /></div>
             </Link>
           </li>
         ))}

@@ -15,7 +15,7 @@ use crate::{
     },
     config::{Config, SyncPacing, TelegramConfig},
     domain::Chat,
-    infrastructure::persistence::sqlite::SqliteStore,
+    infrastructure::persistence::sqlite::{RebuildProgress, SqliteStore},
     infrastructure::telegram::{
         AuthError, LoginProgress, TelegramAdapter, realtime::AdapterRealtime,
     },
@@ -50,9 +50,29 @@ pub async fn run() -> Result<(), CliError> {
             let store = SqliteStore::connect(&config.database_url)
                 .await
                 .map_err(|error| CliError::Database(error.to_string()))?;
+            let rebuilt = rebuild_index_if_needed(&store).await;
             store.close().await;
+            rebuilt?;
             tracing::info!("archive database initialized");
             print_output(initialized_output(output)?);
+        }
+        PreparedInvocation::RebuildSearchIndex { output } => {
+            let config = Config::load(None);
+            let store = open_existing_store(&config.database_url).await?;
+            let result = rebuild_index(&store).await;
+            store.close().await;
+            let progress = result?;
+            print_output(if output == OutputFormat::Json {
+                format!(
+                    "{{\"rebuilt\":true,\"indexed\":{},\"total\":{}}}",
+                    progress.indexed, progress.total
+                )
+            } else {
+                format!(
+                    "Rebuilt search index: {} messages indexed.",
+                    progress.indexed
+                )
+            });
         }
         PreparedInvocation::Query { output, command } => {
             let config = Config::load(None);
@@ -117,6 +137,49 @@ pub async fn run() -> Result<(), CliError> {
         PreparedInvocation::Sync { scope, output } => sync_archive(scope, output).await?,
     }
     Ok(())
+}
+
+const REBUILD_BATCH: u32 = 1000;
+
+async fn rebuild_index(store: &SqliteStore) -> Result<RebuildProgress, CliError> {
+    let mut last_reported = 0;
+    store
+        .rebuild_search_index(REBUILD_BATCH, |progress| {
+            if progress.indexed == 0
+                || progress.indexed - last_reported >= 10_000
+                || progress.indexed == progress.total
+            {
+                last_reported = progress.indexed;
+                eprintln!(
+                    "rebuilding search index: {}/{} messages",
+                    progress.indexed, progress.total
+                );
+            }
+        })
+        .await
+        .map_err(db_error)
+}
+
+/// `db init` brings a new or upgraded archive's search index up to date (progress on stderr).
+async fn rebuild_index_if_needed(store: &SqliteStore) -> Result<(), CliError> {
+    if store.search_index_ready().await.map_err(db_error)? {
+        return Ok(());
+    }
+    eprintln!(
+        "search index is missing or outdated; rebuilding it (Chinese-friendly full-text search)"
+    );
+    rebuild_index(store).await?;
+    Ok(())
+}
+
+/// `serve` never blocks on a rebuild: it starts, reports the index state in `/api/v1/status` and
+/// searches with the slower LIKE fallback until `tgarchive search rebuild-index` has run.
+async fn warn_if_index_not_ready(store: &SqliteStore) {
+    if matches!(store.search_index_ready().await, Ok(false)) {
+        tracing::warn!(
+            "search index is not ready; searches use a slower substring scan. Run `tgarchive search rebuild-index` (or `db init`)"
+        );
+    }
 }
 
 async fn auth_login(phone: Option<String>) -> Result<(), CliError> {
@@ -316,6 +379,7 @@ async fn readonly_application(
                 ))
             })?,
     );
+    warn_if_index_not_ready(&store).await;
     Ok(Arc::new(Application::new(
         store.clone(),
         store.clone(),
@@ -399,6 +463,7 @@ async fn serve_with_telegram(
             .await
             .map_err(|error| CliError::Database(error.to_string()))?,
     );
+    warn_if_index_not_ready(&store).await;
     let result = async {
         let account_id = adapter.authenticated_account_id().await.map_err(|_| {
             CliError::Telegram("could not resolve Telegram account identity".into())

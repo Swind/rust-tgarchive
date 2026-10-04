@@ -1,5 +1,7 @@
+mod search;
 mod store;
 
+pub use search::RebuildProgress;
 pub use store::SqliteStore;
 
 use std::{str::FromStr, time::Duration};

@@ -13,19 +13,99 @@ test('English token: results across chats, highlighted, click opens context', as
   await expect(page.locator('article.anchor')).toContainText('kubernetes');
 });
 
-test('Chinese exact token matches whole tokens only', async ({ page }) => {
+test('Chinese words and substrings are found (jieba words + character bigrams)', async ({ page }) => {
   await page.goto('/search');
   await box(page).fill('測試關鍵字');
   await expect(page.locator('a.result')).toHaveCount(2);
   await expect(page.locator('a.result mark').first()).toHaveText('測試關鍵字');
+  // Substring of a word: the old whole-token search could not find this.
   await box(page).fill('關鍵字');
-  await expect(page.getByText('找不到符合的訊息')).toBeVisible();
+  await expect(page.locator('a.result')).toHaveCount(2);
+  await box(page).fill('伺服器');
+  await expect(page.locator('a.result')).toHaveCount(1);
+  await expect(page.locator('a.result').first()).toContainText('伺服器昨晚又當機了');
+  await box(page).fill('硬碟');
+  await expect(page.locator('a.result')).toHaveCount(2);
 });
 
-test('minimum length hint, chat filter and deleted messages', async ({ page }) => {
+test('character-sequence match is contiguous, not scattered', async ({ page }) => {
   await page.goto('/search');
-  await box(page).fill('k');
-  await expect(page.getByText('請至少輸入 2 個字元')).toBeVisible();
+  await box(page).fill('北咖啡');
+  const results = page.locator('a.result');
+  await expect(results).toHaveCount(2);
+  await expect(results.filter({ hasText: '我在新北咖啡店工作' })).toHaveCount(1);
+  await expect(results.filter({ hasText: '台北咖啡廳的拿鐵很好喝' })).toHaveCount(1);
+  await expect(results.first().locator('mark').first()).toHaveText('北咖啡');
+  // 台北車站附近的咖啡很貴 / 今天下午要去台北喝咖啡 have the characters but not 北咖啡 in sequence.
+  await expect(results.filter({ hasText: '車站' })).toHaveCount(0);
+  await expect(results.filter({ hasText: '去台北喝咖啡' })).toHaveCount(0);
+  // The word query 台北咖啡 still finds the scattered ones.
+  await box(page).fill('台北咖啡');
+  await expect(results.filter({ hasText: '台北車站附近的咖啡很貴' })).toHaveCount(1);
+  await expect(results.filter({ hasText: '我在新北咖啡店工作' })).toHaveCount(0);
+});
+
+test('mixed-language and fullwidth queries', async ({ page }) => {
+  await page.goto('/search');
+  await box(page).fill('GitLab Runner');
+  await expect(page.locator('a.result')).toHaveCount(1);
+  await expect(page.locator('a.result')).toContainText('沒有回應');
+  await box(page).fill('chromium');
+  await expect(page.locator('a.result')).toHaveCount(1);
+  await box(page).fill('sqlite');
+  await expect(page.locator('a.result')).toHaveCount(1);
+  await expect(page.locator('a.result')).toContainText('ＳＱＬｉｔｅ');
+});
+
+test('single-character query scans text and shows the slow-mode banner', async ({ page }) => {
+  await page.goto('/search');
+  await box(page).fill('北');
+  await expect(page.getByRole('status').filter({ hasText: '單字查詢' })).toBeVisible();
+  const results = page.locator('a.result');
+  await expect(results.first()).toBeVisible();
+  // 北 at the end of 台北 is found.
+  await expect(results.filter({ hasText: '台北咖啡廳的拿鐵很好喝' })).toHaveCount(1);
+  await box(page).fill('北咖啡');
+  await expect(page.getByRole('status').filter({ hasText: '單字查詢' })).toHaveCount(0);
+});
+
+test('sort toggle switches between relevance and time order', async ({ page }) => {
+  await page.goto('/search');
+  const relevance = page.getByRole('button', { name: '相關性', exact: true });
+  const time = page.getByRole('button', { name: '時間', exact: true });
+  await expect(relevance).toHaveAttribute('aria-pressed', 'true');
+  const requested = page.waitForRequest((r) => r.url().includes('/messages/search') && r.url().includes('sort=relevance'));
+  await box(page).fill('咖啡');
+  await requested;
+  await expect(page.locator('a.result')).toHaveCount(4);
+  const timeRequest = page.waitForRequest((r) => r.url().includes('sort=time'));
+  await time.click();
+  await timeRequest;
+  await expect(time).toHaveAttribute('aria-pressed', 'true');
+  await expect(relevance).toHaveAttribute('aria-pressed', 'false');
+  // Newest first: the last evaluation message (9th, 新北咖啡店) comes before the first one.
+  const results = page.locator('a.result');
+  await expect(results.first()).toContainText('新北咖啡店');
+  await expect(results).toHaveCount(4);
+  await expect(results.last()).toContainText('台北喝咖啡');
+});
+
+test('long messages show a snippet around the match', async ({ page }) => {
+  await page.goto('/search');
+  await box(page).fill('硬碟');
+  const long = page.locator('a.result', { hasText: '最後提到' });
+  await expect(long).toHaveCount(1);
+  const text = (await long.locator('.text').textContent()) ?? '';
+  expect(text.startsWith('…')).toBe(true);
+  expect(text.length).toBeLessThanOrEqual(125);
+  await expect(long.locator('mark').first()).toHaveText('硬碟');
+  const short = page.locator('a.result', { hasText: '硬碟壞軌需要更換' });
+  await expect(short.locator('.text')).toHaveText('硬碟壞軌需要更換');
+});
+
+test('empty hint, chat filter and deleted messages', async ({ page }) => {
+  await page.goto('/search');
+  await expect(page.getByText('輸入關鍵字開始搜尋')).toBeVisible();
   await box(page).fill('kubernetes');
   await expect(page.locator('a.result')).toHaveCount(15);
   await page.getByLabel('聊天室').selectOption('-1002000002');

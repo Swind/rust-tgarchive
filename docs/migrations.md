@@ -4,15 +4,17 @@
 
 | 檔案 | 內容 |
 |---|---|
-| `0001_archive.sql` | 基礎 schema：`chats`、`senders`、`messages`（含版本／刪除標記）、FTS5 全文索引（unicode61）、同步 job 與 checkpoint 相關資料表。 |
+| `0001_archive.sql` | 基礎 schema：`chats`、`senders`、`messages`（含版本／刪除標記）、FTS5 全文索引（external-content unicode61，已被 0006 取代）、同步 job 與 checkpoint 相關資料表。 |
 | `0002_telegram_account_deletions.sql` | `telegram_account_identity`（封存綁定單一 Telegram 帳號）與 `common_message_tombstones`（無 chat 資訊的刪除墓碑）。 |
 | `0003_chat_tracking.sql` | `chats.tracked`（預設 0）、`chats.tracked_at`、partial index `chats_tracked`。既有聊天室一律維持 untracked，不刪資料。 |
 | `0004_sync_rate_limited_state.sql` | 同步 job 新增可續跑狀態 `rate_limited`。SQLite 無法修改 CHECK，故先子表後父表重建 `sync_jobs`／`sync_job_chats`（資料原樣複製）並重建 `sync_jobs_active_chat` index。 |
 | `0005_read_indexes.sql` | 讀取用 index（不改資料）：`messages_chat_stats(chat_id, is_deleted, timestamp)` 供聊天室統計聚合、`messages_chat_all_order(chat_id, timestamp DESC, message_id DESC)` 供 `include_deleted` 的單一聊天室排序、`messages_chat_sender(chat_id, sender_id) WHERE is_deleted=0` 供寄件人統計。跨聊天室且 `include_deleted=true` 的全域列表沒有專屬 index（使用較少）。 |
+| `0006_search_index.sql` | 中文友善全文搜尋：刪除舊的 `messages_fts` 與三個 trigger（`messages_fts_insert/delete/update`），建立 contentless-delete FTS5 表 `messages_fts(words, bigrams)`（`content=''`、`contentless_delete=1`、`tokenize='unicode61'`，rowid = `messages.row_id`）與 `app_metadata(key, value)`（`search_index_state`、`search_index_version`）。沒有可索引文字的資料庫直接標為 `ready`／版本 1；否則標為 `stale`／版本 0。**只動結構**：斷詞需要 Rust，回填由 `db init` 或 `search rebuild-index` 完成。 |
 
 ## 升級指引
 
 - 升級程式後，**先執行 `tgarchive db init`**，再使用讀取型命令（`chats list`、`messages ...`、`status`）。讀取型命令不會自動套用 migration；舊資料庫（0003 之前）缺少 `tracked` 欄位會出錯或無法查詢。
+- **0006（全文索引改版）**：套用後既有訊息尚未索引，狀態為 `stale`。`tgarchive db init` 會在 migration 之後自動重建索引（分批交易，進度顯示於 stderr，約每秒數萬則；100k 則訊息在 release 版約 3 秒）。也可手動 `tgarchive search rebuild-index`。重建期間及之前搜尋退回 `LIKE` 掃描（結果正確但較慢、依時間排序），`/api/v1/status` 的 `search_index.state` 會顯示 `stale`／`rebuilding`。`serve`／`serve --query-only` 不阻塞啟動、不自動重建；唯讀開啟尚未 migrate 的舊資料庫同樣回報 `stale` 並用 `LIKE` 搜尋。索引是可拋棄的衍生資料；更換 jieba 版本或規則時遞增 `SEARCH_INDEX_VERSION`，狀態自動變為 `stale`，重新執行重建即可。
 - 升級前請以 `sqlite3 telegram.db ".backup 'backup.db'"` 備份。
 - 套用 0005 只建立 index（大型資料庫可能需要數秒）；不需手動動作，缺少 0005 的資料庫仍可查詢（較慢）。
 - 套用 0004 不需任何手動動作，既有 job 紀錄保留。

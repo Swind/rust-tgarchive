@@ -201,6 +201,7 @@ fn empty_page() -> MessagePage {
         items: vec![],
         has_more: false,
         next_cursor: None,
+        next_offset: None,
     }
 }
 
@@ -255,6 +256,8 @@ fn search_query(text: &str) -> SearchMessagesQuery {
         before: None,
         after: None,
         page_size: PageSize::DEFAULT,
+        sort: tgarchive::application::SearchSort::Relevance,
+        offset: 0,
     }
 }
 
@@ -431,6 +434,7 @@ async fn message_queries_validate_before_repository_and_report_missing_entities(
     let mut filtered_search = search_query("exact search terms");
     filtered_search.filters.chat_id = Some(chat().id);
     filtered_search.after = Some(cursor());
+    filtered_search.sort = tgarchive::application::SearchSort::Time;
     app.search_messages(filtered_search.clone()).await.unwrap();
     {
         let state = fakes.0.lock().await;

@@ -45,6 +45,11 @@ export default function StatusPage() {
               </dd>
             </>
           )}
+          <dt>搜尋索引</dt>
+          <dd>
+            <span className={`badge ${s.search_index.state === 'ready' ? 'green' : 'amber'}`}>{s.search_index.state}</span>{' '}
+            v{s.search_index.version}，已索引 {s.search_index.indexed.toLocaleString()}／{s.search_index.total.toLocaleString()} 則
+          </dd>
           <dt>同步工作</dt><dd>{s.sync_jobs.length}</dd>
         </dl>
       )}

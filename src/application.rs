@@ -125,13 +125,29 @@ impl ListMessagesQuery {
     }
 }
 
+/// Result ordering of a text search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SearchSort {
+    /// BM25 relevance (best first), paged with an offset position. Without a usable full-text
+    /// index (single-character queries, index not ready) results are newest first.
+    #[default]
+    Relevance,
+    /// Newest first with keyset cursors.
+    Time,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchMessagesQuery {
     pub text: String,
     pub filters: MessageFilters,
+    /// Keyset cursor; only valid with [`SearchSort::Time`].
     pub before: Option<MessageCursor>,
+    /// Keyset cursor; only valid with [`SearchSort::Time`].
     pub after: Option<MessageCursor>,
     pub page_size: PageSize,
+    pub sort: SearchSort,
+    /// Number of results to skip; only valid with [`SearchSort::Relevance`].
+    pub offset: u64,
 }
 
 impl SearchMessagesQuery {
@@ -143,7 +159,16 @@ impl SearchMessagesQuery {
         if self.text.len() > MAX_SEARCH_LENGTH {
             return Err(ValidationError::SearchTooLong);
         }
+        if !crate::infrastructure::search::is_searchable(&self.text) {
+            return Err(ValidationError::EmptySearch);
+        }
         if self.before.is_some() && self.after.is_some() {
+            return Err(ValidationError::ConflictingCursors);
+        }
+        let keyset = self.before.is_some() || self.after.is_some();
+        if (self.sort == SearchSort::Relevance && keyset)
+            || (self.sort == SearchSort::Time && self.offset > 0)
+        {
             return Err(ValidationError::ConflictingCursors);
         }
         Ok(())
@@ -165,6 +190,9 @@ pub struct MessageView {
     pub message: Message,
     pub sender: Option<SenderInfo>,
     pub deleted_at: Option<DateTime<Utc>>,
+    /// Short excerpt around the first search match; only set by search.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snippet: Option<String>,
 }
 
 impl MessageView {
@@ -187,6 +215,7 @@ impl From<Message> for MessageView {
             message,
             sender: None,
             deleted_at: None,
+            snippet: None,
         }
     }
 }
@@ -196,6 +225,38 @@ pub struct MessagePage {
     pub items: Vec<MessageView>,
     pub has_more: bool,
     pub next_cursor: Option<MessageCursor>,
+    /// Position of the next page of a relevance-sorted search.
+    pub next_offset: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchIndexState {
+    Ready,
+    Rebuilding,
+    /// Missing or outdated; searches use a slower `LIKE` scan until it is rebuilt.
+    Stale,
+}
+
+impl SearchIndexState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Rebuilding => "rebuilding",
+            Self::Stale => "stale",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SearchIndexStatus {
+    /// Index format version recorded in the database (0 = never built).
+    pub version: u32,
+    pub state: SearchIndexState,
+    /// Messages currently present in the full-text index.
+    pub indexed: u64,
+    /// Messages with text that should be indexed.
+    pub total: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -468,6 +529,16 @@ pub trait MessageRepository: Send + Sync {
     async fn list(&self, query: ListMessagesQuery) -> Result<MessagePage, RepositoryError>;
     async fn search(&self, query: SearchMessagesQuery) -> Result<MessagePage, RepositoryError>;
 
+    /// State of the full-text index. Default: ready and empty.
+    async fn search_index_status(&self) -> Result<SearchIndexStatus, RepositoryError> {
+        Ok(SearchIndexStatus {
+            version: 0,
+            state: SearchIndexState::Ready,
+            indexed: 0,
+            total: 0,
+        })
+    }
+
     /// Senders with messages in the chat, most active first. Default: none.
     async fn list_senders(
         &self,
@@ -506,6 +577,7 @@ pub trait MessageRepository: Send + Sync {
             items: Vec::new(),
             has_more: false,
             next_cursor: None,
+            next_offset: None,
         };
         let page_size = |count: u16| {
             PageSize::new(count).map_err(|error| RepositoryError::InvalidData(error.to_string()))
@@ -704,8 +776,15 @@ mod tests {
             before: None,
             after: None,
             page_size: PageSize::DEFAULT,
+            sort: SearchSort::Relevance,
+            offset: 0,
         };
         assert_eq!(too_long.validate(), Err(ValidationError::SearchTooLong));
+        let punctuation = SearchMessagesQuery {
+            text: " ！？\" * ".into(),
+            ..too_long
+        };
+        assert_eq!(punctuation.validate(), Err(ValidationError::EmptySearch));
     }
 
     #[test]
@@ -741,6 +820,7 @@ mod tests {
                 items: vec![],
                 has_more: false,
                 next_cursor: None,
+                next_offset: None,
             })
         }
         async fn search(&self, _: SearchMessagesQuery) -> Result<MessagePage, RepositoryError> {
@@ -748,6 +828,7 @@ mod tests {
                 items: vec![],
                 has_more: false,
                 next_cursor: None,
+                next_offset: None,
             })
         }
     }

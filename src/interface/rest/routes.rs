@@ -6,7 +6,7 @@ use utoipa::IntoParams;
 use crate::{
     application::{
         ApplicationError, ChatSort, ListMessagesQuery, MessageContextQuery, MessageFilters,
-        PageSize, SearchMessagesQuery, SyncScope, TimeRange,
+        PageSize, SearchMessagesQuery, SearchSort, SyncScope, TimeRange,
     },
     domain::{ChatId, MessageId, SenderId},
 };
@@ -15,7 +15,7 @@ use super::{
     ApiError, RequestId, RestState,
     dto::{
         ChatDto, ChatSortDto, HealthDto, MessageContextDto, MessageDto, MessagePageDto,
-        SenderSummaryDto, StatusDto, SyncJobDto, TrackChatDto,
+        SearchSortDto, SenderSummaryDto, StatusDto, SyncJobDto, TrackChatDto,
     },
     extract::{ApiPath, ApiQuery},
 };
@@ -42,11 +42,15 @@ pub(super) struct SearchQuery {
     sender_id: Option<i64>,
     from: Option<DateTime<Utc>>,
     to: Option<DateTime<Utc>>,
+    /// Cursor from the previous page's `next_cursor`.
     before: Option<String>,
+    /// Only with `sort=time`: cursor for the newer direction.
     after: Option<String>,
     limit: Option<u16>,
     /// Also return deleted messages (flagged with `is_deleted`/`deleted_at`).
     include_deleted: Option<bool>,
+    /// Result order; default `relevance`.
+    sort: Option<SearchSortDto>,
 }
 
 #[utoipa::path(get, path = "/api/v1/status", responses((status = 200, body = StatusDto), (status = 503, body = super::ErrorEnvelope)))]
@@ -494,12 +498,34 @@ fn build_search_query(
         query.include_deleted,
         request_id.clone(),
     )?;
+    let sort = SearchSort::from(query.sort.unwrap_or(SearchSortDto::Relevance));
+    let (before, after, offset) = match sort {
+        SearchSort::Time => (
+            decode_cursor(query.before, request_id.clone())?,
+            decode_cursor(query.after, request_id.clone())?,
+            0,
+        ),
+        SearchSort::Relevance => {
+            if query.after.is_some() {
+                return Err(ApiError::malformed(request_id));
+            }
+            let offset = query
+                .before
+                .map(|value| crate::interface::cursor::decode_offset(&value))
+                .transpose()
+                .map_err(|_| ApiError::malformed(request_id.clone()))?
+                .unwrap_or(0);
+            (None, None, offset)
+        }
+    };
     let result = SearchMessagesQuery {
         text: query.q,
         filters,
-        before: decode_cursor(query.before, request_id.clone())?,
-        after: decode_cursor(query.after, request_id.clone())?,
+        before,
+        after,
         page_size,
+        sort,
+        offset,
     };
     result
         .validate()

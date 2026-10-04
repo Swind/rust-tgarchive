@@ -75,6 +75,7 @@ impl MessageRepository for FakePorts {
             items: vec![],
             has_more: false,
             next_cursor: None,
+            next_offset: None,
         })
     }
     async fn search(&self, _: SearchMessagesQuery) -> Result<MessagePage, RepositoryError> {
@@ -85,6 +86,7 @@ impl MessageRepository for FakePorts {
             items: vec![],
             has_more: false,
             next_cursor: None,
+            next_offset: None,
         })
     }
 }

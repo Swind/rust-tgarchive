@@ -79,6 +79,9 @@ tgarchive serve
 tgarchive messages list --chat-id -1001234567890 --limit 20
 tgarchive messages get -1001234567890 42
 tgarchive messages search "keyword" --chat-id -1001234567890 --from 2024-01-01T00:00:00Z --to 2024-02-01T00:00:00Z
+tgarchive messages search "台北咖啡" --sort time
+tgarchive search status            # 全文索引狀態
+tgarchive search rebuild-index     # 重新斷詞並重建索引
 tgarchive --output json messages list --limit 5
 ```
 
@@ -86,9 +89,22 @@ tgarchive --output json messages list --limit 5
 - `--from`／`--to` 為 RFC 3339 時間。`--before`／`--after` 為上一頁回傳的 `next_cursor`。`--limit` 1–1000，預設 100。
 - 讀取型命令只讀資料庫，不需要 Telegram。若是舊資料庫，請先執行 `db init`（見 [docs/migrations.md](docs/migrations.md)）。
 
-### 全文搜尋的中文限制
+### 全文搜尋（中文友善）
 
-FTS5 使用 `unicode61` tokenizer：只比對**完整 token**，**不支援**子字串搜尋，也沒有中文斷詞。例如搜尋「資料」不保證找得到「資料庫」。這是已知限制。
+搜尋詞一律是**純文字**（不開放 FTS5 語法；`"`、`*`、`OR` 都只是一般字元）。查詢與索引使用同一套處理：Unicode NFKC 正規化 + 小寫（全形「ＳＱＬｉｔｅ」可用 `sqlite` 找到）、[jieba-rs](https://crates.io/crates/jieba-rs) 搜尋模式斷詞，以及「相鄰兩個漢字」的 bigram。索引是 SQLite FTS5 contentless-delete 表 `messages_fts(words, bigrams)`，不重複儲存原文。
+
+- **詞彙**：「台北」「咖啡」「GitLab Runner」「chromium」以詞比對（多個詞需同時出現，順序不拘；英文不分大小寫、需完整單字）。
+- **中文子字串**：連續中文以 bigram 片語比對（相鄰且依序），因此「北咖啡」可找到「新北咖啡店」，且不會比對到只是各自出現的「台北…咖啡」。
+- **單一漢字**（如「北」）：索引不存單字，改用 `LIKE '%北%'` 掃描訊息文字（較慢，結果依時間排序）。
+- **排序**：有查詢文字時預設 `--sort relevance`（BM25，詞 5：bigram 1），`--sort time` 為新到舊。Relevance 的 `next_cursor` 是不透明、帶版本的位置游標（同樣以 `--before` 傳回，不支援 `--after`）；time 沿用 keyset 游標。REST：`GET /api/v1/messages/search?q=...&sort=relevance|time`，下一頁以 `before=<next_cursor>`。
+- **摘要**：搜尋結果的 `snippet` 是第一個命中處前後約 120 字元的片段（以字元為單位、不切斷字元；無法定位時為 `null`），`text` 仍是完整訊息。
+- **已刪除訊息**：軟刪除保留索引項目，`include_deleted=true` 時仍可搜到；篩選（`chat_id`／`sender_id`／時間／已刪除）對所有路徑與排序都有效。
+- **索引維護**：與訊息寫入在同一交易內由 Rust 更新（只在文字真的改變時；歷史回補不會覆蓋較新的即時編輯）。沒有 SQL trigger。
+- **索引版本與重建**：`app_metadata` 記錄 `search_index_version`（目前 1；斷詞／正規化／bigram 規則改變就必須遞增）與狀態 `ready`／`rebuilding`／`stale`。從舊版升級（migration 0006 清掉舊索引）後狀態為 `stale`：
+  - `tgarchive db init` 會自動重建（分批交易，進度印在 stderr）；
+  - 也可隨時執行 `tgarchive search rebuild-index`（可與 `serve` 同時執行，每批為短交易），`tgarchive search status` 查看狀態與已索引數；
+  - 索引未就緒時（`stale`／`rebuilding`），搜尋自動退回 `LIKE` 子字串掃描（較慢、依時間排序、不做 NFKC 全形比對），`GET /api/v1/status` 的 `search_index: {version, state, indexed, total}` 與 UI 橫幅會提示。`serve` 不會因此阻塞啟動，也不會自行重建，只在 log 警告。
+- 限制：只對漢字做 bigram（假名／韓文只走 jieba／unicode61 詞比對）；不做繁簡轉換（「硬碟」找不到「硬盘」）；未提供自訂 jieba 詞典；`/status` 的 `indexed`／`total` 為計數查詢（大型資料庫約為一次全表掃描）。
 
 ## 抓取頻率與限流
 
@@ -143,7 +159,7 @@ curl -s "http://127.0.0.1:8080/api/v1/messages/search?q=keyword"
 - 前端開發：先 `tgarchive serve`，再 `npm --prefix web ci && npm --prefix web run dev`，開 <http://127.0.0.1:5173/>；Vite 會把 `/api`、`/health`、`/openapi.*` proxy 到 `127.0.0.1:8080`，不需要 CORS（也可改用 `TGARCHIVE_DEV_CORS_ORIGIN`）。
 - 重新建置並提交：`npm --prefix web run build`（含 typecheck）。`openapi.yml` 變更後執行 `npm --prefix web run gen:api` 重新產生 `web/src/api/schema.d.ts`。
 - 檢查：`npm --prefix web run typecheck`、`lint`、`test`；`scripts/check.sh` 在有 `npm` 時會執行並確認 `web/dist` 與原始碼一致。
-- 中文全文檢索限制：FTS5 `unicode61` 只能比對完整詞元，連續中文不會斷詞。
+- 搜尋頁支援中文子字串（jieba 詞 + 字元 bigram）、相關性／時間排序切換、摘要與索引狀態橫幅，詳見「全文搜尋（中文友善）」。
 
 ## REST 與 OpenAPI
 

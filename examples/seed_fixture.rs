@@ -336,6 +336,26 @@ async fn main() {
             Some(&format!("家庭訊息 {i}")),
         )));
     }
+    // Search evaluation set (Traditional Chinese, mixed language, fullwidth, and a text that has
+    // the words 台北 / 咖啡 but never the contiguous character sequence 北咖啡).
+    for (i, text) in [
+        "今天下午要去台北喝咖啡",
+        "台北咖啡廳的拿鐵很好喝",
+        "伺服器昨晚又當機了",
+        "硬碟壞軌需要更換",
+        "GitLab Runner 沒有回應",
+        "Chromium 瀏覽器更新了",
+        "今天研究 ＳＱＬｉｔｅ 全文檢索",
+        "台北車站附近的咖啡很貴",
+        "我在新北咖啡店工作",
+        "長訊息：這是一段很長的內容，只是用來測試摘要。這是一段很長的內容，只是用來測試摘要。這是一段很長的內容，只是用來測試摘要。這是一段很長的內容，只是用來測試摘要。最後提到硬碟故障的原因。這是一段很長的內容，只是用來測試摘要。這是一段很長的內容，只是用來測試摘要。",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let at = base() - Duration::days(30) + Duration::hours(i as i64);
+        records.push(created(msg(OLD, 1 + i as i64, Some(BOB), at, Some(text))));
+    }
     // Deleted messages in the big chat (created above, then tombstoned).
     for id in [60, 61] {
         records.push(IngestRecord {
@@ -467,6 +487,10 @@ async fn main() {
         )],
     )
     .await;
+    // Full-text index: maintained on write; rebuild once to prove the batch path and fail loudly
+    // if the fixture would be searched through the LIKE fallback.
+    store.rebuild_search_index(1000, |_| {}).await.unwrap();
+    assert!(store.search_index_ready().await.unwrap());
     store.close().await;
 
     // Pin the sync timestamps (the store stamps them with wall-clock time).

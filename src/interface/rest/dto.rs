@@ -6,8 +6,9 @@ use utoipa::ToSchema;
 
 use crate::{
     application::{
-        ChatSort, ChatStats, ChatSummary, MessageContext, MessagePage, MessageView, SenderInfo,
-        SenderSummary, SyncChatProgress, SyncJob, SyncJobState, services::ApplicationStatus,
+        ChatSort, ChatStats, ChatSummary, MessageContext, MessagePage, MessageView,
+        SearchIndexStatus, SearchSort, SenderInfo, SenderSummary, SyncChatProgress, SyncJob,
+        SyncJobState, services::ApplicationStatus,
     },
     domain::{Attachment, AttachmentKind, Chat, ChatKind, SenderId},
 };
@@ -127,6 +128,10 @@ pub struct MessageDto {
     pub is_deleted: bool,
     /// Set when the message was deleted on Telegram (only returned with `include_deleted=true`).
     pub deleted_at: Option<DateTime<Utc>>,
+    /// Search results only: excerpt (about 120 characters) around the first match, `null` when
+    /// no match position could be determined. `text` always carries the full message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snippet: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -216,8 +221,10 @@ impl From<MessageView> for MessageDto {
             message,
             sender,
             deleted_at,
+            snippet,
         } = view;
         Self {
+            snippet,
             sender: sender.map(Into::into),
             is_deleted: deleted_at.is_some(),
             deleted_at,
@@ -238,7 +245,29 @@ impl From<MessageView> for MessageDto {
 pub struct MessagePageDto {
     pub items: Vec<MessageDto>,
     pub has_more: bool,
+    /// Opaque cursor; pass it back as `before` to get the next page.
     pub next_cursor: Option<String>,
+}
+
+/// Result order of `GET /messages/search`.
+#[derive(Debug, Clone, Copy, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchSortDto {
+    /// BM25 relevance, best first (default). The cursor is a position, so pages are stable
+    /// unless messages are written between requests.
+    Relevance,
+    /// Newest first with keyset cursors. Also what relevance falls back to for single-character
+    /// queries and while the search index is not ready.
+    Time,
+}
+
+impl From<SearchSortDto> for SearchSort {
+    fn from(sort: SearchSortDto) -> Self {
+        match sort {
+            SearchSortDto::Relevance => Self::Relevance,
+            SearchSortDto::Time => Self::Time,
+        }
+    }
 }
 
 impl TryFrom<MessagePage> for MessagePageDto {
@@ -248,11 +277,11 @@ impl TryFrom<MessagePage> for MessagePageDto {
         Ok(Self {
             items: page.items.into_iter().map(Into::into).collect(),
             has_more: page.has_more,
-            next_cursor: page
-                .next_cursor
-                .as_ref()
-                .map(crate::interface::cursor::encode)
-                .transpose()?,
+            next_cursor: match (page.next_cursor.as_ref(), page.next_offset) {
+                (Some(cursor), _) => Some(crate::interface::cursor::encode(cursor)?),
+                (None, Some(offset)) => Some(crate::interface::cursor::encode_offset(offset)?),
+                (None, None) => None,
+            },
         })
     }
 }
@@ -302,6 +331,32 @@ pub struct StatusDto {
     /// Pacing of Telegram history requests; absent when this process has no Telegram access.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate_limit: Option<RateLimitDto>,
+    /// Full-text search index state.
+    pub search_index: SearchIndexDto,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct SearchIndexDto {
+    /// Index format version stored in the database (0 = never built).
+    pub version: u32,
+    /// `ready`; `rebuilding` or `stale` (search then uses a slower substring scan until
+    /// `tgarchive search rebuild-index` / `db init` completes).
+    pub state: String,
+    /// Messages in the index.
+    pub indexed: u64,
+    /// Messages with text that belong in the index.
+    pub total: u64,
+}
+
+impl From<SearchIndexStatus> for SearchIndexDto {
+    fn from(status: SearchIndexStatus) -> Self {
+        Self {
+            version: status.version,
+            state: status.state.as_str().to_owned(),
+            indexed: status.indexed,
+            total: status.total,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -409,6 +464,7 @@ impl From<ApplicationStatus> for StatusDto {
             },
             sync_jobs: status.sync_jobs.into_iter().map(Into::into).collect(),
             unresolved_deletions: status.unresolved_deletions,
+            search_index: status.search_index.into(),
             rate_limit: status.rate_limit.map(|r| RateLimitDto {
                 interval_ms: r.interval_ms,
                 base_interval_ms: r.base_interval_ms,

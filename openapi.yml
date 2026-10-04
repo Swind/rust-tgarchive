@@ -580,11 +580,13 @@ paths:
           format: date-time
       - name: before
         in: query
+        description: Cursor from the previous page's `next_cursor`.
         required: false
         schema:
           type: string
       - name: after
         in: query
+        description: 'Only with `sort=time`: cursor for the newer direction.'
         required: false
         schema:
           type: string
@@ -601,6 +603,12 @@ paths:
         required: false
         schema:
           type: boolean
+      - name: sort
+        in: query
+        description: Result order; default `relevance`.
+        required: false
+        schema:
+          $ref: '#/components/schemas/SearchSortDto'
       responses:
         '200':
           description: ''
@@ -1000,6 +1008,13 @@ components:
           - integer
           - 'null'
           format: int64
+        snippet:
+          type:
+          - string
+          - 'null'
+          description: |-
+            Search results only: excerpt (about 120 characters) around the first match, `null` when
+            no match position could be determined. `text` always carries the full message.
         text:
           type:
           - string
@@ -1023,6 +1038,7 @@ components:
           type:
           - string
           - 'null'
+          description: Opaque cursor; pass it back as `before` to get the next page.
     RateLimitDto:
       type: object
       required:
@@ -1050,6 +1066,40 @@ components:
           - 'null'
           format: int64
           minimum: 0
+    SearchIndexDto:
+      type: object
+      required:
+      - version
+      - state
+      - indexed
+      - total
+      properties:
+        indexed:
+          type: integer
+          format: int64
+          description: Messages in the index.
+          minimum: 0
+        state:
+          type: string
+          description: |-
+            `ready`; `rebuilding` or `stale` (search then uses a slower substring scan until
+            `tgarchive search rebuild-index` / `db init` completes).
+        total:
+          type: integer
+          format: int64
+          description: Messages with text that belong in the index.
+          minimum: 0
+        version:
+          type: integer
+          format: int32
+          description: Index format version stored in the database (0 = never built).
+          minimum: 0
+    SearchSortDto:
+      type: string
+      description: Result order of `GET /messages/search`.
+      enum:
+      - relevance
+      - time
     SenderDto:
       type: object
       required:
@@ -1095,6 +1145,7 @@ components:
       - collector
       - sync_jobs
       - unresolved_deletions
+      - search_index
       properties:
         collector:
           $ref: '#/components/schemas/ComponentStatusDto'
@@ -1103,6 +1154,9 @@ components:
           - type: 'null'
           - $ref: '#/components/schemas/RateLimitDto'
             description: Pacing of Telegram history requests; absent when this process has no Telegram access.
+        search_index:
+          $ref: '#/components/schemas/SearchIndexDto'
+          description: Full-text search index state.
         sync_jobs:
           type: array
           items:

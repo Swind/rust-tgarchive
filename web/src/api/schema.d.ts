@@ -409,6 +409,11 @@ export interface components {
             sender?: null | components["schemas"]["SenderDto"];
             /** Format: int64 */
             sender_id?: number | null;
+            /**
+             * @description Search results only: excerpt (about 120 characters) around the first match, `null` when
+             *     no match position could be determined. `text` always carries the full message.
+             */
+            snippet?: string | null;
             text?: string | null;
             /** Format: date-time */
             timestamp: string;
@@ -416,6 +421,7 @@ export interface components {
         MessagePageDto: {
             has_more: boolean;
             items: components["schemas"]["MessageDto"][];
+            /** @description Opaque cursor; pass it back as `before` to get the next page. */
             next_cursor?: string | null;
         };
         RateLimitDto: {
@@ -434,6 +440,33 @@ export interface components {
             /** Format: int64 */
             last_flood_wait_secs?: number | null;
         };
+        SearchIndexDto: {
+            /**
+             * Format: int64
+             * @description Messages in the index.
+             */
+            indexed: number;
+            /**
+             * @description `ready`; `rebuilding` or `stale` (search then uses a slower substring scan until
+             *     `tgarchive search rebuild-index` / `db init` completes).
+             */
+            state: string;
+            /**
+             * Format: int64
+             * @description Messages with text that belong in the index.
+             */
+            total: number;
+            /**
+             * Format: int32
+             * @description Index format version stored in the database (0 = never built).
+             */
+            version: number;
+        };
+        /**
+         * @description Result order of `GET /messages/search`.
+         * @enum {string}
+         */
+        SearchSortDto: "relevance" | "time";
         SenderDto: {
             /** @description Profile name; for a chat/channel posting as itself, the chat title. */
             display_name?: string | null;
@@ -455,6 +488,8 @@ export interface components {
         StatusDto: {
             collector: components["schemas"]["ComponentStatusDto"];
             rate_limit?: null | components["schemas"]["RateLimitDto"];
+            /** @description Full-text search index state. */
+            search_index: components["schemas"]["SearchIndexDto"];
             sync_jobs: components["schemas"]["SyncJobDto"][];
             /**
              * Format: int64
@@ -1032,11 +1067,15 @@ export interface operations {
                 sender_id?: number;
                 from?: string;
                 to?: string;
+                /** @description Cursor from the previous page's `next_cursor`. */
                 before?: string;
+                /** @description Only with `sort=time`: cursor for the newer direction. */
                 after?: string;
                 limit?: number;
                 /** @description Also return deleted messages (flagged with `is_deleted`/`deleted_at`). */
                 include_deleted?: boolean;
+                /** @description Result order; default `relevance`. */
+                sort?: components["schemas"]["SearchSortDto"];
             };
             header?: never;
             path?: never;

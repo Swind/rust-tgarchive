@@ -4,8 +4,8 @@ use crate::{
     application::{
         ApplicationError, ArchiveWriter, ChatCheckpoint, ChatRepository, ChatSort, ChatSummary,
         IngestBatch, ListMessagesQuery, MessageContext, MessageContextQuery, MessagePage,
-        MessageRepository, MessageSource, MessageView, PageSize, SearchMessagesQuery,
-        SenderSummary, SyncJob, SyncRepository, TelegramGateway,
+        MessageRepository, MessageSource, MessageView, PageSize, SearchIndexStatus,
+        SearchMessagesQuery, SenderSummary, SyncJob, SyncRepository, TelegramGateway,
         pacer::{RateLimitStatus, RatePacer},
     },
     domain::{Chat, ChatId, MessageEvent, MessageId, Sender},
@@ -94,6 +94,7 @@ pub struct ApplicationStatus {
     pub unresolved_deletions: u64,
     /// History-request pacing; `None` when this process does not talk to Telegram.
     pub rate_limit: Option<RateLimitStatus>,
+    pub search_index: SearchIndexStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -302,6 +303,7 @@ impl RefreshChatsService {
 
 pub struct SyncStatusService {
     sync: Arc<dyn SyncRepository>,
+    messages: Option<Arc<dyn MessageRepository>>,
     collector: CollectorStatusHandle,
     pacer: Option<Arc<RatePacer>>,
 }
@@ -310,6 +312,7 @@ impl SyncStatusService {
     pub fn new(sync: Arc<dyn SyncRepository>, collector: CollectorStatusHandle) -> Self {
         Self {
             sync,
+            messages: None,
             collector,
             pacer: None,
         }
@@ -326,8 +329,21 @@ impl SyncStatusService {
             .unresolved_deletions()
             .await
             .map_err(ApplicationError::from)?;
+        let search_index = match &self.messages {
+            Some(messages) => messages
+                .search_index_status()
+                .await
+                .map_err(ApplicationError::from)?,
+            None => SearchIndexStatus {
+                version: 0,
+                state: crate::application::SearchIndexState::Stale,
+                indexed: 0,
+                total: 0,
+            },
+        };
         Ok(ApplicationStatus {
             collector: self.collector.get(),
+            search_index,
             sync_jobs,
             unresolved_deletions,
             rate_limit: self.pacer.as_ref().map(|pacer| pacer.status()),
@@ -372,12 +388,14 @@ impl Application {
         telegram_gateway: Option<Arc<dyn TelegramGateway>>,
         collector_status: impl Into<CollectorStatusHandle>,
     ) -> Self {
+        let mut sync_status = SyncStatusService::new(sync_repository, collector_status.into());
+        sync_status.messages = Some(message_repository.clone());
         Self {
             ingestion: IngestionService::new(writer),
             messages: MessageService::new(message_repository, chat_repository.clone()),
             chats: ChatService::new(chat_repository.clone()),
             refresh_chats: RefreshChatsService::new(telegram_gateway, chat_repository),
-            sync_status: SyncStatusService::new(sync_repository, collector_status.into()),
+            sync_status,
         }
     }
 

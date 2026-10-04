@@ -106,6 +106,8 @@ async fn file_database_reopens_readonly_and_preserves_ft_search() {
         before: None,
         after: None,
         page_size: PageSize::new(10).unwrap(),
+        sort: tgarchive::application::SearchSort::Relevance,
+        offset: 0,
     };
     let found = store.search(search).await.unwrap();
     assert_eq!(found.items.len(), 1);
@@ -117,6 +119,8 @@ async fn file_database_reopens_readonly_and_preserves_ft_search() {
         before: None,
         after: None,
         page_size: PageSize::new(10).unwrap(),
+        sort: tgarchive::application::SearchSort::Relevance,
+        offset: 0,
     };
     assert_eq!(store.search(chinese).await.unwrap().items.len(), 1);
     let quoted = SearchMessagesQuery {
@@ -125,6 +129,8 @@ async fn file_database_reopens_readonly_and_preserves_ft_search() {
         before: None,
         after: None,
         page_size: PageSize::new(10).unwrap(),
+        sort: tgarchive::application::SearchSort::Relevance,
+        offset: 0,
     };
     assert!(store.search(quoted).await.is_ok());
     store.close().await;
@@ -374,6 +380,8 @@ async fn versions_prefer_edits_and_realtime_and_soft_delete_hides_fts() {
         before: None,
         after: None,
         page_size: PageSize::new(10).unwrap(),
+        sort: tgarchive::application::SearchSort::Relevance,
+        offset: 0,
     };
     assert!(store.search(old_term).await.unwrap().items.is_empty());
     let new_term = SearchMessagesQuery {
@@ -382,6 +390,8 @@ async fn versions_prefer_edits_and_realtime_and_soft_delete_hides_fts() {
         before: None,
         after: None,
         page_size: PageSize::new(10).unwrap(),
+        sort: tgarchive::application::SearchSort::Relevance,
+        offset: 0,
     };
     assert_eq!(store.search(new_term).await.unwrap().items.len(), 1);
 
@@ -405,6 +415,8 @@ async fn versions_prefer_edits_and_realtime_and_soft_delete_hides_fts() {
         before: None,
         after: None,
         page_size: PageSize::new(10).unwrap(),
+        sort: tgarchive::application::SearchSort::Relevance,
+        offset: 0,
     };
     assert!(store.search(search).await.unwrap().items.is_empty());
 }

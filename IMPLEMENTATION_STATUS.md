@@ -79,7 +79,7 @@ Phase 8 supervisor／catch-up：`serve`（已設定 Telegram）啟動 realtime t
 ## Storage semantics
 
 - 部分 chat/sender metadata 的 null 值不會清除已知欄位；目前 refresh 也使用這個合併語意。
-- 中文 FTS5 以 unicode61 fixture 驗證精確詞，未承諾中文子字串／自然分詞。
+- 中文全文檢索：jieba 詞 + 漢字 bigram（見「中文友善全文搜尋」一節）；不做繁簡轉換。
 
 ## Phase 9 與 V1 DoD 證據
 
@@ -132,3 +132,16 @@ Update-gap reconciliation：`differenceTooLong`／`channelDifferenceTooLong`（�
 - `SyncJobDto` 新增 `error_summary`（≤300 字、單行）、`retry_after_secs`（由 rate_limited 摘要解析）；`GET /sync/jobs/{id}` 另含 `chats[{chat_id,title,state,committed_count,error_summary}]`，且改由 application 讀取，query-only 也可用。`failure_summary` 現在經 `sanitize_reason`。UI：行內摘要、可展開每聊天室進度、failed／rate_limited／interrupted 的「重試」。
 - 搜尋頁篩選列改為 grid，日期區間為一個不拆行單元。
 - E2E：`examples/seed_fixture.rs`（走 store API，固定時間戳；選 example 而非 CLI 子命令，避免正式 binary 帶測試資料碼）、`web/e2e/*.spec.ts`（34 個測試含 3 張截圖）、`scripts/e2e.sh`；見 README「E2E 測試」。
+
+## 中文友善全文搜尋（jieba + bigram + contentless FTS5）
+
+依 `rust-jieba-bigram-sqlite-fts5.md` §65（權威）實作，全數完成：
+
+- Migration `0006_search_index.sql`：移除舊 external-content FTS 與 3 個 trigger，建立 `messages_fts(words, bigrams)`（contentless-delete）與 `app_metadata`；`db init` 自動分批重建、`tgarchive search rebuild-index`／`search status`；`serve` 遇到 stale 索引不阻塞，回報 `stale`／`rebuilding` 並以 `LIKE` 退路搜尋。
+- 寫入路徑（`write_batch` 同一交易）：僅在 guarded upsert 實際更新且文字改變時重新索引；NULL／空字串不索引；軟刪除保留索引（`include_deleted` 可搜）。
+- 查詢：NFKC＋小寫、jieba 詞 AND、bigram 片語（相鄰）、停用單字功能詞只從詞路徑移除、單一漢字走 `LIKE`、`bm25(messages_fts, 5.0, 1.0)`；使用者文字不直接進入 MATCH。
+- API：`sort=relevance|time`（有 `q` 預設 relevance，版本化不透明 offset 游標）、`snippet`、`/status` 的 `search_index`；`openapi.yml`／`web/src/api/schema.d.ts` 已重新產生。UI：排序切換、摘要、索引／單字橫幅、搜尋中文說明、狀態頁索引列、Intl.Segmenter 詞級高亮。
+- Tokenizer 在 `src/infrastructure/search/`（`SearchTokenizer` trait、`HybridChineseTokenizer`、全程序共用且延遲建立的單一 `Jieba`）。
+- Tests：`src/infrastructure/search/*`（單元）、`tests/search.rs`（評測集、片語相鄰、bigram 備援、單字 LIKE、軟刪除、陳舊 upsert／新即時編輯、交易回滾、contentless／無 trigger、關聯式分頁無重複／缺漏、篩選、snippet、LIKE 退路、0005 升級、唯讀舊庫）、`tests/search_api.rs`（REST 排序／游標／狀態、CLI `db init` 升級與 `search` 子命令）、`web/e2e/search.spec.ts`（中文子字串、連續性、混合語言／全形、單字、排序切換、snippet）。
+- 量測（release，100k 則合成訊息，`cargo test --release --test search -- --ignored --nocapture`）：增量索引寫入 100k 約 16 s（含 SQLite 寫入）、整庫 `rebuild-index` 約 2.6 s；DB 41 MiB（FTS 表約 10 MiB）；查詢 12–30 ms（前 30 筆，relevance）／8–21 ms（time）；fixture（305 則）索引 36 KiB、重建 < 0.3 s。
+- 已知取捨：詞路徑為「詞皆出現」（順序／距離不拘），因此「台北咖啡」會找到「台北車站附近的咖啡」，連續性只由 bigram 片語保證；片語可能跨越相鄰 CJK run 邊界（設計文件已接受的誤判）；relevance 分頁為 offset 型，兩次請求之間若有寫入可能位移；`/status` 的計數為 O(n)。

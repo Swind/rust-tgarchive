@@ -42,6 +42,13 @@ describe('highlight', () => {
     ]);
     expect(highlight('x', '')).toEqual([{ text: 'x', match: false }]);
   });
+  it('marks single characters and words of a Chinese query', () => {
+    expect(highlight('台北', '北')).toEqual([
+      { text: '台', match: false }, { text: '北', match: true },
+    ]);
+    const marked = highlight('今天去台北喝咖啡', '台北咖啡').filter((s) => s.match).map((s) => s.text);
+    expect(marked).toEqual(['台北', '咖啡']);
+  });
 });
 
 describe('messages', () => {

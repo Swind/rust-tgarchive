@@ -8,7 +8,7 @@ use crate::{
     application::services::Application,
     application::{
         ApplicationError, ListMessagesQuery, MessageFilters, MessagePage, MessageView, PageSize,
-        SearchMessagesQuery, SyncJob, SyncScope, TimeRange, ValidationError,
+        SearchMessagesQuery, SearchSort, SyncJob, SyncScope, TimeRange, ValidationError,
     },
     domain::{Chat, ChatId, IdError, MessageId, SenderId},
 };
@@ -69,6 +69,27 @@ pub enum Command {
         #[command(subcommand)]
         command: DatabaseCommand,
     },
+    /// Full-text search index maintenance
+    Search {
+        #[command(subcommand)]
+        command: SearchCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SearchCommand {
+    /// Re-tokenize every message and rebuild the search index (progress on stderr). Needed after
+    /// upgrading an existing archive (`db init` does it automatically) or when the index state
+    /// is not `ready`.
+    RebuildIndex,
+    /// Show the search index state and how many messages are indexed
+    Status,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SearchSortArg {
+    Relevance,
+    Time,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -135,8 +156,13 @@ pub enum MessagesCommand {
         #[arg(long)]
         include_deleted: bool,
     },
+    /// Full-text search (plain text; Chinese substrings supported)
     Search {
         query: String,
+        /// `relevance`: `--before` takes the previous page's next_cursor (no `--after`);
+        /// `time`: newest first with keyset cursors.
+        #[arg(long, value_enum, default_value = "relevance")]
+        sort: SearchSortArg,
         #[command(flatten)]
         filters: MessageFilterArgs,
     },
@@ -210,6 +236,7 @@ struct MessagePageOutput {
 struct StatusOutput<'a> {
     collector: CollectorOutput<'a>,
     sync_jobs: &'a [crate::application::SyncJob],
+    search_index: &'a crate::application::SearchIndexStatus,
 }
 
 #[derive(Serialize)]
@@ -219,6 +246,9 @@ struct CollectorOutput<'a> {
 }
 
 pub enum PreparedInvocation {
+    RebuildSearchIndex {
+        output: OutputFormat,
+    },
     InitializeDatabase {
         output: OutputFormat,
         database_url: Option<String>,
@@ -259,6 +289,7 @@ pub enum PreparedCommand {
     MessageGet(ChatId, MessageId, bool),
     MessagesSearch(SearchMessagesQuery),
     Status,
+    SearchStatus,
 }
 
 pub fn prepare(cli: Cli) -> Result<PreparedInvocation, CliError> {
@@ -271,6 +302,15 @@ pub fn prepare(cli: Cli) -> Result<PreparedInvocation, CliError> {
         } => Ok(PreparedInvocation::InitializeDatabase {
             output,
             database_url,
+        }),
+        Command::Search {
+            command: SearchCommand::RebuildIndex,
+        } => Ok(PreparedInvocation::RebuildSearchIndex { output }),
+        Command::Search {
+            command: SearchCommand::Status,
+        } => Ok(PreparedInvocation::Query {
+            output,
+            command: PreparedCommand::SearchStatus,
         }),
         Command::Serve { bind, query_only } => Ok(PreparedInvocation::Serve { bind, query_only }),
         Command::Openapi { format } => Ok(PreparedInvocation::OpenApi { format }),
@@ -334,9 +374,13 @@ fn prepare_query(command: Command) -> Result<PreparedCommand, CliError> {
                 message_id,
                 include_deleted,
             )),
-            MessagesCommand::Search { query, filters } => Ok(PreparedCommand::MessagesSearch(
-                search_query(query, filters)?,
-            )),
+            MessagesCommand::Search {
+                query,
+                sort,
+                filters,
+            } => Ok(PreparedCommand::MessagesSearch(search_query(
+                query, sort, filters,
+            )?)),
         },
         Command::Status => Ok(PreparedCommand::Status),
         Command::Serve { .. }
@@ -346,6 +390,7 @@ fn prepare_query(command: Command) -> Result<PreparedCommand, CliError> {
             unreachable!("non-query commands are handled during preparation")
         }
         Command::Db { .. } => unreachable!("database initialization is handled separately"),
+        Command::Search { .. } => unreachable!("search index commands are handled separately"),
     }
 }
 
@@ -383,6 +428,14 @@ pub async fn execute_prepared(
         PreparedCommand::MessagesSearch(query) => {
             render_message_page(output, app.search_messages(query).await?)
         }
+        PreparedCommand::SearchStatus => {
+            let status = app.sync_status().await?.search_index;
+            if output == OutputFormat::Json {
+                json(&status)
+            } else {
+                Ok(human_search_index(&status))
+            }
+        }
         PreparedCommand::Status => {
             let status = app.sync_status().await?;
             if output == OutputFormat::Json {
@@ -393,6 +446,7 @@ pub async fn execute_prepared(
                         detail: &status.collector.detail,
                     },
                     sync_jobs: &status.sync_jobs,
+                    search_index: &status.search_index,
                 })
             } else {
                 let mut lines = vec![format!(
@@ -402,6 +456,7 @@ pub async fn execute_prepared(
                 if let Some(detail) = status.collector.detail {
                     lines.push(format!("collector detail\t{detail}"));
                 }
+                lines.push(human_search_index(&status.search_index));
                 if status.sync_jobs.is_empty() {
                     lines.push("No sync jobs.".into());
                 } else {
@@ -480,7 +535,28 @@ fn list_query(args: MessageFilterArgs) -> Result<ListMessagesQuery, CliError> {
     Ok(query)
 }
 
-fn search_query(text: String, args: MessageFilterArgs) -> Result<SearchMessagesQuery, CliError> {
+fn search_query(
+    text: String,
+    sort: SearchSortArg,
+    mut args: MessageFilterArgs,
+) -> Result<SearchMessagesQuery, CliError> {
+    let (sort, offset) = match sort {
+        SearchSortArg::Time => (SearchSort::Time, 0),
+        SearchSortArg::Relevance => {
+            if args.after.is_some() {
+                return Err(CliError::InvalidInput(
+                    "--after is only valid with --sort time".into(),
+                ));
+            }
+            let offset = args
+                .before
+                .take()
+                .map(|value| crate::interface::cursor::decode_offset(&value))
+                .transpose()?
+                .unwrap_or(0);
+            (SearchSort::Relevance, offset)
+        }
+    };
     let (filters, before, after, page_size) = convert_filters(args)?;
     let query = SearchMessagesQuery {
         text,
@@ -488,6 +564,8 @@ fn search_query(text: String, args: MessageFilterArgs) -> Result<SearchMessagesQ
         before,
         after,
         page_size,
+        sort,
+        offset,
     };
     query.validate()?;
     Ok(query)
@@ -537,11 +615,11 @@ fn parse_timestamp(value: &str) -> Result<DateTime<Utc>, String> {
 }
 
 fn render_message_page(output: OutputFormat, page: MessagePage) -> Result<String, CliError> {
-    let next_cursor = page
-        .next_cursor
-        .as_ref()
-        .map(crate::interface::cursor::encode)
-        .transpose()?;
+    let next_cursor = match (page.next_cursor.as_ref(), page.next_offset) {
+        (Some(cursor), _) => Some(crate::interface::cursor::encode(cursor)?),
+        (None, Some(offset)) => Some(crate::interface::cursor::encode_offset(offset)?),
+        (None, None) => None,
+    };
     if output == OutputFormat::Json {
         json(&MessagePageOutput {
             items: page.items,
@@ -615,6 +693,16 @@ fn human_message(message: &MessageView) -> String {
             ""
         },
         message.text.as_deref().unwrap_or("")
+    )
+}
+
+fn human_search_index(status: &crate::application::SearchIndexStatus) -> String {
+    format!(
+        "search index\t{} (version {}, {}/{} messages indexed)",
+        status.state.as_str(),
+        status.version,
+        status.indexed,
+        status.total
     )
 }
 
