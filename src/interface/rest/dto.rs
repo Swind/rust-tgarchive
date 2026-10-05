@@ -7,10 +7,11 @@ use utoipa::ToSchema;
 use crate::{
     application::{
         ChatSort, ChatStats, ChatSummary, MessageContext, MessagePage, MessageView,
-        SearchIndexStatus, SearchSort, SenderInfo, SenderSummary, SyncChatProgress, SyncJob,
-        SyncJobState, services::ApplicationStatus,
+        SearchIndexStatus, SearchSort, SenderChatStat, SenderDetail, SenderInfo, SenderPage,
+        SenderProfile, SenderSort, SenderSummary, SyncChatProgress, SyncJob, SyncJobState,
+        services::ApplicationStatus,
     },
-    domain::{Attachment, AttachmentKind, Chat, ChatKind, SenderId},
+    domain::{Attachment, AttachmentKind, Chat, ChatKind, Forward, SenderId, SenderKind},
 };
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -125,6 +126,10 @@ pub struct MessageDto {
     pub text: Option<String>,
     pub reply_to: Option<i64>,
     pub attachments: Vec<AttachmentDto>,
+    /// Channel post signature (`post_author`); not the sender.
+    pub post_author: Option<String>,
+    /// Origin of a forwarded message; null when the message was not forwarded.
+    pub forward: Option<ForwardDto>,
     pub is_deleted: bool,
     /// Set when the message was deleted on Telegram (only returned with `include_deleted=true`).
     pub deleted_at: Option<DateTime<Utc>>,
@@ -132,6 +137,182 @@ pub struct MessageDto {
     /// no match position could be determined. `text` always carries the full message.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snippet: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct ForwardDto {
+    /// Original author or channel (marked ID) when Telegram exposes it.
+    pub from_id: Option<i64>,
+    /// Name of the original author (also set for users who hide their account).
+    pub from_name: Option<String>,
+    /// When the original message was sent.
+    pub date: Option<DateTime<Utc>>,
+}
+
+impl From<Forward> for ForwardDto {
+    fn from(forward: Forward) -> Self {
+        Self {
+            from_id: forward.from_id.map(SenderId::get),
+            from_name: forward.from_name,
+            date: forward.date,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SenderKindDto {
+    User,
+    Chat,
+    Channel,
+    Unknown,
+}
+
+impl From<SenderKind> for SenderKindDto {
+    fn from(kind: SenderKind) -> Self {
+        match kind {
+            SenderKind::User => Self::User,
+            SenderKind::Chat => Self::Chat,
+            SenderKind::Channel => Self::Channel,
+            SenderKind::Unknown => Self::Unknown,
+        }
+    }
+}
+
+/// Sort order of `GET /senders`.
+#[derive(Debug, Clone, Copy, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SenderSortDto {
+    /// Most messages first (default).
+    Messages,
+    /// Most recently active first.
+    LastMessage,
+    /// Display name ascending (nameless last).
+    Name,
+}
+
+impl From<SenderSortDto> for SenderSort {
+    fn from(sort: SenderSortDto) -> Self {
+        match sort {
+            SenderSortDto::Messages => Self::Messages,
+            SenderSortDto::LastMessage => Self::LastMessage,
+            SenderSortDto::Name => Self::Name,
+        }
+    }
+}
+
+/// A sender with archive-wide aggregates.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct SenderProfileDto {
+    pub id: i64,
+    pub kind: SenderKindDto,
+    /// Profile name; for a channel posting as itself, the channel title.
+    pub display_name: Option<String>,
+    pub username: Option<String>,
+    /// Messages by this sender (deleted ones only with `include_deleted=true`).
+    pub message_count: u64,
+    /// Chats in which the sender has messages.
+    pub chat_count: u64,
+    pub first_message_at: Option<DateTime<Utc>>,
+    pub last_message_at: Option<DateTime<Utc>>,
+    /// The Telegram account this archive is bound to.
+    pub is_self: bool,
+}
+
+impl From<SenderProfile> for SenderProfileDto {
+    fn from(profile: SenderProfile) -> Self {
+        Self {
+            id: profile.id.get(),
+            kind: profile.kind.into(),
+            display_name: profile.display_name,
+            username: profile.username,
+            message_count: profile.message_count,
+            chat_count: profile.chat_count,
+            first_message_at: profile.first_message_at,
+            last_message_at: profile.last_message_at,
+            is_self: profile.is_self,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct SenderPageDto {
+    pub items: Vec<SenderProfileDto>,
+    /// Opaque cursor; pass it back as `cursor` to get the next page.
+    pub next_cursor: Option<String>,
+}
+
+impl TryFrom<SenderPage> for SenderPageDto {
+    type Error = crate::interface::cursor::CursorError;
+
+    fn try_from(page: SenderPage) -> Result<Self, Self::Error> {
+        Ok(Self {
+            items: page.items.into_iter().map(Into::into).collect(),
+            next_cursor: page
+                .next_offset
+                .map(crate::interface::cursor::encode_offset)
+                .transpose()?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct SenderChatDto {
+    pub chat_id: i64,
+    pub title: Option<String>,
+    pub kind: ChatKindDto,
+    pub message_count: u64,
+    pub last_message_at: Option<DateTime<Utc>>,
+}
+
+impl From<SenderChatStat> for SenderChatDto {
+    fn from(stat: SenderChatStat) -> Self {
+        Self {
+            chat_id: stat.chat_id.get(),
+            title: stat.title,
+            kind: match stat.kind {
+                ChatKind::Private => ChatKindDto::Private,
+                ChatKind::Group => ChatKindDto::Group,
+                ChatKind::Supergroup => ChatKindDto::Supergroup,
+                ChatKind::Channel => ChatKindDto::Channel,
+            },
+            message_count: stat.message_count,
+            last_message_at: stat.last_message_at,
+        }
+    }
+}
+
+/// A sender plus its per-chat breakdown (most messages first).
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct SenderDetailDto {
+    pub id: i64,
+    pub kind: SenderKindDto,
+    pub display_name: Option<String>,
+    pub username: Option<String>,
+    pub message_count: u64,
+    pub chat_count: u64,
+    pub first_message_at: Option<DateTime<Utc>>,
+    pub last_message_at: Option<DateTime<Utc>>,
+    pub is_self: bool,
+    pub chats: Vec<SenderChatDto>,
+}
+
+impl From<SenderDetail> for SenderDetailDto {
+    fn from(detail: SenderDetail) -> Self {
+        let profile = SenderProfileDto::from(detail.profile);
+        Self {
+            id: profile.id,
+            kind: profile.kind,
+            display_name: profile.display_name,
+            username: profile.username,
+            message_count: profile.message_count,
+            chat_count: profile.chat_count,
+            first_message_at: profile.first_message_at,
+            last_message_at: profile.last_message_at,
+            is_self: profile.is_self,
+            chats: detail.chats.into_iter().map(Into::into).collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -237,6 +418,8 @@ impl From<MessageView> for MessageDto {
             text: message.text,
             reply_to: message.reply_to.map(|id| id.get()),
             attachments: message.attachments.into_iter().map(Into::into).collect(),
+            post_author: message.post_author,
+            forward: message.forward.map(Into::into),
         }
     }
 }

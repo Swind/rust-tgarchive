@@ -106,6 +106,16 @@ tgarchive --output json messages list --limit 5
   - 索引未就緒時（`stale`／`rebuilding`），搜尋自動退回 `LIKE` 子字串掃描（較慢、依時間排序、不做 NFKC 全形比對），`GET /api/v1/status` 的 `search_index: {version, state, indexed, total}` 與 UI 橫幅會提示。`serve` 不會因此阻塞啟動，也不會自行重建，只在 log 警告。
 - 限制：只對漢字做 bigram（假名／韓文只走 jieba／unicode61 詞比對）；不做繁簡轉換（「硬碟」找不到「硬盘」）；未提供自訂 jieba 詞典；`/status` 的 `indexed`／`total` 為計數查詢（大型資料庫約為一次全表掃描）。
 
+## 使用者查詢、修復與重新抓取
+
+- `tgarchive senders search <文字> [--sort messages|last-message|name]`：名稱／@username 子字串（NFKC＋不分大小寫，中文可搜部分字）、`@username`（完全相符）或數字 ID；顯示訊息數、聊天室數、最近發言、是否為自己。`tgarchive senders get <id|@username|名稱|me>` 另列各聊天室分佈。
+- `messages list|search --sender <id|@username|名稱|me>`：解析成唯一使用者；名稱有多位候選時列出候選並以非零結束；`me` 為封存綁定的 Telegram 帳號。另有 `--post-author`（頻道貼文署名，完全相符）。
+- REST：`GET /api/v1/senders?q=&sort=messages|last_message|name&limit=&cursor=&include_deleted=`、`GET /api/v1/senders/{id}`（含 `chats` 分佈）；`/messages`、`/messages/search` 支援 `sender_id`、`post_author`。訊息含 `post_author` 與 `forward{from_id,from_name,date}`（轉發來源不影響寄件人歸屬）。UI：頂欄「使用者」、`/senders/:id`，點寄件人名稱即跳轉。
+- 自己發出的訊息（`out` 且無 `from_id`）歸給綁定帳號，帳號資料（get_me）會寫入 `senders`。
+- 舊資料中 `sender_id` 為 NULL 的列：
+  - `tgarchive repair senders [--dry-run]`（僅本機，不需 Telegram）：頻道（kind=channel）的 NULL 以頻道本身為寄件人；分批交易、可重複執行、回報每聊天室筆數。**私訊／群組的 NULL 無法判斷方向，不會猜測**，報告中列為「仍無寄件人」，需用下面的重新抓取補上。資料庫被其他程序鎖住時會提示稍後重試。
+  - `tgarchive sync chat <ID> --refetch`（或 `POST /api/v1/chats/{id}/sync?refetch=true`）：依 pacing 重新下載完整歷史，只在**既有值為 NULL 時**補 `sender_id`／`post_author`／轉發來源／附件欄位；不改文字、編輯版本，不復活已刪除訊息，不覆蓋非 NULL。進度存於獨立 checkpoint（`chat_sync_state.refetch_*`），中斷或限流後再執行同一指令會續跑，完成後清除，下次從最新重新開始。
+
 ## 抓取頻率與限流
 
 Telegram **沒有公開的固定頻率上限**，限制是動態的（依帳號、方法、行為而變）；伺服器會以 `FLOOD_WAIT_X`（420）要求等待 X 秒。本工具因此採保守策略：

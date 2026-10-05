@@ -14,8 +14,9 @@ pub use tokio_util::sync::CancellationToken;
 use super::ingestion_worker::IngestSink;
 use super::pacer::RatePacer;
 use super::{
-    ApplicationError, ChatRepository, HistoryBoundary, IngestBatch, PageSize, SyncChatProgress,
-    SyncJob, SyncJobState, SyncRepository, SyncScope, TelegramError, TelegramGateway,
+    ApplicationError, ChatRepository, HistoryBoundary, IngestBatch, MessageSource, PageSize,
+    RefetchCheckpoint, SyncChatProgress, SyncJob, SyncJobState, SyncRepository, SyncScope,
+    TelegramError, TelegramGateway,
 };
 use crate::domain::{ChatId, MessageEvent, MessageId};
 
@@ -213,6 +214,82 @@ impl SyncEngine {
             }
         }
         Ok(committed)
+    }
+
+    /// Re-downloads the full history newest to oldest and backfills NULL metadata (sender, post
+    /// author, forward origin, attachment details) of rows that already exist; text, edit
+    /// versions and deletions are never changed (see [`MessageSource::Refetch`]). Messages
+    /// missing from the archive are inserted like a normal history sync.
+    ///
+    /// The walk has its own persisted checkpoint (`RefetchCheckpoint`), committed with every page,
+    /// so a rerun after an interruption or rate limit resumes where it stopped. A finished walk
+    /// clears it; the next `--refetch` starts from the newest message again.
+    pub async fn refetch_chat(
+        &self,
+        job_id: &str,
+        chat_id: ChatId,
+        cancel: &CancellationToken,
+    ) -> Result<u64, ApplicationError> {
+        let saved = self.repository.get_refetch_checkpoint(chat_id).await?;
+        let mut before = if saved.active { saved.before_id } else { None };
+        let mut committed = 0u64;
+        loop {
+            if cancel.is_cancelled() {
+                return Err(ApplicationError::Conflict);
+            }
+            let mut page = self
+                .fetch_with_retry(
+                    chat_id,
+                    HistoryBoundary {
+                        before_message_id: before,
+                        after_message_id: None,
+                    },
+                    self.page_size,
+                    cancel,
+                )
+                .await?;
+            let next = page.next_before_message_id;
+            if !page.exhausted && !cursor_advances(before, next) {
+                return Err(ApplicationError::Internal(
+                    "Telegram history page did not advance its exclusive cursor".into(),
+                ));
+            }
+            for record in &mut page.records {
+                record.source = MessageSource::Refetch;
+            }
+            let count = page.records.len() as u64;
+            self.sink
+                .submit(IngestBatch {
+                    chats: page.chats,
+                    senders: page.senders,
+                    records: page.records,
+                    refetch_checkpoint: Some((
+                        chat_id,
+                        RefetchCheckpoint {
+                            active: !page.exhausted,
+                            before_id: if page.exhausted { None } else { next },
+                        },
+                    )),
+                    job_progress: Some(SyncChatProgress {
+                        job_id: job_id.to_owned(),
+                        chat_id,
+                        state: if page.exhausted {
+                            SyncJobState::Succeeded
+                        } else {
+                            SyncJobState::Running
+                        },
+                        committed_messages: committed + count,
+                        summary_error: None,
+                    }),
+                    ..IngestBatch::default()
+                })
+                .await?;
+            committed += count;
+            before = next;
+            if page.exhausted {
+                return Ok(committed);
+            }
+        }
     }
 
     /// Newest archived ID, or "before the first message" when nothing is archived (safe: it
@@ -505,7 +582,8 @@ fn cursor_advances(old: Option<MessageId>, new: Option<MessageId>) -> bool {
 }
 
 enum Command {
-    Run(SyncJob, CancellationToken),
+    /// The flag selects a `--refetch` walk (chat scope only).
+    Run(SyncJob, CancellationToken, bool),
 }
 struct Reservation {
     accepting: bool,
@@ -563,7 +641,7 @@ impl SyncCoordinator {
                         }
                         command = receiver.recv() => command,
                     };
-                    let Some(Command::Run(mut job, cancel)) = command else {
+                    let Some(Command::Run(mut job, cancel, refetch)) = command else {
                         break;
                     };
                     job.state = SyncJobState::Running;
@@ -578,7 +656,11 @@ impl SyncCoordinator {
                         return Err(recovery.map_or_else(|| format!("cannot mark sync job running: {error}"), |e| format!("cannot mark sync job running: {error}; cannot mark it interrupted: {e}")));
                     }
                     let result = match job.scope.clone() {
-                        SyncScope::Chat(id) => match engine.sync_chat(&job.id, id, &cancel).await {
+                        SyncScope::Chat(id) => match if refetch {
+                            engine.refetch_chat(&job.id, id, &cancel).await
+                        } else {
+                            engine.sync_chat(&job.id, id, &cancel).await
+                        } {
                             Ok(_) => Ok(()),
                             Err(error) => {
                                 let committed = repository
@@ -627,7 +709,7 @@ impl SyncCoordinator {
                     release_reservation(&reserved, &job.scope).await;
                     cancellations.lock().await.remove(&job.id);
                 }
-                while let Some(Command::Run(job, cancel)) = receiver.recv().await {
+                while let Some(Command::Run(job, cancel, _)) = receiver.recv().await {
                     cancel.cancel();
                     mark_interrupted(&engine, &repository, &job).await?;
                     release_reservation(&reserved, &job.scope).await;
@@ -648,7 +730,7 @@ impl SyncCoordinator {
                         token.cancel();
                     }
                 }
-                while let Some(Command::Run(job, cancel)) = receiver.recv().await {
+                while let Some(Command::Run(job, cancel, _)) = receiver.recv().await {
                     cancel.cancel();
                     if let Err(cleanup) = mark_interrupted(&engine, &repository, &job).await {
                         result = Err(format!(
@@ -670,6 +752,18 @@ impl SyncCoordinator {
     }
 
     pub async fn submit(&self, scope: SyncScope) -> Result<SyncJob, ApplicationError> {
+        self.submit_with(scope, false).await
+    }
+
+    /// `refetch` re-downloads the whole history to backfill NULL metadata; chat scope only.
+    pub async fn submit_with(
+        &self,
+        scope: SyncScope,
+        refetch: bool,
+    ) -> Result<SyncJob, ApplicationError> {
+        if refetch && !matches!(scope, SyncScope::Chat(_)) {
+            return Err(ApplicationError::Conflict);
+        }
         let permit = self
             .sender
             .clone()
@@ -727,7 +821,7 @@ impl SyncCoordinator {
             .lock()
             .await
             .insert(job.id.clone(), cancel.clone());
-        permit.send(Command::Run(job.clone(), cancel));
+        permit.send(Command::Run(job.clone(), cancel, refetch));
         Ok(job)
     }
 

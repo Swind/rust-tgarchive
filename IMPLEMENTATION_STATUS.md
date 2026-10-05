@@ -148,3 +148,12 @@ Update-gap reconciliation：`differenceTooLong`／`channelDifferenceTooLong`（�
 - 量測（release，32 CPU Ryzen 9 7945HX；寫實語料，30 筆一頁）：100k：寫入 18 s、`rebuild-index` 2.9 s、DB 43 MiB（FTS 10 MiB）；查詢 p95 多數 < 30 ms（今天 ~30、台北 ~12、gitlab ~14），罕見單字全表 LIKE 25–140 ms，深 offset 90000 約 57 ms，全部 PASS。1M：寫入 186 s、rebuild 31 s、DB 434 MiB（FTS 99 MiB）；p95：常見詞「今天」246 ms、台北 96 ms、gitlab 117 ms、罕見詞 < 1 ms、無結果 < 1 ms、罕見單字全表 LIKE 1.3–1.9 s、篩選 25–48 ms、深 offset 20000 325 ms、**offset 90000 約 1.1 s（WARN）**。
 - 發現與修正：chat／sender 篩選 + time 排序（或 relevance）時，沒有統計資訊的 SQLite 會以 chat／sender 索引為外層、對每筆訊息各探一次 FTS（100k 下 146–400 ms，與詞的稀有度無關，罕見詞反而最慢）。`list_messages` 在有 MATCH 時改用 `+m.chat_id`／`+m.sender_id` 讓 FTS 命中驅動查詢（結果集不變）：100k 下降為 3 ms 級。未修的限制：常見詞（命中數 ∝ 語料）在 time 排序要排序全部命中（1M「今天」~240 ms）；罕見／無結果單字為全表 LIKE（線性，1M 約 1.3 s，有 chat 篩選約 0.5 s）；relevance 極深 offset（接近上限 100000）在 1M 約 1.1 s；單字 LIKE 時間有雙峰（25 vs 130 ms @100k，疑為各連線 page cache）。
 - 已知取捨：詞路徑為「詞皆出現」（順序／距離不拘），因此「台北咖啡」會找到「台北車站附近的咖啡」，連續性只由 bigram 片語保證；片語可能跨越相鄰 CJK run 邊界（設計文件已接受的誤判）；relevance 分頁為 offset 型，兩次請求之間若有寫入可能位移；`/status` 的計數為 O(n)。
+
+## 寄件人歸屬與使用者功能
+
+- mapper：自己發出且無 `from_id` 的訊息歸給綁定帳號（`TelegramAdapter::authenticated_account` 快取 get_me，並寫入 `senders`）；`post_author` 與 `fwd_from`（from_id／from_name／date）存入 migration 0007 欄位，轉發不影響寄件人。upsert 對 sender／metadata 使用 COALESCE，不再以 NULL 覆蓋。
+- `MessageSource::Refetch`＋`SyncEngine::refetch_chat`＋`SyncCoordinator::submit_with(scope, refetch)`：僅補 NULL 欄位與附件資訊，獨立可續跑 checkpoint；CLI `sync chat --refetch`、REST `?refetch=true`。
+- `tgarchive repair senders [--dry-run]`（`SqliteStore::repair_senders`）：僅頻道規則，不猜私訊。
+- API／CLI：`/senders`、`/senders/{id}`、`senders search|get`、`--sender`（含 `me`、歧義報錯）、`post_author` 篩選；UI：使用者清單／詳細頁、點名跳轉、搜尋頁寄件人自動完成、署名與轉發顯示。
+- 測試：`tests/senders.rs`（端點、CJK、migration 0007、repair、refetch、CLI）、mapper 單元測試、`web/e2e/senders.spec.ts`。
+- 限制：senders 清單於 Rust 端過濾／排序（senders 表小；候選 ≤2000 以 IN 查詢聚合，否則全域聚合）；私訊舊資料需 refetch；轉發來源僅儲存名稱／ID，不解析名稱。

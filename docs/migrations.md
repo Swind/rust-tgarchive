@@ -10,6 +10,7 @@
 | `0004_sync_rate_limited_state.sql` | 同步 job 新增可續跑狀態 `rate_limited`。SQLite 無法修改 CHECK，故先子表後父表重建 `sync_jobs`／`sync_job_chats`（資料原樣複製）並重建 `sync_jobs_active_chat` index。 |
 | `0005_read_indexes.sql` | 讀取用 index（不改資料）：`messages_chat_stats(chat_id, is_deleted, timestamp)` 供聊天室統計聚合、`messages_chat_all_order(chat_id, timestamp DESC, message_id DESC)` 供 `include_deleted` 的單一聊天室排序、`messages_chat_sender(chat_id, sender_id) WHERE is_deleted=0` 供寄件人統計。跨聊天室且 `include_deleted=true` 的全域列表沒有專屬 index（使用較少）。 |
 | `0006_search_index.sql` | 中文友善全文搜尋：刪除舊的 `messages_fts` 與三個 trigger（`messages_fts_insert/delete/update`），建立 contentless-delete FTS5 表 `messages_fts(words, bigrams)`（`content=''`、`contentless_delete=1`、`tokenize='unicode61'`，rowid = `messages.row_id`）與 `app_metadata(key, value)`（`search_index_state`、`search_index_version`）。沒有可索引文字的資料庫直接標為 `ready`／版本 1；否則標為 `stale`／版本 0。**只動結構**：斷詞需要 Rust，回填由 `db init` 或 `search rebuild-index` 完成。 |
+| `0007_sender_metadata.sql` | 寄件人歸屬：`messages` 新增可為 NULL 的 `post_author`、`fwd_from_id`、`fwd_from_name`、`fwd_date`；`chat_sync_state` 新增 `refetch_active`、`refetch_before_id`（`--refetch` 續跑 checkpoint）；index：`messages_sender_stats(sender_id,is_deleted,chat_id,timestamp)`、`messages_sender_all_order`（含已刪除的寄件人列表）、`messages_post_author`、`messages_null_sender`（repair）。不改資料、FTS 不變。 |
 
 ## 升級指引
 
@@ -20,3 +21,4 @@
 - 套用 0004 不需任何手動動作，既有 job 紀錄保留。
 - 套用 0003 後所有既有聊天室為 untracked：需要繼續收集的請重新 `chats track <id>`。
 - Migration 不可就地修改已發佈的檔案；變更請新增檔案。
+- 套用 0007 後既有列的新欄位皆為 NULL；`sender_id` 為 NULL 的舊列請執行 `tgarchive repair senders`（頻道），私訊請 `sync chat <ID> --refetch`。尚未 migrate 的舊資料庫以唯讀開啟時仍可查詢（新欄位視為 NULL）。

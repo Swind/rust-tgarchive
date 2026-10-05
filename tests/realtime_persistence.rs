@@ -32,6 +32,8 @@ fn chat(marked_id: i64) -> Chat {
 fn message(marked_chat_id: i64, message_id: i64) -> Message {
     let timestamp = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap();
     Message {
+        post_author: None,
+        forward: None,
         id: MessageId::new(message_id).unwrap(),
         chat_id: ChatId::from_marked(marked_chat_id).unwrap(),
         sender_id: Some(SenderId::from_marked(1).unwrap()),
@@ -227,6 +229,7 @@ async fn replaying_the_same_realtime_batch_after_a_crash_leaves_one_row() {
             filters: tgarchive::application::MessageFilters {
                 chat_id: Some(chat_id),
                 sender_id: None,
+                post_author: None,
                 time_range: tgarchive::application::TimeRange::new(None, None).unwrap(),
                 include_deleted: false,
             },

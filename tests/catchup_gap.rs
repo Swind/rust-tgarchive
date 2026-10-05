@@ -31,6 +31,8 @@ fn chat() -> Chat {
 fn message(id: i64) -> Message {
     let timestamp = DateTime::<Utc>::from_timestamp(1_700_000_000 + id, 0).unwrap();
     Message {
+        post_author: None,
+        forward: None,
         id: MessageId::new(id).unwrap(),
         chat_id: chat_id(),
         sender_id: None,

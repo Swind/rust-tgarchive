@@ -3,8 +3,8 @@ use grammers_client::{media::Media, message::Message as TelegramMessage, peer::P
 use grammers_session::types::{PeerId, PeerKind};
 
 use crate::domain::{
-    Attachment, AttachmentKind, Chat, ChatId, ChatKind, IdError, Message, MessageId, Sender,
-    SenderId, SenderKind,
+    Attachment, AttachmentKind, Chat, ChatId, ChatKind, Forward, IdError, Message, MessageId,
+    Sender, SenderId, SenderKind,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -95,53 +95,90 @@ pub fn map_sender(peer_id: PeerId, peer: Option<&Peer>) -> Result<Sender, Mappin
     })
 }
 
+/// `account` is the Telegram account the archive is bound to; it attributes outgoing messages
+/// that carry no `from_id`.
 pub fn map_message(
     message: &TelegramMessage,
     collected_at: DateTime<Utc>,
+    account: Option<SenderId>,
 ) -> Result<Message, MappingError> {
-    map_raw_message(&message.raw, collected_at)
+    map_raw_message(&message.raw, collected_at, account)
+}
+
+/// Profile of the authenticated account as a sender row.
+pub fn map_account(user: &grammers_client::peer::User) -> Result<Sender, MappingError> {
+    Ok(Sender {
+        id: sender_id(user.id())?,
+        kind: SenderKind::User,
+        display_name: display_name(user.first_name(), user.last_name()),
+        username: user.username().map(str::to_owned),
+    })
 }
 
 /// Maps message and service-message TL fixtures without requiring a live peer cache.
 pub fn map_raw_message(
     raw: &grammers_client::tl::enums::Message,
     collected_at: DateTime<Utc>,
+    account: Option<SenderId>,
 ) -> Result<Message, MappingError> {
     use grammers_client::tl::enums::Message as RawMessage;
 
-    let (id, raw_peer, raw_sender_id, outgoing, date, edited_at, text, reply_to, raw_media) =
-        match raw {
-            RawMessage::Message(message) => (
-                message.id,
-                &message.peer_id,
-                message.from_id.as_ref(),
-                message.out,
-                message.date,
-                message.edit_date,
-                Some(message.message.clone()),
-                message.reply_to.as_ref().and_then(reply_message_id),
-                message.media.clone(),
-            ),
-            RawMessage::Service(message) => (
-                message.id,
-                &message.peer_id,
-                message.from_id.as_ref(),
-                message.out,
-                message.date,
-                None,
-                None,
-                message.reply_to.as_ref().and_then(reply_message_id),
-                None,
-            ),
-            RawMessage::Empty(_) => return Err(MappingError::UnsupportedMessage),
-        };
+    let (
+        id,
+        raw_peer,
+        raw_sender_id,
+        outgoing,
+        post,
+        date,
+        edited_at,
+        text,
+        reply_to,
+        raw_media,
+        post_author,
+        fwd_from,
+    ) = match raw {
+        RawMessage::Message(message) => (
+            message.id,
+            &message.peer_id,
+            message.from_id.as_ref(),
+            message.out,
+            message.post,
+            message.date,
+            message.edit_date,
+            Some(message.message.clone()),
+            message.reply_to.as_ref().and_then(reply_message_id),
+            message.media.clone(),
+            message
+                .post_author
+                .clone()
+                .filter(|author| !author.is_empty()),
+            message.fwd_from.as_ref(),
+        ),
+        RawMessage::Service(message) => (
+            message.id,
+            &message.peer_id,
+            message.from_id.as_ref(),
+            message.out,
+            message.post,
+            message.date,
+            None,
+            None,
+            message.reply_to.as_ref().and_then(reply_message_id),
+            None,
+            None,
+            None,
+        ),
+        RawMessage::Empty(_) => return Err(MappingError::UnsupportedMessage),
+    };
     let timestamp =
         DateTime::from_timestamp(i64::from(date), 0).ok_or(MappingError::InvalidTimestamp)?;
     let peer_id = raw_peer_id(raw_peer)?;
-    // Telegram omits `from_id` for incoming private messages and channel posts: the sender is
-    // the chat itself.
-    let sender_id = match raw_sender_id {
+    // Telegram omits `from_id` for outgoing messages, incoming private messages and channel
+    // posts. Outgoing ones belong to the bound account, private ones to the peer, posts to
+    // the channel itself.
+    let resolved_sender = match raw_sender_id {
         Some(raw) => Some(sender_id(raw_peer_id(raw)?)?),
+        None if outgoing && !post && account.is_some() => account,
         None if matches!(peer_id.kind(), PeerKind::Channel)
             || (matches!(peer_id.kind(), PeerKind::User) && !outgoing) =>
         {
@@ -149,6 +186,20 @@ pub fn map_raw_message(
         }
         None => None,
     };
+    let forward = fwd_from
+        .map(|header| {
+            let grammers_client::tl::enums::MessageFwdHeader::Header(header) = header;
+            Ok::<_, MappingError>(Forward {
+                from_id: header
+                    .from_id
+                    .as_ref()
+                    .map(|peer| sender_id(raw_peer_id(peer)?))
+                    .transpose()?,
+                from_name: header.from_name.clone().filter(|name| !name.is_empty()),
+                date: DateTime::from_timestamp(i64::from(header.date), 0),
+            })
+        })
+        .transpose()?;
     let attachments = raw_media
         .and_then(Media::from_raw)
         .into_iter()
@@ -157,7 +208,7 @@ pub fn map_raw_message(
     Ok(Message {
         id: MessageId::new(i64::from(id))?,
         chat_id: chat_id(peer_id)?,
-        sender_id,
+        sender_id: resolved_sender,
         timestamp,
         edited_at: edited_at
             .map(|value| {
@@ -170,6 +221,8 @@ pub fn map_raw_message(
             .map(|id| MessageId::new(i64::from(id)))
             .transpose()?,
         attachments,
+        post_author,
+        forward,
     })
 }
 
@@ -395,7 +448,7 @@ mod tests {
             video_timestamp: None,
             ttl_seconds: None,
         });
-        let mapped = map_raw_message(&raw_message(Some(media)), Utc::now()).unwrap();
+        let mapped = map_raw_message(&raw_message(Some(media)), Utc::now(), None).unwrap();
 
         assert_eq!(mapped.id.get(), 123);
         assert_eq!(mapped.chat_id.get(), 42);
@@ -436,7 +489,7 @@ mod tests {
             reactions: None,
             ttl_period: None,
         };
-        let mapped = map_raw_message(&service.into(), Utc::now()).unwrap();
+        let mapped = map_raw_message(&service.into(), Utc::now(), None).unwrap();
 
         assert_eq!(mapped.id.get(), 55);
         assert_eq!(mapped.chat_id.get(), -6);
@@ -467,10 +520,68 @@ mod tests {
             reactions: None,
             ttl_period: None,
         };
-        let mapped = map_raw_message(&service.clone().into(), Utc::now()).unwrap();
+        let mapped = map_raw_message(&service.clone().into(), Utc::now(), None).unwrap();
         assert_eq!(mapped.sender_id.unwrap().get(), 777_000);
         service.out = true;
-        let mapped = map_raw_message(&service.into(), Utc::now()).unwrap();
+        let mapped = map_raw_message(&service.clone().into(), Utc::now(), None).unwrap();
         assert_eq!(mapped.sender_id, None);
+        let account = SenderId::from_marked(4242).unwrap();
+        let mapped = map_raw_message(&service.into(), Utc::now(), Some(account)).unwrap();
+        assert_eq!(mapped.sender_id, Some(account));
+    }
+
+    #[test]
+    fn outgoing_message_without_from_id_is_attributed_to_the_account_but_posts_stay_channel() {
+        use grammers_client::tl::{enums::Peer, types};
+
+        let account = SenderId::from_marked(4242).unwrap();
+        let mut raw = raw_message(None);
+        let grammers_client::tl::enums::Message::Message(message) = &mut raw else {
+            unreachable!()
+        };
+        message.from_id = None;
+        message.out = true;
+        let mapped = map_raw_message(&raw, Utc::now(), Some(account)).unwrap();
+        assert_eq!(mapped.sender_id, Some(account));
+        let grammers_client::tl::enums::Message::Message(message) = &mut raw else {
+            unreachable!()
+        };
+        message.peer_id = Peer::Channel(types::PeerChannel { channel_id: 9 });
+        message.post = true;
+        let mapped = map_raw_message(&raw, Utc::now(), Some(account)).unwrap();
+        assert_eq!(mapped.sender_id.unwrap().get(), -1_000_000_000_009);
+    }
+
+    #[test]
+    fn post_author_and_forward_origin_are_mapped_without_touching_the_sender() {
+        use grammers_client::tl::{enums, types};
+
+        let mut raw = raw_message(None);
+        let enums::Message::Message(message) = &mut raw else {
+            unreachable!()
+        };
+        message.post_author = Some("Editor".into());
+        message.fwd_from = Some(enums::MessageFwdHeader::Header(types::MessageFwdHeader {
+            imported: false,
+            saved_out: false,
+            from_id: Some(enums::Peer::Channel(types::PeerChannel { channel_id: 5 })),
+            from_name: Some("Origin".into()),
+            date: 1_600_000_000,
+            channel_post: None,
+            post_author: None,
+            saved_from_peer: None,
+            saved_from_msg_id: None,
+            saved_from_id: None,
+            saved_from_name: None,
+            saved_date: None,
+            psa_type: None,
+        }));
+        let mapped = map_raw_message(&raw, Utc::now(), None).unwrap();
+        assert_eq!(mapped.sender_id.unwrap().get(), 99);
+        assert_eq!(mapped.post_author.as_deref(), Some("Editor"));
+        let forward = mapped.forward.unwrap();
+        assert_eq!(forward.from_id.unwrap().get(), -1_000_000_000_005);
+        assert_eq!(forward.from_name.as_deref(), Some("Origin"));
+        assert_eq!(forward.date.unwrap().timestamp(), 1_600_000_000);
     }
 }

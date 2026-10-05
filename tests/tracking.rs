@@ -67,6 +67,8 @@ fn all_chats() -> Vec<Chat> {
 fn message(chat_id: ChatId, id: i64) -> Message {
     let timestamp = DateTime::<Utc>::from_timestamp(1_700_000_000 + id, 0).unwrap();
     Message {
+        post_author: None,
+        forward: None,
         id: MessageId::new(id).unwrap(),
         chat_id,
         sender_id: Some(SenderId::from_telegram(SenderKind::User, 5).unwrap()),
@@ -209,6 +211,7 @@ async fn track_and_untrack_are_idempotent_keep_messages_and_survive_refresh() {
             filters: MessageFilters {
                 chat_id: Some(private()),
                 sender_id: None,
+                post_author: None,
                 time_range: TimeRange::new(None, None).unwrap(),
                 include_deleted: false,
             },

@@ -542,6 +542,8 @@ pub fn generate(count: usize, seed: u64) -> Corpus {
 fn to_message(m: &GenMessage, text: &str, edited_at: Option<i64>) -> Message {
     let at = DateTime::from_timestamp(m.ts, 0).unwrap();
     Message {
+        post_author: None,
+        forward: None,
         id: MessageId::new(m.id).unwrap(),
         chat_id: ChatId::from_marked(m.chat).unwrap(),
         sender_id: Some(SenderId::from_marked(m.sender).unwrap()),

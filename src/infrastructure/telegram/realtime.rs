@@ -60,6 +60,7 @@ struct NormalizedBatch {
     account_deletions: Vec<AccountDeletion>,
     seen_chats: HashSet<i64>,
     seen_senders: HashSet<i64>,
+    account: Option<crate::domain::SenderId>,
 }
 
 impl NormalizedBatch {
@@ -158,7 +159,7 @@ impl NormalizedBatch {
         if let Some(sender_id) = message.sender_id() {
             self.include_sender(mapper::map_sender(sender_id, message.sender())?);
         }
-        let mapped = mapper::map_message(message, collected_at)?;
+        let mapped = mapper::map_message(message, collected_at, self.account)?;
         self.records.push(IngestRecord {
             event: if edited {
                 MessageEvent::Updated(mapped)
@@ -353,6 +354,7 @@ impl RealtimeConnection for AdapterConnection {
             &self.sink,
             self.scope.as_ref(),
             cancel,
+            self.adapter.account_id(),
         )
         .await
         {
@@ -479,13 +481,17 @@ async fn process_stream(
     sink: &IngestSink,
     scope: &dyn TrackingScope,
     cancellation: CancellationToken,
+    account: Option<crate::domain::SenderId>,
 ) -> Result<(), RealtimeError> {
     loop {
         let first = tokio::select! {
             _ = cancellation.cancelled() => return Ok(()),
             result = stream.next_raw() => result.map_err(map_stream_error)?,
         };
-        let mut batch = NormalizedBatch::default();
+        let mut batch = NormalizedBatch {
+            account,
+            ..NormalizedBatch::default()
+        };
         batch.add_update(client, first.0, first.1, first.2)?;
 
         // Grammers can expand one Updates container or difference into several updates.
@@ -712,7 +718,14 @@ mod tests {
         let (sink, worker) = ingestion_worker::spawn(writer.clone(), 1);
         let cancellation = CancellationToken::new();
         let scope = in_scope();
-        let process = process_stream(&client, &mut stream, &sink, &scope, cancellation.clone());
+        let process = process_stream(
+            &client,
+            &mut stream,
+            &sink,
+            &scope,
+            cancellation.clone(),
+            None,
+        );
         let observe = async {
             writer.entered.acquire().await.unwrap().forget();
             assert_eq!(session.updates_state().await.unwrap(), Default::default());
@@ -827,6 +840,7 @@ mod tests {
                 &sink,
                 &scope,
                 CancellationToken::new(),
+                None,
             );
             tokio::pin!(process);
             tokio::select! {
@@ -860,6 +874,7 @@ mod tests {
             &sink,
             &in_scope(),
             CancellationToken::new(),
+            None,
         )
         .await;
         assert!(matches!(
@@ -918,6 +933,7 @@ mod tests {
             &sink,
             &FixedScope::default(),
             CancellationToken::new(),
+            None,
         )
         .await;
         assert!(matches!(

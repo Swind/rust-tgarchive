@@ -92,3 +92,16 @@ mark { background: var(--mark); color: inherit; }
 .chat-progress li { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; border-top: 1px solid var(--border); padding: 4px 0; }
 .note { color: var(--muted); }
 @media (max-width: 720px) { .split { flex-direction: column; } .sidebar { width: auto; max-height: 40%; } }
+.sender-link { color: inherit; text-decoration: none; cursor: pointer; }
+.sender-link:hover { text-decoration: underline; color: var(--accent); }
+.forward, .post-author { margin: 2px 0; }
+.sender-row { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; padding: 8px; border-bottom: 1px solid var(--border); }
+.sender-row .sender-main { flex: 1; min-width: 180px; }
+.sender-row .num { min-width: 70px; text-align: right; }
+.sender-stats { display: flex; gap: 16px; flex-wrap: wrap; margin: 6px 0; }
+.sender-chats { list-style: none; padding: 0; margin: 6px 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.sender-chats button[aria-pressed='true'] { background: var(--accent); color: #fff; }
+.combo { position: relative; display: inline-block; }
+.combo-list { position: absolute; z-index: 5; left: 0; top: 100%; min-width: 220px; margin: 2px 0 0; padding: 0; list-style: none; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; max-height: 260px; overflow: auto; }
+.combo-list button { display: block; width: 100%; text-align: left; border: none; border-radius: 0; background: none; }
+.combo-list button:hover, .combo-list button:focus { background: var(--bg2); }

@@ -50,6 +50,7 @@ export default function Layout() {
         <nav aria-label="主選單">
           <NavLink to="/chats">對話</NavLink>
           <NavLink to="/search">搜尋</NavLink>
+          <NavLink to="/senders">使用者</NavLink>
           <NavLink to="/sync">同步</NavLink>
           <NavLink to="/status">狀態</NavLink>
         </nav>

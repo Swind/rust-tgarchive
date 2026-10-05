@@ -134,7 +134,14 @@ pub async fn run() -> Result<(), CliError> {
                 backfill_after_track(chat_id, output).await?;
             }
         }
-        PreparedInvocation::Sync { scope, output } => sync_archive(scope, output).await?,
+        PreparedInvocation::Sync {
+            scope,
+            output,
+            refetch,
+        } => sync_archive(scope, output, refetch).await?,
+        PreparedInvocation::RepairSenders { dry_run, output } => {
+            repair_senders(dry_run, output).await?
+        }
     }
     Ok(())
 }
@@ -334,6 +341,26 @@ async fn open_authorized_telegram(
     }
 }
 
+/// Binds the archive to the authenticated account and stores its profile as a sender, so the
+/// account's own messages show by name.
+async fn bind_account(store: &SqliteStore, adapter: &TelegramAdapter) -> Result<(), CliError> {
+    let account = adapter
+        .authenticated_account()
+        .await
+        .map_err(|_| CliError::Telegram("could not resolve Telegram account identity".into()))?;
+    store
+        .bind_telegram_account(account.id)
+        .await
+        .map_err(db_error)?;
+    store
+        .write_batch(crate::application::IngestBatch {
+            senders: vec![account],
+            ..Default::default()
+        })
+        .await
+        .map_err(db_error)
+}
+
 async fn refresh_with_adapter(
     database_url: &str,
     adapter: Arc<TelegramAdapter>,
@@ -344,13 +371,7 @@ async fn refresh_with_adapter(
             .map_err(|error| CliError::Database(error.to_string()))?,
     );
     let result = async {
-        let account_id = adapter.authenticated_account_id().await.map_err(|_| {
-            CliError::Telegram("could not resolve Telegram account identity".into())
-        })?;
-        store
-            .bind_telegram_account(account_id)
-            .await
-            .map_err(|error| CliError::Database(error.to_string()))?;
+        bind_account(&store, &adapter).await?;
         let application = Application::new(
             store.clone(),
             store.clone(),
@@ -465,13 +486,7 @@ async fn serve_with_telegram(
     );
     warn_if_index_not_ready(&store).await;
     let result = async {
-        let account_id = adapter.authenticated_account_id().await.map_err(|_| {
-            CliError::Telegram("could not resolve Telegram account identity".into())
-        })?;
-        store
-            .bind_telegram_account(account_id)
-            .await
-            .map_err(|error| CliError::Database(error.to_string()))?;
+        bind_account(&store, &adapter).await?;
         let mut runtime = start_sync_runtime(store.clone(), adapter.clone()).await?;
         let collector =
             CollectorStatusHandle::new(ComponentStatus::new(ComponentState::Starting, None));
@@ -772,10 +787,14 @@ async fn backfill_after_track(
             chat_id.get()
         )));
     }
-    sync_archive(SyncScope::Chat(chat_id), output).await
+    sync_archive(SyncScope::Chat(chat_id), output, false).await
 }
 
-async fn sync_archive(scope: SyncScope, output: OutputFormat) -> Result<(), CliError> {
+async fn sync_archive(
+    scope: SyncScope,
+    output: OutputFormat,
+    refetch: bool,
+) -> Result<(), CliError> {
     SyncPacing::from_env().map_err(CliError::InvalidInput)?;
     let config = Config::load(None);
     if !sync_scope_allowed(&config.database_url, &scope).await? {
@@ -789,7 +808,7 @@ async fn sync_archive(scope: SyncScope, output: OutputFormat) -> Result<(), CliE
     let telegram = Config::telegram().map_err(CliError::InvalidInput)?;
     SyncPacing::from_env().map_err(CliError::InvalidInput)?;
     let adapter = open_authorized_telegram(&telegram).await?;
-    let result = sync_with_adapter(&config.database_url, adapter.clone(), scope).await;
+    let result = sync_with_adapter(&config.database_url, adapter.clone(), scope, refetch).await;
     let shutdown = adapter
         .shutdown()
         .await
@@ -811,6 +830,7 @@ async fn sync_with_adapter(
     database_url: &str,
     adapter: Arc<TelegramAdapter>,
     scope: SyncScope,
+    refetch: bool,
 ) -> Result<SyncJob, CliError> {
     let store = Arc::new(
         SqliteStore::connect(database_url)
@@ -818,13 +838,7 @@ async fn sync_with_adapter(
             .map_err(|error| CliError::Database(error.to_string()))?,
     );
     let setup = async {
-        let account_id = adapter.authenticated_account_id().await.map_err(|_| {
-            CliError::Telegram("could not resolve Telegram account identity".into())
-        })?;
-        store
-            .bind_telegram_account(account_id)
-            .await
-            .map_err(|error| CliError::Database(error.to_string()))?;
+        bind_account(&store, &adapter).await?;
         Ok::<(), CliError>(())
     }
     .await;
@@ -840,7 +854,7 @@ async fn sync_with_adapter(
         }
     };
     let result = async {
-        let job = runtime.coordinator.submit(scope).await?;
+        let job = runtime.coordinator.submit_with(scope, refetch).await?;
         runtime
             .coordinator
             .wait_job(&job.id)
@@ -853,6 +867,26 @@ async fn sync_with_adapter(
     let job = result?;
     stopped?;
     Ok(job)
+}
+
+/// `repair senders`: local-only; `--dry-run` opens the database read-only.
+async fn repair_senders(dry_run: bool, output: OutputFormat) -> Result<(), CliError> {
+    let config = Config::load(None);
+    let store = if dry_run {
+        SqliteStore::open_existing_readonly(&config.database_url)
+            .await
+            .map(Arc::new)
+            .map_err(db_error)?
+    } else {
+        open_existing_store(&config.database_url).await?
+    };
+    let report = store.repair_senders(dry_run, 1000).await;
+    store.close().await;
+    print_output(crate::interface::cli::render_sender_repair(
+        output,
+        &report.map_err(db_error)?,
+    )?);
+    Ok(())
 }
 
 fn print_output(output: String) {

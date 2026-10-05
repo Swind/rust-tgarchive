@@ -165,6 +165,7 @@ test('messages from the chat itself fall back to the chat title', async ({ page 
   await expect(articles(page)).toHaveCount(2);
   expect(new Set(await articles(page).locator('header strong').allTextContents())).toEqual(new Set(['Telegram']));
   await page.goto(`/chats/${CHAT.news}`);
-  await expect(articles(page)).toHaveCount(12);
-  expect(new Set(await articles(page).locator('header strong').allTextContents())).toEqual(new Set(['Daily News 每日快訊']));
+  await expect(articles(page)).toHaveCount(17);
+  // Two legacy rows have no sender at all.
+  expect(new Set(await articles(page).locator('header strong').allTextContents())).toEqual(new Set(['Daily News 每日快訊', '未知']));
 });

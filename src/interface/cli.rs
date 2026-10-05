@@ -8,9 +8,11 @@ use crate::{
     application::services::Application,
     application::{
         ApplicationError, ListMessagesQuery, MessageFilters, MessagePage, MessageView, PageSize,
-        SearchMessagesQuery, SearchSort, SyncJob, SyncScope, TimeRange, ValidationError,
+        SearchMessagesQuery, SearchSort, SenderDetail, SenderProfile, SenderQuery, SenderSort,
+        SyncJob, SyncScope, TimeRange, ValidationError,
     },
-    domain::{Chat, ChatId, IdError, MessageId, SenderId},
+    domain::{Chat, ChatId, ChatKind, IdError, MessageId, SenderId, SenderKind},
+    infrastructure::persistence::sqlite::SenderRepairReport,
 };
 
 #[derive(Debug, Parser)]
@@ -46,6 +48,16 @@ pub enum Command {
         #[command(subcommand)]
         command: MessagesCommand,
     },
+    /// Senders (users, channels): search and inspect
+    Senders {
+        #[command(subcommand)]
+        command: SendersCommand,
+    },
+    /// Local data repairs (no Telegram needed)
+    Repair {
+        #[command(subcommand)]
+        command: RepairCommand,
+    },
     Status,
     Serve {
         #[arg(long)]
@@ -74,6 +86,47 @@ pub enum Command {
         #[command(subcommand)]
         command: SearchCommand,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SendersCommand {
+    /// Find senders by display name / @username substring (Chinese substrings work) or ID
+    Search {
+        /// Text, `@username` (exact) or numeric ID
+        text: String,
+        #[arg(long, value_enum, default_value = "messages")]
+        sort: SenderSortArg,
+        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(1..=1000))]
+        limit: u16,
+        /// Count deleted messages too
+        #[arg(long)]
+        include_deleted: bool,
+    },
+    /// Show one sender with its per-chat breakdown
+    Get {
+        /// Numeric ID, `@username`, a unique display-name substring, or `me` (the bound account)
+        sender: String,
+        #[arg(long)]
+        include_deleted: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RepairCommand {
+    /// Fill NULL message senders that the archive itself can answer (channel posts get the
+    /// channel). Private chats are never guessed: re-fetch them with `sync chat <ID> --refetch`.
+    Senders {
+        /// Only report what would change
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SenderSortArg {
+    Messages,
+    LastMessage,
+    Name,
 }
 
 #[derive(Debug, Subcommand)]
@@ -140,6 +193,10 @@ pub enum SyncCommand {
     Chat {
         #[arg(allow_hyphen_values = true)]
         chat_id: i64,
+        /// Re-download the whole history and fill NULL sender/post-author/forward/attachment
+        /// metadata of archived messages (text and edits are untouched). Resumable.
+        #[arg(long)]
+        refetch: bool,
     },
     All,
 }
@@ -174,6 +231,13 @@ pub struct MessageFilterArgs {
     pub chat_id: Option<i64>,
     #[arg(long, allow_hyphen_values = true)]
     pub sender_id: Option<i64>,
+    /// Sender: numeric ID, `@username`, a display-name substring matching exactly one sender, or
+    /// `me` (the bound account). Ambiguous names list the candidates and fail.
+    #[arg(long, conflicts_with = "sender_id")]
+    pub sender: Option<String>,
+    /// Exact channel post signature.
+    #[arg(long)]
+    pub post_author: Option<String>,
     #[arg(long)]
     pub before: Option<String>,
     #[arg(long)]
@@ -211,6 +275,10 @@ pub enum CliError {
     Telegram(String),
     #[error("chat {0} not found; run `chats refresh` to fetch your chats from Telegram first")]
     ChatNotFound(i64),
+    #[error("no sender matches {0:?}")]
+    SenderNotFound(String),
+    #[error("{0}")]
+    AmbiguousSender(String),
     #[error("sync job failed: {0}")]
     SyncFailed(String),
     #[error("{0}")]
@@ -279,15 +347,25 @@ pub enum PreparedInvocation {
     Sync {
         scope: SyncScope,
         output: OutputFormat,
+        refetch: bool,
+    },
+    RepairSenders {
+        dry_run: bool,
+        output: OutputFormat,
     },
 }
 
 pub enum PreparedCommand {
-    ChatsList { tracked_only: bool },
+    ChatsList {
+        tracked_only: bool,
+    },
     ChatGet(ChatId),
-    MessagesList(ListMessagesQuery),
+    /// The optional text is a `--sender` reference resolved against the archive when run.
+    MessagesList(ListMessagesQuery, Option<String>),
     MessageGet(ChatId, MessageId, bool),
-    MessagesSearch(SearchMessagesQuery),
+    MessagesSearch(SearchMessagesQuery, Option<String>),
+    SendersSearch(SenderQuery),
+    SenderGet(String, bool),
     Status,
     SearchStatus,
 }
@@ -337,12 +415,21 @@ pub fn prepare(cli: Cli) -> Result<PreparedInvocation, CliError> {
             output,
         }),
         Command::Sync { command } => {
-            let scope = match command {
-                SyncCommand::Chat { chat_id } => SyncScope::Chat(ChatId::from_marked(chat_id)?),
-                SyncCommand::All => SyncScope::All,
+            let (scope, refetch) = match command {
+                SyncCommand::Chat { chat_id, refetch } => {
+                    (SyncScope::Chat(ChatId::from_marked(chat_id)?), refetch)
+                }
+                SyncCommand::All => (SyncScope::All, false),
             };
-            Ok(PreparedInvocation::Sync { scope, output })
+            Ok(PreparedInvocation::Sync {
+                scope,
+                output,
+                refetch,
+            })
         }
+        Command::Repair {
+            command: RepairCommand::Senders { dry_run },
+        } => Ok(PreparedInvocation::RepairSenders { dry_run, output }),
         command => Ok(PreparedInvocation::Query {
             output,
             command: prepare_query(command)?,
@@ -364,7 +451,10 @@ fn prepare_query(command: Command) -> Result<PreparedCommand, CliError> {
             }
         },
         Command::Messages { command } => match command {
-            MessagesCommand::List(args) => Ok(PreparedCommand::MessagesList(list_query(args)?)),
+            MessagesCommand::List(mut args) => {
+                let sender = args.sender.take();
+                Ok(PreparedCommand::MessagesList(list_query(args)?, sender))
+            }
             MessagesCommand::Get {
                 chat_id,
                 message_id,
@@ -377,15 +467,42 @@ fn prepare_query(command: Command) -> Result<PreparedCommand, CliError> {
             MessagesCommand::Search {
                 query,
                 sort,
-                filters,
-            } => Ok(PreparedCommand::MessagesSearch(search_query(
-                query, sort, filters,
-            )?)),
+                mut filters,
+            } => {
+                let sender = filters.sender.take();
+                Ok(PreparedCommand::MessagesSearch(
+                    search_query(query, sort, filters)?,
+                    sender,
+                ))
+            }
+        },
+        Command::Senders { command } => match command {
+            SendersCommand::Search {
+                text,
+                sort,
+                limit,
+                include_deleted,
+            } => Ok(PreparedCommand::SendersSearch(SenderQuery {
+                text: Some(text),
+                sort: match sort {
+                    SenderSortArg::Messages => SenderSort::Messages,
+                    SenderSortArg::LastMessage => SenderSort::LastMessage,
+                    SenderSortArg::Name => SenderSort::Name,
+                },
+                limit: PageSize::new(limit)?,
+                offset: 0,
+                include_deleted,
+            })),
+            SendersCommand::Get {
+                sender,
+                include_deleted,
+            } => Ok(PreparedCommand::SenderGet(sender, include_deleted)),
         },
         Command::Status => Ok(PreparedCommand::Status),
         Command::Serve { .. }
         | Command::Openapi { .. }
         | Command::Auth { .. }
+        | Command::Repair { .. }
         | Command::Sync { .. } => {
             unreachable!("non-query commands are handled during preparation")
         }
@@ -412,8 +529,20 @@ pub async fn execute_prepared(
                 Ok(human_chat(&chat))
             }
         }
-        PreparedCommand::MessagesList(query) => {
+        PreparedCommand::MessagesList(mut query, sender) => {
+            if let Some(sender) = sender {
+                query.filters.sender_id = Some(resolve_sender(app, &sender).await?);
+            }
             render_message_page(output, app.list_messages(query).await?)
+        }
+        PreparedCommand::SendersSearch(query) => {
+            let page = app.search_senders(query).await?;
+            render_senders(output, &page.items)
+        }
+        PreparedCommand::SenderGet(sender, include_deleted) => {
+            let id = resolve_sender(app, &sender).await?;
+            let detail = app.sender_detail(id, include_deleted).await?;
+            render_sender_detail(output, &detail)
         }
         PreparedCommand::MessageGet(chat_id, message_id, include_deleted) => {
             let message = app
@@ -425,7 +554,10 @@ pub async fn execute_prepared(
                 Ok(human_message(&message))
             }
         }
-        PreparedCommand::MessagesSearch(query) => {
+        PreparedCommand::MessagesSearch(mut query, sender) => {
+            if let Some(sender) = sender {
+                query.filters.sender_id = Some(resolve_sender(app, &sender).await?);
+            }
             render_message_page(output, app.search_messages(query).await?)
         }
         PreparedCommand::SearchStatus => {
@@ -523,6 +655,206 @@ pub fn render_sync_job(output: OutputFormat, job: &SyncJob) -> Result<String, Cl
     }
 }
 
+/// Resolves a `--sender` reference to exactly one sender; ambiguity lists the candidates.
+async fn resolve_sender(app: &Application, spec: &str) -> Result<SenderId, CliError> {
+    let spec = spec.trim();
+    if spec.eq_ignore_ascii_case("me") {
+        return app.bound_account().await?.ok_or_else(|| {
+            CliError::InvalidInput(
+                "the archive is not bound to a Telegram account yet (run a sync or `serve` once)"
+                    .into(),
+            )
+        });
+    }
+    if let Ok(id) = spec.parse::<i64>() {
+        return Ok(SenderId::from_marked(id)?);
+    }
+    let page = app
+        .search_senders(SenderQuery {
+            text: Some(spec.to_owned()),
+            sort: SenderSort::Messages,
+            limit: PageSize::new(20)?,
+            offset: 0,
+            include_deleted: true,
+        })
+        .await?;
+    match page.items.as_slice() {
+        [] => Err(CliError::SenderNotFound(spec.to_owned())),
+        [only] => Ok(only.id),
+        candidates => Err(CliError::AmbiguousSender(format!(
+            "sender {spec:?} is ambiguous; use one of these IDs:\n{}",
+            candidates
+                .iter()
+                .map(human_sender)
+                .collect::<Vec<_>>()
+                .join("\n")
+        ))),
+    }
+}
+
+fn sender_kind_name(kind: SenderKind) -> &'static str {
+    match kind {
+        SenderKind::User => "user",
+        SenderKind::Chat => "chat",
+        SenderKind::Channel => "channel",
+        SenderKind::Unknown => "unknown",
+    }
+}
+
+fn human_sender(sender: &SenderProfile) -> String {
+    format!(
+        "{}\t{}\t{}\t{}\t{} messages\t{} chats\t{}{}",
+        sender.id.get(),
+        sender_kind_name(sender.kind),
+        sender.display_name.as_deref().unwrap_or(""),
+        sender
+            .username
+            .as_deref()
+            .map(|name| format!("@{name}"))
+            .unwrap_or_default(),
+        sender.message_count,
+        sender.chat_count,
+        sender
+            .last_message_at
+            .map(|time| time.to_rfc3339())
+            .unwrap_or_default(),
+        if sender.is_self { "\tself" } else { "" }
+    )
+}
+
+#[derive(Serialize)]
+struct SenderOutput<'a> {
+    id: i64,
+    kind: &'static str,
+    display_name: &'a Option<String>,
+    username: &'a Option<String>,
+    message_count: u64,
+    chat_count: u64,
+    first_message_at: Option<DateTime<Utc>>,
+    last_message_at: Option<DateTime<Utc>>,
+    is_self: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chats: Option<Vec<SenderChatOutput<'a>>>,
+}
+
+#[derive(Serialize)]
+struct SenderChatOutput<'a> {
+    chat_id: i64,
+    title: &'a Option<String>,
+    kind: String,
+    message_count: u64,
+    last_message_at: Option<DateTime<Utc>>,
+}
+
+fn sender_output<'a>(
+    sender: &'a SenderProfile,
+    chats: Option<Vec<SenderChatOutput<'a>>>,
+) -> SenderOutput<'a> {
+    SenderOutput {
+        id: sender.id.get(),
+        kind: sender_kind_name(sender.kind),
+        display_name: &sender.display_name,
+        username: &sender.username,
+        message_count: sender.message_count,
+        chat_count: sender.chat_count,
+        first_message_at: sender.first_message_at,
+        last_message_at: sender.last_message_at,
+        is_self: sender.is_self,
+        chats,
+    }
+}
+
+fn render_senders(output: OutputFormat, senders: &[SenderProfile]) -> Result<String, CliError> {
+    if output == OutputFormat::Json {
+        json(
+            &senders
+                .iter()
+                .map(|s| sender_output(s, None))
+                .collect::<Vec<_>>(),
+        )
+    } else if senders.is_empty() {
+        Ok("No senders.".into())
+    } else {
+        Ok(senders
+            .iter()
+            .map(human_sender)
+            .collect::<Vec<_>>()
+            .join("\n"))
+    }
+}
+
+fn render_sender_detail(output: OutputFormat, detail: &SenderDetail) -> Result<String, CliError> {
+    let kind = |kind: ChatKind| format!("{kind:?}").to_lowercase();
+    if output == OutputFormat::Json {
+        let chats = detail
+            .chats
+            .iter()
+            .map(|chat| SenderChatOutput {
+                chat_id: chat.chat_id.get(),
+                title: &chat.title,
+                kind: kind(chat.kind),
+                message_count: chat.message_count,
+                last_message_at: chat.last_message_at,
+            })
+            .collect();
+        json(&sender_output(&detail.profile, Some(chats)))
+    } else {
+        let mut lines = vec![human_sender(&detail.profile)];
+        lines.extend(detail.chats.iter().map(|chat| {
+            format!(
+                "  chat {}\t{}\t{}\t{} messages\t{}",
+                chat.chat_id.get(),
+                kind(chat.kind),
+                chat.title.as_deref().unwrap_or(""),
+                chat.message_count,
+                chat.last_message_at
+                    .map(|time| time.to_rfc3339())
+                    .unwrap_or_default()
+            )
+        }));
+        Ok(lines.join("\n"))
+    }
+}
+
+pub fn render_sender_repair(
+    output: OutputFormat,
+    report: &SenderRepairReport,
+) -> Result<String, CliError> {
+    if output == OutputFormat::Json {
+        return json(report);
+    }
+    let verb = if report.dry_run { "would fix" } else { "fixed" };
+    let mut lines = vec![format!(
+        "rule channel_post (sender = the channel): {verb} {} rows in {} chats",
+        report.channel_posts_total,
+        report.channel_posts.len()
+    )];
+    lines.extend(report.channel_posts.iter().map(|chat| {
+        format!(
+            "  {}\t{}\t{} rows",
+            chat.chat_id,
+            chat.title.as_deref().unwrap_or(""),
+            chat.rows
+        )
+    }));
+    lines.push(format!(
+        "still without sender: {} rows in {} chats (private chats cannot be told apart without \
+         data; re-fetch them with `tgarchive sync chat <ID> --refetch`)",
+        report.unresolved_total,
+        report.unresolved.len()
+    ));
+    lines.extend(report.unresolved.iter().map(|chat| {
+        format!(
+            "  {}\t{}\t{}\t{} rows",
+            chat.chat_id,
+            chat.kind,
+            chat.title.as_deref().unwrap_or(""),
+            chat.rows
+        )
+    }));
+    Ok(lines.join("\n"))
+}
+
 fn list_query(args: MessageFilterArgs) -> Result<ListMessagesQuery, CliError> {
     let (filters, before, after, page_size) = convert_filters(args)?;
     let query = ListMessagesQuery {
@@ -585,6 +917,7 @@ fn convert_filters(
     let filters = MessageFilters {
         chat_id: args.chat_id.map(ChatId::from_marked).transpose()?,
         sender_id: args.sender_id.map(SenderId::from_marked).transpose()?,
+        post_author: args.post_author,
         time_range: TimeRange::new(args.from, args.to)?,
         include_deleted: args.include_deleted,
     };

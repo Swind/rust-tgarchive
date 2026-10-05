@@ -36,6 +36,8 @@ fn chat(id: i64) -> Chat {
 fn message(chat_id: ChatId, id: i64, text: &str) -> Message {
     let time = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap();
     Message {
+        post_author: None,
+        forward: None,
         id: MessageId::new(id).unwrap(),
         chat_id,
         sender_id: None,
@@ -70,6 +72,7 @@ fn filters() -> MessageFilters {
     MessageFilters {
         chat_id: None,
         sender_id: None,
+        post_author: None,
         time_range: TimeRange::new(None, None).unwrap(),
         include_deleted: false,
     }
@@ -438,6 +441,7 @@ async fn fractional_time_filters_and_cursors_match_second_precision_storage() {
         filters: MessageFilters {
             chat_id: None,
             sender_id: None,
+            post_author: None,
             time_range: TimeRange::new(Some(half), None).unwrap(),
             include_deleted: false,
         },
@@ -459,6 +463,7 @@ async fn fractional_time_filters_and_cursors_match_second_precision_storage() {
         filters: MessageFilters {
             chat_id: None,
             sender_id: None,
+            post_author: None,
             time_range: TimeRange::new(None, Some(half)).unwrap(),
             include_deleted: false,
         },

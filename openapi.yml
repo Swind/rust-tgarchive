@@ -121,6 +121,12 @@ paths:
         schema:
           type: integer
           format: int64
+      - name: post_author
+        in: query
+        description: Exact channel post signature.
+        required: false
+        schema:
+          type: string
       - name: from
         in: query
         required: false
@@ -353,6 +359,14 @@ paths:
         schema:
           type: integer
           format: int64
+      - name: refetch
+        in: query
+        description: |-
+          Re-download the whole history and backfill NULL sender/post-author/forward/attachment
+          metadata of archived messages (text, versions and deletions are untouched). Resumable.
+        required: false
+        schema:
+          type: boolean
       responses:
         '202':
           description: ''
@@ -483,6 +497,12 @@ paths:
         schema:
           type: integer
           format: int64
+      - name: post_author
+        in: query
+        description: Exact channel post signature.
+        required: false
+        schema:
+          type: string
       - name: from
         in: query
         required: false
@@ -566,6 +586,12 @@ paths:
         schema:
           type: integer
           format: int64
+      - name: post_author
+        in: query
+        description: Exact channel post signature.
+        required: false
+        schema:
+          type: string
       - name: from
         in: query
         required: false
@@ -616,6 +642,109 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/MessagePageDto'
+        '400':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /api/v1/senders:
+    get:
+      tags:
+      - routes
+      operationId: list_senders
+      parameters:
+      - name: q
+        in: query
+        description: |-
+          Substring of display name or username (NFKC + case-insensitive, Chinese substrings work),
+          `@username` (exact) or a numeric sender ID.
+        required: false
+        schema:
+          type: string
+      - name: sort
+        in: query
+        description: Order; default `messages`.
+        required: false
+        schema:
+          $ref: '#/components/schemas/SenderSortDto'
+      - name: limit
+        in: query
+        description: Page size (1-1000, default 100).
+        required: false
+        schema:
+          type: integer
+          format: int32
+          minimum: 0
+      - name: cursor
+        in: query
+        description: Cursor from the previous page's `next_cursor`.
+        required: false
+        schema:
+          type: string
+      - name: include_deleted
+        in: query
+        description: Count deleted messages too.
+        required: false
+        schema:
+          type: boolean
+      responses:
+        '200':
+          description: Senders with message counts, chat counts and activity range
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SenderPageDto'
+        '400':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /api/v1/senders/{sender_id}:
+    get:
+      tags:
+      - routes
+      operationId: get_sender
+      parameters:
+      - name: sender_id
+        in: path
+        description: Marked sender ID
+        required: true
+        schema:
+          type: integer
+          format: int64
+      - name: include_deleted
+        in: query
+        description: Count deleted messages too.
+        required: false
+        schema:
+          type: boolean
+      responses:
+        '200':
+          description: Sender with per-chat breakdown
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SenderDetailDto'
         '400':
           description: ''
           content:
@@ -916,6 +1045,26 @@ components:
       properties:
         error:
           $ref: '#/components/schemas/ErrorDetail'
+    ForwardDto:
+      type: object
+      properties:
+        date:
+          type:
+          - string
+          - 'null'
+          format: date-time
+          description: When the original message was sent.
+        from_id:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: Original author or channel (marked ID) when Telegram exposes it.
+        from_name:
+          type:
+          - string
+          - 'null'
+          description: Name of the original author (also set for users who hide their account).
     HealthDto:
       type: object
       required:
@@ -988,11 +1137,21 @@ components:
           - string
           - 'null'
           format: date-time
+        forward:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/ForwardDto'
+            description: Origin of a forwarded message; null when the message was not forwarded.
         id:
           type: integer
           format: int64
         is_deleted:
           type: boolean
+        post_author:
+          type:
+          - string
+          - 'null'
+          description: Channel post signature (`post_author`); not the sender.
         reply_to:
           type:
           - integer
@@ -1100,6 +1259,79 @@ components:
       enum:
       - relevance
       - time
+    SenderChatDto:
+      type: object
+      required:
+      - chat_id
+      - kind
+      - message_count
+      properties:
+        chat_id:
+          type: integer
+          format: int64
+        kind:
+          $ref: '#/components/schemas/ChatKindDto'
+        last_message_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        message_count:
+          type: integer
+          format: int64
+          minimum: 0
+        title:
+          type:
+          - string
+          - 'null'
+    SenderDetailDto:
+      type: object
+      description: A sender plus its per-chat breakdown (most messages first).
+      required:
+      - id
+      - kind
+      - message_count
+      - chat_count
+      - is_self
+      - chats
+      properties:
+        chat_count:
+          type: integer
+          format: int64
+          minimum: 0
+        chats:
+          type: array
+          items:
+            $ref: '#/components/schemas/SenderChatDto'
+        display_name:
+          type:
+          - string
+          - 'null'
+        first_message_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        id:
+          type: integer
+          format: int64
+        is_self:
+          type: boolean
+        kind:
+          $ref: '#/components/schemas/SenderKindDto'
+        last_message_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        message_count:
+          type: integer
+          format: int64
+          minimum: 0
+        username:
+          type:
+          - string
+          - 'null'
     SenderDto:
       type: object
       required:
@@ -1117,6 +1349,81 @@ components:
           type:
           - string
           - 'null'
+    SenderKindDto:
+      type: string
+      enum:
+      - user
+      - chat
+      - channel
+      - unknown
+    SenderPageDto:
+      type: object
+      required:
+      - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/SenderProfileDto'
+        next_cursor:
+          type:
+          - string
+          - 'null'
+          description: Opaque cursor; pass it back as `cursor` to get the next page.
+    SenderProfileDto:
+      type: object
+      description: A sender with archive-wide aggregates.
+      required:
+      - id
+      - kind
+      - message_count
+      - chat_count
+      - is_self
+      properties:
+        chat_count:
+          type: integer
+          format: int64
+          description: Chats in which the sender has messages.
+          minimum: 0
+        display_name:
+          type:
+          - string
+          - 'null'
+          description: Profile name; for a channel posting as itself, the channel title.
+        first_message_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        id:
+          type: integer
+          format: int64
+        is_self:
+          type: boolean
+          description: The Telegram account this archive is bound to.
+        kind:
+          $ref: '#/components/schemas/SenderKindDto'
+        last_message_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        message_count:
+          type: integer
+          format: int64
+          description: Messages by this sender (deleted ones only with `include_deleted=true`).
+          minimum: 0
+        username:
+          type:
+          - string
+          - 'null'
+    SenderSortDto:
+      type: string
+      description: Sort order of `GET /senders`.
+      enum:
+      - messages
+      - last_message
+      - name
     SenderSummaryDto:
       type: object
       required:

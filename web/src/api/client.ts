@@ -12,6 +12,10 @@ export type Status = S['StatusDto'];
 export type SyncJob = S['SyncJobDto'];
 export type TrackResult = S['TrackChatDto'];
 export type Attachment = S['AttachmentDto'];
+export type SenderProfile = S['SenderProfileDto'];
+export type SenderPage = S['SenderPageDto'];
+export type SenderDetail = S['SenderDetailDto'];
+export type SenderSort = S['SenderSortDto'];
 
 export class ApiError extends Error {
   constructor(
@@ -74,10 +78,15 @@ export const api = {
   track: (id: number, backfill: boolean) =>
     request<TrackResult>('PUT', `${chatPath(id)}/tracking`, { backfill: backfill || undefined }),
   untrack: (id: number) => request<Chat>('DELETE', `${chatPath(id)}/tracking`),
-  syncChat: (id: number) => request<SyncJob>('POST', `${chatPath(id)}/sync`),
+  syncChat: (id: number, refetch?: boolean) =>
+    request<SyncJob>('POST', `${chatPath(id)}/sync`, { refetch: refetch || undefined }),
   syncAll: () => request<SyncJob>('POST', '/api/v1/sync'),
   syncJob: (id: string) => request<SyncJob>('GET', `/api/v1/sync/jobs/${enc(id)}`),
   senders: (id: number) => request<SenderSummary[]>('GET', `${chatPath(id)}/senders`, { limit: 1000 }),
+  senderList: (query: Query) => request<SenderPage>('GET', '/api/v1/senders', query),
+  sender: (id: number, includeDeleted?: boolean) =>
+    request<SenderDetail>('GET', `/api/v1/senders/${id}`, { include_deleted: includeDeleted || undefined }),
+  allMessages: (query: Query) => request<MessagePage>('GET', '/api/v1/messages', query),
   messages: (id: number, query: Query) => request<MessagePage>('GET', `${chatPath(id)}/messages`, query),
   context: (id: number, mid: number, query: Query) =>
     request<MessageContext>('GET', `${chatPath(id)}/messages/${mid}/context`, query),

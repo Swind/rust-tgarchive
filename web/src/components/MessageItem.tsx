@@ -2,6 +2,7 @@ import { Link } from 'react-router-dom';
 import type { Message } from '../api/client';
 import { formatDateTime, formatSize, formatTime } from '../lib/format';
 import { highlight } from '../lib/highlight';
+import SenderLink from './SenderLink';
 
 export function Highlighted({ text, query }: { text: string; query?: string }) {
   if (!query) return <>{text}</>;
@@ -19,6 +20,11 @@ export function senderName(m: Message, chatTitle?: string | null): string {
   if (m.sender?.username) return `@${m.sender.username}`;
   if (id != null && id === m.chat_id && chatTitle) return chatTitle;
   return id != null ? `未知 (${id})` : '未知';
+}
+
+export function forwardName(f: NonNullable<Message['forward']>): string {
+  if (f.from_name) return f.from_name;
+  return f.from_id != null ? `使用者 ${f.from_id}` : '未知來源';
 }
 
 export default function MessageItem({
@@ -41,8 +47,14 @@ export default function MessageItem({
       aria-current={anchor ? 'true' : undefined}
     >
       <header>
-        {showChat && <span className="chat-title">{showChat}</span>}
-        <strong>{senderName(m, chatTitle)}</strong>
+        {showChat && (
+          <Link className="chat-title" to={`/chats/${m.chat_id}?message=${m.id}${m.is_deleted ? '&deleted=1' : ''}`}>
+            {showChat}
+          </Link>
+        )}
+        <strong>
+          <SenderLink id={m.sender?.id ?? m.sender_id}>{senderName(m, chatTitle)}</SenderLink>
+        </strong>
         <time dateTime={m.timestamp} title={formatDateTime(m.timestamp)}>
           {formatTime(m.timestamp)}
         </time>
@@ -58,11 +70,18 @@ export default function MessageItem({
           </Link>
         )}
       </header>
+      {m.forward && (
+        <p className="forward muted small">
+          轉發自 {forwardName(m.forward)}
+          {m.forward.date && <> · {formatDateTime(m.forward.date)}</>}
+        </p>
+      )}
       {m.text && (
         <p className="text">
           <Highlighted text={m.text} query={query} />
         </p>
       )}
+      {m.post_author && <p className="post-author muted small">— {m.post_author}</p>}
       {!m.text && m.attachments.length === 0 && <p className="placeholder muted">（系統訊息或無文字內容）</p>}
       {m.attachments.length > 0 && (
         <ul className="chips">

@@ -77,7 +77,8 @@ impl TelegramGateway for TelegramAdapter {
                     senders.push(sender);
                 }
             }
-            let mapped = mapper::map_message(message, collected_at).map_err(map_mapping_error)?;
+            let mapped = mapper::map_message(message, collected_at, self.account_id())
+                .map_err(map_mapping_error)?;
             records.push(IngestRecord {
                 event: MessageEvent::Created(mapped),
                 source: MessageSource::History,

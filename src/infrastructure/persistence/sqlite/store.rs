@@ -6,13 +6,13 @@ use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool, Transaction, sqlite::SqliteRow
 use crate::{
     application::{
         ArchiveWriter, ChatCheckpoint, ChatRepository, ChatSort, ChatStats, ChatSummary,
-        IngestBatch, MessageRepository, MessageView, PageSize, RepositoryError, SenderInfo,
-        SenderSummary, SyncChatProgress, SyncJob, SyncJobState, SyncRepository, SyncScope,
-        TrackingScope,
+        IngestBatch, MessageRepository, MessageSource, MessageView, PageSize, RefetchCheckpoint,
+        RepositoryError, SenderDetail, SenderInfo, SenderPage, SenderQuery, SenderSummary,
+        SyncChatProgress, SyncJob, SyncJobState, SyncRepository, SyncScope, TrackingScope,
     },
     domain::{
-        Attachment, AttachmentKind, Chat, ChatId, ChatKind, Message, MessageEvent, MessageId,
-        Sender, SenderId, SenderKind,
+        Attachment, AttachmentKind, Chat, ChatId, ChatKind, Forward, Message, MessageEvent,
+        MessageId, Sender, SenderId, SenderKind,
     },
 };
 
@@ -27,6 +27,8 @@ use crate::infrastructure::search::{SearchTokenizer, default_tokenizer, make_sni
 pub struct SqliteStore {
     pub(super) pool: SqlitePool,
     pub(super) tokenizer: Arc<dyn SearchTokenizer>,
+    /// Read-only database opened without migrating: lacks the 0007 columns.
+    pub(super) legacy_schema: bool,
 }
 
 impl SqliteStore {
@@ -34,6 +36,7 @@ impl SqliteStore {
         Self {
             pool,
             tokenizer: default_tokenizer(),
+            legacy_schema: false,
         }
     }
 
@@ -93,7 +96,14 @@ impl SqliteStore {
 
 impl SqliteStore {
     pub async fn open_existing_readonly(database_url: &str) -> Result<Self, RepositoryError> {
-        Ok(Self::with_pool(open_readonly_pool(database_url).await?))
+        let mut store = Self::with_pool(open_readonly_pool(database_url).await?);
+        let columns: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name='post_author'",
+        )
+        .fetch_one(&store.pool)
+        .await?;
+        store.legacy_schema = columns == 0;
+        Ok(store)
     }
 }
 
@@ -103,11 +113,11 @@ impl From<sqlx::Error> for RepositoryError {
     }
 }
 
-fn invalid_data(error: impl std::fmt::Display) -> RepositoryError {
+pub(super) fn invalid_data(error: impl std::fmt::Display) -> RepositoryError {
     RepositoryError::InvalidData(error.to_string())
 }
 
-fn timestamp(seconds: i64) -> Result<DateTime<Utc>, RepositoryError> {
+pub(super) fn timestamp(seconds: i64) -> Result<DateTime<Utc>, RepositoryError> {
     DateTime::from_timestamp(seconds, 0).ok_or_else(|| invalid_data("timestamp is out of range"))
 }
 
@@ -135,7 +145,7 @@ fn chat_kind(value: ChatKind) -> &'static str {
     }
 }
 
-fn parse_chat_kind(value: &str) -> Result<ChatKind, RepositoryError> {
+pub(super) fn parse_chat_kind(value: &str) -> Result<ChatKind, RepositoryError> {
     match value {
         "private" => Ok(ChatKind::Private),
         "group" => Ok(ChatKind::Group),
@@ -289,6 +299,42 @@ async fn save_progress(
     Ok(())
 }
 
+/// Fills only NULL columns of an existing row (never text, versions or deletion state), so a
+/// re-fetch cannot overwrite or resurrect anything.
+async fn backfill_metadata(
+    tx: &mut Transaction<'_, Sqlite>,
+    row_id: i64,
+    message: &Message,
+) -> Result<(), RepositoryError> {
+    let forward = message.forward.as_ref();
+    let fwd_id = forward.and_then(|f| f.from_id).map(SenderId::get);
+    let fwd_name = forward.and_then(|f| f.from_name.clone());
+    let fwd_date = forward.and_then(|f| f.date).map(seconds);
+    sqlx::query("UPDATE messages SET sender_id=COALESCE(sender_id, ?1), post_author=COALESCE(post_author, ?2), fwd_from_id=COALESCE(fwd_from_id, ?3), fwd_from_name=COALESCE(fwd_from_name, ?4), fwd_date=COALESCE(fwd_date, ?5), updated_at=unixepoch() WHERE row_id=?6 AND ((sender_id IS NULL AND ?1 IS NOT NULL) OR (post_author IS NULL AND ?2 IS NOT NULL) OR (fwd_from_id IS NULL AND ?3 IS NOT NULL) OR (fwd_from_name IS NULL AND ?4 IS NOT NULL) OR (fwd_date IS NULL AND ?5 IS NOT NULL))")
+        .bind(message.sender_id.map(SenderId::get))
+        .bind(&message.post_author)
+        .bind(fwd_id)
+        .bind(fwd_name)
+        .bind(fwd_date)
+        .bind(row_id)
+        .execute(&mut **tx)
+        .await?;
+    for (ordinal, attachment) in message.attachments.iter().enumerate() {
+        let updated = sqlx::query("UPDATE attachments SET telegram_file_id=COALESCE(telegram_file_id, ?), mime_type=COALESCE(mime_type, ?), file_name=COALESCE(file_name, ?), size=COALESCE(size, ?) WHERE message_row_id=? AND ordinal=?")
+            .bind(&attachment.telegram_file_id).bind(&attachment.mime_type).bind(&attachment.file_name).bind(attachment.size)
+            .bind(row_id).bind(ordinal as i64)
+            .execute(&mut **tx).await?
+            .rows_affected();
+        if updated == 0 {
+            sqlx::query("INSERT INTO attachments(message_row_id, ordinal, kind, telegram_file_id, mime_type, file_name, size) VALUES (?, ?, ?, ?, ?, ?, ?)")
+                .bind(row_id).bind(ordinal as i64).bind(attachment_kind(attachment.kind))
+                .bind(&attachment.telegram_file_id).bind(&attachment.mime_type).bind(&attachment.file_name).bind(attachment.size)
+                .execute(&mut **tx).await?;
+        }
+    }
+    Ok(())
+}
+
 #[async_trait::async_trait]
 impl ArchiveWriter for SqliteStore {
     async fn write_batch(&self, batch: IngestBatch) -> Result<(), RepositoryError> {
@@ -350,12 +396,7 @@ impl ArchiveWriter for SqliteStore {
                 MessageEvent::Created(message) | MessageEvent::Updated(message) => {
                     ensure_chat(&mut tx, message.chat_id).await?;
                     let version = seconds(message.edited_at.unwrap_or(message.timestamp));
-                    let priority =
-                        if matches!(record.source, crate::application::MessageSource::Realtime) {
-                            1i64
-                        } else {
-                            0
-                        };
+                    let priority = i64::from(matches!(record.source, MessageSource::Realtime));
                     let previous: Option<(i64, Option<String>)> = sqlx::query_as(
                         "SELECT row_id, text FROM messages WHERE chat_id=? AND message_id=?",
                     )
@@ -363,10 +404,19 @@ impl ArchiveWriter for SqliteStore {
                     .bind(message.id.get())
                     .fetch_optional(&mut *tx)
                     .await?;
-                    let result = sqlx::query("INSERT INTO messages(chat_id, message_id, sender_id, timestamp, edited_at, collected_at, created_at, updated_at, text, reply_to, version_at, source_priority) SELECT ?, ?, ?, ?, ?, ?, unixepoch(), unixepoch(), ?, ?, ?, ? WHERE NOT EXISTS(SELECT 1 FROM message_tombstones WHERE chat_id=? AND message_id=?) AND NOT (? > -1000000000000 AND EXISTS(SELECT 1 FROM common_message_tombstones WHERE message_id=?)) ON CONFLICT(chat_id, message_id) DO UPDATE SET sender_id=excluded.sender_id, timestamp=excluded.timestamp, edited_at=excluded.edited_at, collected_at=excluded.collected_at, updated_at=unixepoch(), text=excluded.text, reply_to=excluded.reply_to, version_at=excluded.version_at, source_priority=excluded.source_priority WHERE (excluded.version_at > messages.version_at OR (excluded.version_at = messages.version_at AND excluded.source_priority >= messages.source_priority)) AND messages.is_deleted=0")
+                    if let (MessageSource::Refetch, Some((row_id, _))) = (record.source, &previous)
+                    {
+                        backfill_metadata(&mut tx, *row_id, message).await?;
+                        continue;
+                    }
+                    let result = sqlx::query("INSERT INTO messages(chat_id, message_id, sender_id, timestamp, edited_at, collected_at, created_at, updated_at, text, reply_to, version_at, source_priority, post_author, fwd_from_id, fwd_from_name, fwd_date) SELECT ?, ?, ?, ?, ?, ?, unixepoch(), unixepoch(), ?, ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS(SELECT 1 FROM message_tombstones WHERE chat_id=? AND message_id=?) AND NOT (? > -1000000000000 AND EXISTS(SELECT 1 FROM common_message_tombstones WHERE message_id=?)) ON CONFLICT(chat_id, message_id) DO UPDATE SET sender_id=COALESCE(excluded.sender_id, messages.sender_id), post_author=COALESCE(excluded.post_author, messages.post_author), fwd_from_id=COALESCE(excluded.fwd_from_id, messages.fwd_from_id), fwd_from_name=COALESCE(excluded.fwd_from_name, messages.fwd_from_name), fwd_date=COALESCE(excluded.fwd_date, messages.fwd_date), timestamp=excluded.timestamp, edited_at=excluded.edited_at, collected_at=excluded.collected_at, updated_at=unixepoch(), text=excluded.text, reply_to=excluded.reply_to, version_at=excluded.version_at, source_priority=excluded.source_priority WHERE (excluded.version_at > messages.version_at OR (excluded.version_at = messages.version_at AND excluded.source_priority >= messages.source_priority)) AND messages.is_deleted=0")
                         .bind(message.chat_id.get()).bind(message.id.get()).bind(message.sender_id.map(SenderId::get))
                         .bind(seconds(message.timestamp)).bind(message.edited_at.map(seconds)).bind(seconds(message.collected_at))
                         .bind(&message.text).bind(message.reply_to.map(MessageId::get)).bind(version).bind(priority)
+                        .bind(&message.post_author)
+                        .bind(message.forward.as_ref().and_then(|f| f.from_id).map(SenderId::get))
+                        .bind(message.forward.as_ref().and_then(|f| f.from_name.clone()))
+                        .bind(message.forward.as_ref().and_then(|f| f.date).map(seconds))
                         .bind(message.chat_id.get()).bind(message.id.get())
                         .bind(message.chat_id.get()).bind(message.id.get())
                         .execute(&mut *tx).await?;
@@ -403,6 +453,15 @@ impl ArchiveWriter for SqliteStore {
                 .bind(chat_id.get()).bind(checkpoint.history_before_id.map(MessageId::get))
                 .bind(checkpoint.history_complete).bind(checkpoint.catchup_after_id.map(MessageId::get))
                 .execute(&mut *tx).await?;
+        }
+        if let Some((chat_id, refetch)) = batch.refetch_checkpoint {
+            ensure_chat(&mut tx, chat_id).await?;
+            sqlx::query("UPDATE chat_sync_state SET refetch_active=?, refetch_before_id=?, updated_at=unixepoch() WHERE chat_id=?")
+                .bind(refetch.active)
+                .bind(refetch.before_id.map(MessageId::get))
+                .bind(chat_id.get())
+                .execute(&mut *tx)
+                .await?;
         }
         if let Some((chat_id, reason)) = batch.chat_error {
             ensure_chat(&mut tx, chat_id).await?;
@@ -494,12 +553,38 @@ async fn attachments_for(
     Ok(attachments)
 }
 
-const MESSAGE_SELECT: &str = "SELECT m.row_id, m.chat_id, m.message_id, m.sender_id, m.timestamp, m.edited_at, m.collected_at, m.text, m.reply_to, CASE WHEN m.is_deleted=1 THEN COALESCE(m.deleted_at, 0) END AS deleted_at, s.display_name AS sender_name, s.username AS sender_username, c.title AS chat_title FROM messages m LEFT JOIN senders s ON s.id=m.sender_id LEFT JOIN chats c ON c.id=m.chat_id";
+/// `legacy` is a read-only database that predates migration 0007: the metadata columns read as NULL.
+fn message_select(legacy: bool) -> String {
+    let metadata = if legacy {
+        "NULL AS post_author, NULL AS fwd_from_id, NULL AS fwd_from_name, NULL AS fwd_date"
+    } else {
+        "m.post_author, m.fwd_from_id, m.fwd_from_name, m.fwd_date"
+    };
+    format!("{MESSAGE_SELECT_HEAD}{metadata}{MESSAGE_SELECT_TAIL}")
+}
+
+const MESSAGE_SELECT_HEAD: &str = "SELECT m.row_id, m.chat_id, m.message_id, m.sender_id, m.timestamp, m.edited_at, m.collected_at, m.text, m.reply_to, ";
+const MESSAGE_SELECT_TAIL: &str = ", CASE WHEN m.is_deleted=1 THEN COALESCE(m.deleted_at, 0) END AS deleted_at, s.display_name AS sender_name, s.username AS sender_username, c.title AS chat_title FROM messages m LEFT JOIN senders s ON s.id=m.sender_id LEFT JOIN chats c ON c.id=m.chat_id";
 
 fn row_message(row: &SqliteRow, attachments: Vec<Attachment>) -> Result<Message, RepositoryError> {
     let sender: Option<i64> = row.try_get("sender_id").map_err(storage_error)?;
     let edited: Option<i64> = row.try_get("edited_at").map_err(storage_error)?;
     let reply: Option<i64> = row.try_get("reply_to").map_err(storage_error)?;
+    let fwd_id: Option<i64> = row.try_get("fwd_from_id").map_err(storage_error)?;
+    let fwd_name: Option<String> = row.try_get("fwd_from_name").map_err(storage_error)?;
+    let fwd_date: Option<i64> = row.try_get("fwd_date").map_err(storage_error)?;
+    let forward = if fwd_id.is_some() || fwd_name.is_some() || fwd_date.is_some() {
+        Some(Forward {
+            from_id: fwd_id
+                .map(SenderId::from_marked)
+                .transpose()
+                .map_err(invalid_data)?,
+            from_name: fwd_name,
+            date: fwd_date.map(timestamp).transpose()?,
+        })
+    } else {
+        None
+    };
     Ok(Message {
         id: MessageId::new(row.try_get("message_id").map_err(storage_error)?)
             .map_err(invalid_data)?,
@@ -518,6 +603,8 @@ fn row_message(row: &SqliteRow, attachments: Vec<Attachment>) -> Result<Message,
             .transpose()
             .map_err(invalid_data)?,
         attachments,
+        post_author: row.try_get("post_author").map_err(storage_error)?,
+        forward,
     })
 }
 
@@ -591,9 +678,10 @@ async fn list_messages(
     after: Option<&crate::application::MessageCursor>,
     page_size: crate::application::PageSize,
     search: Option<&SearchSpec>,
+    legacy: bool,
 ) -> Result<crate::application::MessagePage, RepositoryError> {
     let after_direction = after.is_some();
-    let mut query = QueryBuilder::<Sqlite>::new(MESSAGE_SELECT);
+    let mut query = QueryBuilder::<Sqlite>::new(message_select(legacy));
     let fts = search.is_some_and(|spec| spec.fts.is_some());
     if fts {
         query.push(" JOIN messages_fts ON messages_fts.rowid=m.row_id");
@@ -616,6 +704,11 @@ async fn list_messages(
         query
             .push(format!(" AND {plus}m.sender_id="))
             .push_bind(sender_id.get());
+    }
+    if let Some(author) = &filters.post_author {
+        query
+            .push(format!(" AND {plus}m.post_author="))
+            .push_bind(author.clone());
     }
     if let Some(from) = filters.time_range.from {
         query
@@ -719,7 +812,8 @@ impl MessageRepository for SqliteStore {
     ) -> Result<Option<MessageView>, RepositoryError> {
         let mut tx = self.pool.begin().await?;
         let row = sqlx::query(&format!(
-            "{MESSAGE_SELECT} WHERE m.chat_id=? AND m.message_id=? AND (m.is_deleted=0 OR ?)"
+            "{} WHERE m.chat_id=? AND m.message_id=? AND (m.is_deleted=0 OR ?)",
+            message_select(self.legacy_schema)
         ))
         .bind(chat_id.get())
         .bind(message_id.get())
@@ -747,6 +841,7 @@ impl MessageRepository for SqliteStore {
             query.after.as_ref(),
             query.page_size,
             None,
+            self.legacy_schema,
         )
         .await?;
         tx.commit().await.map_err(storage_error)?;
@@ -786,6 +881,7 @@ impl MessageRepository for SqliteStore {
             query.after.as_ref(),
             query.page_size,
             Some(&spec),
+            self.legacy_schema,
         )
         .await?;
         tx.commit().await.map_err(storage_error)?;
@@ -803,6 +899,22 @@ impl MessageRepository for SqliteStore {
         &self,
     ) -> Result<crate::application::SearchIndexStatus, RepositoryError> {
         SqliteStore::search_index_status(self).await
+    }
+
+    async fn bound_account(&self) -> Result<Option<SenderId>, RepositoryError> {
+        SqliteStore::bound_account(self).await
+    }
+
+    async fn search_senders(&self, query: SenderQuery) -> Result<SenderPage, RepositoryError> {
+        self.search_senders_impl(query).await
+    }
+
+    async fn sender_detail(
+        &self,
+        id: SenderId,
+        include_deleted: bool,
+    ) -> Result<Option<SenderDetail>, RepositoryError> {
+        self.sender_detail_impl(id, include_deleted).await
     }
 
     async fn list_senders(
@@ -997,6 +1109,32 @@ impl SyncRepository for SqliteStore {
                 .await?;
         newest.map(MessageId::new).transpose().map_err(invalid_data)
     }
+    async fn get_refetch_checkpoint(
+        &self,
+        chat_id: ChatId,
+    ) -> Result<RefetchCheckpoint, RepositoryError> {
+        let row = sqlx::query(
+            "SELECT refetch_active, refetch_before_id FROM chat_sync_state WHERE chat_id=?",
+        )
+        .bind(chat_id.get())
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(RefetchCheckpoint::default());
+        };
+        let before: Option<i64> = row.try_get("refetch_before_id").map_err(storage_error)?;
+        Ok(RefetchCheckpoint {
+            active: row
+                .try_get::<i64, _>("refetch_active")
+                .map_err(storage_error)?
+                != 0,
+            before_id: before
+                .map(MessageId::new)
+                .transpose()
+                .map_err(invalid_data)?,
+        })
+    }
+
     async fn get_checkpoint(
         &self,
         chat_id: ChatId,

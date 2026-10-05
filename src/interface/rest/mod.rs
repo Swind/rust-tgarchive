@@ -69,6 +69,8 @@ pub fn router_with_sync(
         )
         .route("/api/v1/chats/{chat_id}/messages", get(routes::list_chat_messages))
         .route("/api/v1/chats/{chat_id}/senders", get(routes::list_chat_senders))
+        .route("/api/v1/senders", get(routes::list_senders))
+        .route("/api/v1/senders/{sender_id}", get(routes::get_sender))
         .route(
             "/api/v1/chats/{chat_id}/messages/{message_id}/context",
             get(routes::message_context),

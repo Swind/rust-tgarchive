@@ -157,6 +157,7 @@ impl Filter {
         MessageFilters {
             chat_id: self.chat.map(|c| ChatId::from_marked(c).unwrap()),
             sender_id: self.sender.map(|s| SenderId::from_marked(s).unwrap()),
+            post_author: None,
             time_range: TimeRange::new(time(self.from), time(self.to)).unwrap(),
             include_deleted: self.deleted,
         }

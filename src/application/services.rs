@@ -5,7 +5,8 @@ use crate::{
         ApplicationError, ArchiveWriter, ChatCheckpoint, ChatRepository, ChatSort, ChatSummary,
         IngestBatch, ListMessagesQuery, MessageContext, MessageContextQuery, MessagePage,
         MessageRepository, MessageSource, MessageView, PageSize, SearchIndexStatus,
-        SearchMessagesQuery, SenderSummary, SyncJob, SyncRepository, TelegramGateway,
+        SearchMessagesQuery, SenderDetail, SenderPage, SenderQuery, SenderSummary, SyncJob,
+        SyncRepository, TelegramGateway,
         pacer::{RateLimitStatus, RatePacer},
     },
     domain::{Chat, ChatId, MessageEvent, MessageId, Sender},
@@ -166,6 +167,32 @@ impl MessageService {
         query.validate()?;
         self.messages
             .context(query)
+            .await
+            .map_err(ApplicationError::from)?
+            .ok_or(ApplicationError::NotFound)
+    }
+
+    pub async fn bound_account(&self) -> Result<Option<crate::domain::SenderId>, ApplicationError> {
+        self.messages
+            .bound_account()
+            .await
+            .map_err(ApplicationError::from)
+    }
+
+    pub async fn search_senders(&self, query: SenderQuery) -> Result<SenderPage, ApplicationError> {
+        self.messages
+            .search_senders(query)
+            .await
+            .map_err(ApplicationError::from)
+    }
+
+    pub async fn sender_detail(
+        &self,
+        id: crate::domain::SenderId,
+        include_deleted: bool,
+    ) -> Result<SenderDetail, ApplicationError> {
+        self.messages
+            .sender_detail(id, include_deleted)
             .await
             .map_err(ApplicationError::from)?
             .ok_or(ApplicationError::NotFound)
@@ -437,6 +464,22 @@ impl Application {
         limit: PageSize,
     ) -> Result<Vec<SenderSummary>, ApplicationError> {
         self.messages.list_senders(chat_id, limit).await
+    }
+
+    pub async fn bound_account(&self) -> Result<Option<crate::domain::SenderId>, ApplicationError> {
+        self.messages.bound_account().await
+    }
+
+    pub async fn search_senders(&self, query: SenderQuery) -> Result<SenderPage, ApplicationError> {
+        self.messages.search_senders(query).await
+    }
+
+    pub async fn sender_detail(
+        &self,
+        id: crate::domain::SenderId,
+        include_deleted: bool,
+    ) -> Result<SenderDetail, ApplicationError> {
+        self.messages.sender_detail(id, include_deleted).await
     }
 
     pub async fn get_chat_summary(&self, id: ChatId) -> Result<ChatSummary, ApplicationError> {

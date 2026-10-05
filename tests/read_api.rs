@@ -46,6 +46,8 @@ fn chat(id: ChatId, title: Option<&str>) -> Chat {
 fn msg(chat_id: ChatId, id: i64, at: i64, sender: Option<SenderId>) -> Message {
     let time = DateTime::from_timestamp(at, 0).unwrap();
     Message {
+        post_author: None,
+        forward: None,
         id: MessageId::new(id).unwrap(),
         chat_id,
         sender_id: sender,

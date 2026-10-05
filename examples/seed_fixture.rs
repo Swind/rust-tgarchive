@@ -16,8 +16,8 @@ use tgarchive::{
         MessageSource, SyncChatProgress, SyncJob, SyncJobState, SyncRepository, SyncScope,
     },
     domain::{
-        Attachment, AttachmentKind, Chat, ChatId, ChatKind, Message, MessageEvent, MessageId,
-        Sender, SenderId, SenderKind,
+        Attachment, AttachmentKind, Chat, ChatId, ChatKind, Forward, Message, MessageEvent,
+        MessageId, Sender, SenderId, SenderKind,
     },
     infrastructure::persistence::sqlite::SqliteStore,
 };
@@ -26,6 +26,8 @@ const ALICE: i64 = 1001;
 const BOB: i64 = 2002;
 const CAROL: i64 = 3003;
 const TELEGRAM: i64 = 777_000;
+const SELF: i64 = 9000;
+const XIAOMING: i64 = 4004;
 const BIG: i64 = -1_002_000_001;
 const NEWS: i64 = -1_002_000_002;
 const EMPTY: i64 = -1_002_000_003;
@@ -65,6 +67,8 @@ fn sender(id: i64, name: &str, username: Option<&str>) -> Sender {
 
 fn msg(chat: i64, id: i64, sender: Option<i64>, at: DateTime<Utc>, text: Option<&str>) -> Message {
     Message {
+        post_author: None,
+        forward: None,
         id: mid(id),
         chat_id: cid(chat),
         sender_id: sender.map(|s| SenderId::from_marked(s).unwrap()),
@@ -272,6 +276,8 @@ async fn main() {
         sender(ALICE, "Alice 愛麗絲", Some("alice_w")),
         sender(BOB, "Bob", None),
         sender(CAROL, "Carol Chen", Some("carol_c")),
+        sender(SELF, "我自己 Me", Some("me_self")),
+        sender(XIAOMING, "王小明", Some("xiaoming")),
     ];
     store
         .write_batch(IngestBatch {
@@ -355,6 +361,73 @@ async fn main() {
     {
         let at = base() - Duration::days(30) + Duration::hours(i as i64);
         records.push(created(msg(OLD, 1 + i as i64, Some(BOB), at, Some(text))));
+    }
+    // Sender features: outgoing private messages attributed to the bound account.
+    for i in 1..=2i64 {
+        let at = base() + Duration::days(1) + Duration::hours(2 + i);
+        records.push(created(msg(
+            ALICE,
+            100 + i,
+            Some(SELF),
+            at,
+            Some(&format!("外送訊息 {i}：我寄出的內容")),
+        )));
+    }
+    // One sender active in two chats, with a CJK name.
+    for (chat_id, first_id) in [(FAMILY, 101i64), (OLD, 101)] {
+        for i in 0..2i64 {
+            let at = base() + Duration::days(3) + Duration::hours(chat_id.abs() % 5 + i);
+            records.push(created(msg(
+                chat_id,
+                first_id + i,
+                Some(XIAOMING),
+                at,
+                Some(&format!("小明的發言 {}", first_id + i)),
+            )));
+        }
+    }
+    // Channel posts with a signature, a forwarded post, and legacy rows without a sender.
+    for i in 13..=14i64 {
+        let at = base() + Duration::days(2) + Duration::minutes(30 + i);
+        let mut m = msg(NEWS, i, Some(NEWS), at, Some(&format!("署名快訊 {i}")));
+        m.post_author = Some("編輯小張".into());
+        records.push(created(m));
+    }
+    let mut forwarded = msg(
+        NEWS,
+        15,
+        Some(NEWS),
+        base() + Duration::days(2) + Duration::minutes(50),
+        Some("轉貼的快訊"),
+    );
+    forwarded.forward = Some(Forward {
+        from_id: None,
+        from_name: Some("原始來源電台".into()),
+        date: Some(base() - Duration::days(1)),
+    });
+    records.push(created(forwarded));
+    let mut fwd_user = msg(
+        FAMILY,
+        102_000,
+        Some(ALICE),
+        base() + Duration::days(4) + Duration::hours(1),
+        Some("轉傳的家庭訊息"),
+    );
+    fwd_user.forward = Some(Forward {
+        from_id: Some(SenderId::from_marked(BOB).unwrap()),
+        from_name: Some("Bob".into()),
+        date: Some(base()),
+    });
+    records.push(created(fwd_user));
+    for i in 16..=17i64 {
+        let at = base() + Duration::days(2) + Duration::minutes(60 + i);
+        records.push(created(msg(
+            NEWS,
+            i,
+            None,
+            at,
+            Some(&format!("舊資料快訊 {i}")),
+        )));
     }
     // Deleted messages in the big chat (created above, then tombstoned).
     for id in [60, 61] {

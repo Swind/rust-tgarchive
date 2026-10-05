@@ -180,6 +180,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/senders": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_senders"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/senders/{sender_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_sender"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/status": {
         parameters: {
             query?: never;
@@ -373,6 +405,20 @@ export interface components {
         ErrorEnvelope: {
             error: components["schemas"]["ErrorDetail"];
         };
+        ForwardDto: {
+            /**
+             * Format: date-time
+             * @description When the original message was sent.
+             */
+            date?: string | null;
+            /**
+             * Format: int64
+             * @description Original author or channel (marked ID) when Telegram exposes it.
+             */
+            from_id?: number | null;
+            /** @description Name of the original author (also set for users who hide their account). */
+            from_name?: string | null;
+        };
         HealthDto: {
             status: string;
         };
@@ -401,9 +447,12 @@ export interface components {
             deleted_at?: string | null;
             /** Format: date-time */
             edited_at?: string | null;
+            forward?: null | components["schemas"]["ForwardDto"];
             /** Format: int64 */
             id: number;
             is_deleted: boolean;
+            /** @description Channel post signature (`post_author`); not the sender. */
+            post_author?: string | null;
             /** Format: int64 */
             reply_to?: number | null;
             sender?: null | components["schemas"]["SenderDto"];
@@ -467,6 +516,34 @@ export interface components {
          * @enum {string}
          */
         SearchSortDto: "relevance" | "time";
+        SenderChatDto: {
+            /** Format: int64 */
+            chat_id: number;
+            kind: components["schemas"]["ChatKindDto"];
+            /** Format: date-time */
+            last_message_at?: string | null;
+            /** Format: int64 */
+            message_count: number;
+            title?: string | null;
+        };
+        /** @description A sender plus its per-chat breakdown (most messages first). */
+        SenderDetailDto: {
+            /** Format: int64 */
+            chat_count: number;
+            chats: components["schemas"]["SenderChatDto"][];
+            display_name?: string | null;
+            /** Format: date-time */
+            first_message_at?: string | null;
+            /** Format: int64 */
+            id: number;
+            is_self: boolean;
+            kind: components["schemas"]["SenderKindDto"];
+            /** Format: date-time */
+            last_message_at?: string | null;
+            /** Format: int64 */
+            message_count: number;
+            username?: string | null;
+        };
         SenderDto: {
             /** @description Profile name; for a chat/channel posting as itself, the chat title. */
             display_name?: string | null;
@@ -474,6 +551,43 @@ export interface components {
             id: number;
             username?: string | null;
         };
+        /** @enum {string} */
+        SenderKindDto: "user" | "chat" | "channel" | "unknown";
+        SenderPageDto: {
+            items: components["schemas"]["SenderProfileDto"][];
+            /** @description Opaque cursor; pass it back as `cursor` to get the next page. */
+            next_cursor?: string | null;
+        };
+        /** @description A sender with archive-wide aggregates. */
+        SenderProfileDto: {
+            /**
+             * Format: int64
+             * @description Chats in which the sender has messages.
+             */
+            chat_count: number;
+            /** @description Profile name; for a channel posting as itself, the channel title. */
+            display_name?: string | null;
+            /** Format: date-time */
+            first_message_at?: string | null;
+            /** Format: int64 */
+            id: number;
+            /** @description The Telegram account this archive is bound to. */
+            is_self: boolean;
+            kind: components["schemas"]["SenderKindDto"];
+            /** Format: date-time */
+            last_message_at?: string | null;
+            /**
+             * Format: int64
+             * @description Messages by this sender (deleted ones only with `include_deleted=true`).
+             */
+            message_count: number;
+            username?: string | null;
+        };
+        /**
+         * @description Sort order of `GET /senders`.
+         * @enum {string}
+         */
+        SenderSortDto: "messages" | "last_message" | "name";
         SenderSummaryDto: {
             display_name?: string | null;
             /** Format: int64 */
@@ -653,6 +767,8 @@ export interface operations {
             query?: {
                 chat_id?: number;
                 sender_id?: number;
+                /** @description Exact channel post signature. */
+                post_author?: string;
                 from?: string;
                 to?: string;
                 before?: string;
@@ -856,7 +972,13 @@ export interface operations {
     };
     sync_chat: {
         parameters: {
-            query?: never;
+            query?: {
+                /**
+                 * @description Re-download the whole history and backfill NULL sender/post-author/forward/attachment
+                 *     metadata of archived messages (text, versions and deletions are untouched). Resumable.
+                 */
+                refetch?: boolean;
+            };
             header?: never;
             path: {
                 chat_id: number;
@@ -1011,6 +1133,8 @@ export interface operations {
             query?: {
                 chat_id?: number;
                 sender_id?: number;
+                /** @description Exact channel post signature. */
+                post_author?: string;
                 from?: string;
                 to?: string;
                 before?: string;
@@ -1065,6 +1189,8 @@ export interface operations {
                 q: string;
                 chat_id?: number;
                 sender_id?: number;
+                /** @description Exact channel post signature. */
+                post_author?: string;
                 from?: string;
                 to?: string;
                 /** @description Cursor from the previous page's `next_cursor`. */
@@ -1089,6 +1215,106 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["MessagePageDto"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    list_senders: {
+        parameters: {
+            query?: {
+                /**
+                 * @description Substring of display name or username (NFKC + case-insensitive, Chinese substrings work),
+                 *     `@username` (exact) or a numeric sender ID.
+                 */
+                q?: string;
+                /** @description Order; default `messages`. */
+                sort?: components["schemas"]["SenderSortDto"];
+                /** @description Page size (1-1000, default 100). */
+                limit?: number;
+                /** @description Cursor from the previous page's `next_cursor`. */
+                cursor?: string;
+                /** @description Count deleted messages too. */
+                include_deleted?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Senders with message counts, chat counts and activity range */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SenderPageDto"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get_sender: {
+        parameters: {
+            query?: {
+                /** @description Count deleted messages too. */
+                include_deleted?: boolean;
+            };
+            header?: never;
+            path: {
+                /** @description Marked sender ID */
+                sender_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Sender with per-chat breakdown */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SenderDetailDto"];
                 };
             };
             400: {

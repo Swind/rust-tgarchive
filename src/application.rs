@@ -3,7 +3,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::domain::{Chat, ChatId, Message, MessageEvent, MessageId, Sender, SenderId};
+use crate::domain::{
+    Chat, ChatId, ChatKind, Message, MessageEvent, MessageId, Sender, SenderId, SenderKind,
+};
 
 const MAX_SEARCH_LENGTH: usize = 4096;
 
@@ -93,6 +95,8 @@ pub enum PageDirection {
 pub struct MessageFilters {
     pub chat_id: Option<ChatId>,
     pub sender_id: Option<SenderId>,
+    /// Exact channel post signature.
+    pub post_author: Option<String>,
     pub time_range: TimeRange,
     /// Also return messages marked deleted (their bodies are retained); tombstones without a
     /// stored message are never returned.
@@ -265,6 +269,64 @@ pub struct SenderSummary {
     pub message_count: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SenderSort {
+    /// Most messages first.
+    #[default]
+    Messages,
+    /// Most recently active first.
+    LastMessage,
+    /// Display name ascending (nameless last).
+    Name,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SenderQuery {
+    /// Substring of display name/username (NFKC + lowercase), `@username` (exact) or numeric ID.
+    pub text: Option<String>,
+    pub sort: SenderSort,
+    pub limit: PageSize,
+    pub offset: u64,
+    /// Count deleted messages too.
+    pub include_deleted: bool,
+}
+
+/// A sender with archive-wide aggregates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SenderProfile {
+    pub id: SenderId,
+    pub kind: SenderKind,
+    pub display_name: Option<String>,
+    pub username: Option<String>,
+    pub message_count: u64,
+    pub chat_count: u64,
+    pub first_message_at: Option<DateTime<Utc>>,
+    pub last_message_at: Option<DateTime<Utc>>,
+    /// The Telegram account the archive is bound to.
+    pub is_self: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SenderChatStat {
+    pub chat_id: ChatId,
+    pub title: Option<String>,
+    pub kind: ChatKind,
+    pub message_count: u64,
+    pub last_message_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SenderDetail {
+    pub profile: SenderProfile,
+    pub chats: Vec<SenderChatStat>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SenderPage {
+    pub items: Vec<SenderProfile>,
+    pub next_offset: Option<u64>,
+}
+
 pub const MAX_CONTEXT_SIZE: u16 = 100;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -419,12 +481,23 @@ pub enum TelegramError {
 pub enum MessageSource {
     Realtime,
     History,
+    /// A `--refetch` walk: existing rows only get NULL metadata filled (sender, post author,
+    /// forward origin, attachment details); text, versions and deletions are never touched.
+    Refetch,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IngestRecord {
     pub event: MessageEvent,
     pub source: MessageSource,
+}
+
+/// Progress of a resumable `--refetch` walk (newest to oldest), independent of [`ChatCheckpoint`].
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct RefetchCheckpoint {
+    /// A walk was started and has not reached the start of the chat yet.
+    pub active: bool,
+    pub before_id: Option<MessageId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -443,6 +516,7 @@ pub struct IngestBatch {
     /// The archive must already be bound to the matching Telegram account.
     pub account_deletions: Vec<AccountDeletion>,
     pub checkpoint: Option<(ChatId, ChatCheckpoint)>,
+    pub refetch_checkpoint: Option<(ChatId, RefetchCheckpoint)>,
     pub job_progress: Option<SyncChatProgress>,
     /// Sanitized reason a chat could not be synced; stored as `last_error` until the next
     /// checkpoint commit for that chat clears it.
@@ -548,6 +622,28 @@ pub trait MessageRepository: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// The Telegram user the archive is bound to. Default: unbound.
+    async fn bound_account(&self) -> Result<Option<SenderId>, RepositoryError> {
+        Ok(None)
+    }
+
+    /// Senders with archive-wide aggregates. Default: none.
+    async fn search_senders(&self, _query: SenderQuery) -> Result<SenderPage, RepositoryError> {
+        Ok(SenderPage {
+            items: Vec::new(),
+            next_offset: None,
+        })
+    }
+
+    /// `None` when nothing is known about the sender. Default: none.
+    async fn sender_detail(
+        &self,
+        _id: SenderId,
+        _include_deleted: bool,
+    ) -> Result<Option<SenderDetail>, RepositoryError> {
+        Ok(None)
+    }
+
     /// `None` when the anchor does not exist (or is deleted and `include_deleted` is false).
     async fn context(
         &self,
@@ -567,6 +663,7 @@ pub trait MessageRepository: Send + Sync {
         let filters = MessageFilters {
             chat_id: Some(query.chat_id),
             sender_id: None,
+            post_author: None,
             time_range: TimeRange {
                 from: None,
                 to: None,
@@ -682,6 +779,13 @@ pub trait SyncRepository: Send + Sync {
         &self,
         chat_id: ChatId,
     ) -> Result<Option<ChatCheckpoint>, RepositoryError>;
+    /// State of the `--refetch` walk of a chat (none = no walk in progress).
+    async fn get_refetch_checkpoint(
+        &self,
+        _chat_id: ChatId,
+    ) -> Result<RefetchCheckpoint, RepositoryError> {
+        Ok(RefetchCheckpoint::default())
+    }
     /// Newest message ID archived for the chat; used to baseline catch-up without a gap.
     async fn newest_archived_id(
         &self,
@@ -719,6 +823,7 @@ mod tests {
         MessageFilters {
             chat_id: None,
             sender_id: None,
+            post_author: None,
             time_range: TimeRange::new(None, None).unwrap(),
             include_deleted: false,
         }
@@ -754,6 +859,7 @@ mod tests {
         let invalid_filters = MessageFilters {
             chat_id: None,
             sender_id: None,
+            post_author: None,
             time_range: TimeRange {
                 from: Some(DateTime::from_timestamp(2, 0).unwrap()),
                 to: Some(DateTime::from_timestamp(1, 0).unwrap()),

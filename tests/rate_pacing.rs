@@ -188,6 +188,8 @@ fn page_with_records(chat: ChatId, ids: &[i64], next: i64) -> HistoryPage {
         .iter()
         .map(|id| IngestRecord {
             event: MessageEvent::Created(Message {
+                post_author: None,
+                forward: None,
                 id: MessageId::new(*id).unwrap(),
                 chat_id: chat,
                 sender_id: None,

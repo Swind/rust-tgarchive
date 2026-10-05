@@ -197,6 +197,21 @@ pub struct Message {
     pub text: Option<String>,
     pub reply_to: Option<MessageId>,
     pub attachments: Vec<Attachment>,
+    /// Channel post signature (`post_author`); not a sender.
+    #[serde(default)]
+    pub post_author: Option<String>,
+    /// Origin of a forwarded message; never used for sender attribution.
+    #[serde(default)]
+    pub forward: Option<Forward>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Forward {
+    /// Original author or channel when Telegram exposes it.
+    pub from_id: Option<SenderId>,
+    /// Name of the original author (also set for hidden users).
+    pub from_name: Option<String>,
+    pub date: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

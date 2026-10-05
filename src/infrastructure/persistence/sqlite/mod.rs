@@ -1,6 +1,9 @@
+mod repair;
 mod search;
+mod senders;
 mod store;
 
+pub use repair::{RepairChat, SenderRepairReport};
 pub use search::RebuildProgress;
 pub use store::SqliteStore;
 

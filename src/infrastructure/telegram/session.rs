@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use grammers_client::{
     Client, SenderPool,
@@ -13,7 +13,10 @@ use tokio::{
     task::JoinHandle,
 };
 
-use crate::{application::TelegramError, domain::SenderId};
+use crate::{
+    application::TelegramError,
+    domain::{Sender, SenderId},
+};
 
 use super::file_session::FileSession;
 use super::owner_lock::AccountOwnerLock;
@@ -25,6 +28,9 @@ pub struct TelegramAdapter {
     api_id: i32,
     pub(crate) updates: AsyncMutex<Option<UnboundedReceiver<UpdatesLike>>>,
     runner: AsyncMutex<Option<JoinHandle<()>>>,
+    /// The authenticated account, resolved once by `authenticated_account`; the mapper uses it to
+    /// attribute outgoing messages.
+    account: OnceLock<Sender>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -56,6 +62,7 @@ impl TelegramAdapter {
             api_id,
             updates: AsyncMutex::new(Some(updates)),
             runner: AsyncMutex::new(Some(runner)),
+            account: OnceLock::new(),
         })
     }
 
@@ -84,14 +91,25 @@ impl TelegramAdapter {
         self.client().is_authorized().await
     }
 
-    /// Resolves and validates the authenticated user identity for archive binding.
-    pub async fn authenticated_account_id(&self) -> Result<SenderId, TelegramError> {
+    /// Resolves and validates the authenticated user (identity plus profile) for archive binding.
+    pub async fn authenticated_account(&self) -> Result<Sender, TelegramError> {
         let user = self.client().get_me().await.map_err(|error| {
             TelegramError::Unavailable(format!("could not resolve Telegram account: {error}"))
         })?;
-        super::mapper::sender_id(user.id()).map_err(|error| {
+        let sender = super::mapper::map_account(&user).map_err(|error| {
             TelegramError::Unavailable(format!("invalid Telegram account identity: {error}"))
-        })
+        })?;
+        let _ = self.account.set(sender.clone());
+        Ok(sender)
+    }
+
+    pub async fn authenticated_account_id(&self) -> Result<SenderId, TelegramError> {
+        self.authenticated_account().await.map(|sender| sender.id)
+    }
+
+    /// The account resolved by `authenticated_account`, if that already ran.
+    pub(crate) fn account_id(&self) -> Option<SenderId> {
+        self.account.get().map(|sender| sender.id)
     }
 
     pub(crate) async fn resolve_chat(

@@ -217,6 +217,8 @@ fn chat() -> Chat {
 
 fn message() -> Message {
     Message {
+        post_author: None,
+        forward: None,
         id: MessageId::new(10).unwrap(),
         chat_id: chat().id,
         sender_id: None,
@@ -240,6 +242,7 @@ fn list_query() -> ListMessagesQuery {
         filters: tgarchive::application::MessageFilters {
             chat_id: None,
             sender_id: None,
+            post_author: None,
             time_range: TimeRange::new(None, None).unwrap(),
             include_deleted: false,
         },
