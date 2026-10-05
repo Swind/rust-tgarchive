@@ -2,7 +2,7 @@
 //!
 //! Skipped unless `LIVE_TELEGRAM=1` plus the variables listed in `Live::from_env` are set; always
 //! `#[ignore]`d. It sends, edits and deletes messages (all prefixed by a run marker) in
-//! `LIVE_TEST_CHAT_ID` only. See README "真實帳號驗收測試".
+//! `LIVE_TEST_CHAT_ID` only. See README "Live-account acceptance test".
 
 use std::{
     fs::File,
