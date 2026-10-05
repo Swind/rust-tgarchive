@@ -1370,6 +1370,7 @@ components:
       type: object
       required:
       - id
+      - is_self
       properties:
         display_name:
           type:
@@ -1384,6 +1385,9 @@ components:
           - boolean
           - 'null'
           description: Telegram's bot flag; null = unknown or not a user.
+        is_self:
+          type: boolean
+          description: True when the sender is the bound Telegram account.
         username:
           type:
           - string

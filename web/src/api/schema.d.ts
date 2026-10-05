@@ -554,6 +554,8 @@ export interface components {
             id: number;
             /** @description Telegram's bot flag; null = unknown or not a user. */
             is_bot?: boolean | null;
+            /** @description True when the sender is the bound Telegram account. */
+            is_self: boolean;
             username?: string | null;
         };
         /** @enum {string} */

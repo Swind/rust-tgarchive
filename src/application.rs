@@ -189,6 +189,8 @@ pub struct SenderInfo {
     pub display_name: Option<String>,
     pub username: Option<String>,
     pub is_bot: Option<bool>,
+    /// True when the sender is the bound Telegram account.
+    pub is_self: bool,
 }
 
 /// A stored message plus read-side details (resolved sender, deletion time).

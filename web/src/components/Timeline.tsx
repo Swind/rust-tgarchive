@@ -1,26 +1,37 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { api, type Message } from '../api/client';
 import { ErrorBox, Empty } from './common';
 import MessageItem from './MessageItem';
 import { dayKey, formatDate } from '../lib/format';
+import { groupPositions } from '../lib/bubble';
 import { mergeMessages, nextOlderCursor } from '../lib/messages';
 
 export type TimelineFilters = { senderId?: number; toIso?: string; includeDeleted: boolean; excludeBots?: boolean };
 
 function Rows({ messages, anchorId, chatTitle }: { messages: Message[]; anchorId?: number; chatTitle?: string | null }) {
-  let last = '';
+  const pos = useMemo(() => groupPositions(messages), [messages]);
+  const byId = useMemo(() => new Map(messages.map((m) => [m.id, m])), [messages]);
   return (
     <>
-      {messages.map((m) => {
-        const key = dayKey(m.timestamp);
-        const sep = key !== last;
-        last = key;
+      {messages.map((m, i) => {
+        const prev = messages[i - 1];
+        const newDay = !prev || dayKey(prev.timestamp) !== dayKey(m.timestamp);
         return (
-          <div key={m.id}>
-            {sep && <div className="date-sep">{formatDate(m.timestamp)}</div>}
-            <MessageItem message={m} anchor={m.id === anchorId} chatTitle={chatTitle} />
-          </div>
+          <Fragment key={m.id}>
+            {newDay && (
+              <div className="date-sep">
+                <span>{formatDate(m.timestamp)}</span>
+              </div>
+            )}
+            <MessageItem
+              message={m}
+              anchor={m.id === anchorId}
+              chatTitle={chatTitle}
+              pos={pos[i]}
+              replyTo={m.reply_to != null ? byId.get(m.reply_to) : undefined}
+            />
+          </Fragment>
         );
       })}
     </>

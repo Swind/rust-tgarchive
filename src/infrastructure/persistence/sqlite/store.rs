@@ -639,7 +639,7 @@ fn message_select(legacy: LegacyColumns) -> String {
 
 const MESSAGE_SELECT_HEAD: &str = "SELECT m.row_id, m.chat_id, m.message_id, m.sender_id, m.timestamp, m.edited_at, m.collected_at, m.text, m.reply_to, ";
 const MESSAGE_SELECT_MID: &str = ", CASE WHEN m.is_deleted=1 THEN COALESCE(m.deleted_at, 0) END AS deleted_at, s.display_name AS sender_name, s.username AS sender_username, ";
-const MESSAGE_SELECT_TAIL: &str = " AS sender_is_bot, c.title AS chat_title FROM messages m LEFT JOIN senders s ON s.id=m.sender_id LEFT JOIN chats c ON c.id=m.chat_id";
+const MESSAGE_SELECT_TAIL: &str = " AS sender_is_bot, EXISTS(SELECT 1 FROM telegram_account_identity i WHERE i.user_id=m.sender_id) AS sender_is_self, c.title AS chat_title FROM messages m LEFT JOIN senders s ON s.id=m.sender_id LEFT JOIN chats c ON c.id=m.chat_id";
 
 fn row_message(row: &SqliteRow, attachments: Vec<Attachment>) -> Result<Message, RepositoryError> {
     let sender: Option<i64> = row.try_get("sender_id").map_err(storage_error)?;
@@ -690,6 +690,7 @@ fn row_view(row: &SqliteRow, attachments: Vec<Attachment>) -> Result<MessageView
     let username: Option<String> = row.try_get("sender_username").map_err(storage_error)?;
     let chat_title: Option<String> = row.try_get("chat_title").map_err(storage_error)?;
     let is_bot: Option<bool> = row.try_get("sender_is_bot").map_err(storage_error)?;
+    let is_self: bool = row.try_get("sender_is_self").map_err(storage_error)?;
     let sender = message.sender_id.map(|id| SenderInfo {
         id,
         // A chat/channel posting as itself has no profile name of its own: use the chat title.
@@ -700,6 +701,7 @@ fn row_view(row: &SqliteRow, attachments: Vec<Attachment>) -> Result<MessageView
         }),
         username,
         is_bot,
+        is_self,
     });
     Ok(MessageView {
         message,
@@ -1018,6 +1020,7 @@ impl MessageRepository for SqliteStore {
                         display_name: row.try_get("display_name").map_err(storage_error)?,
                         username: row.try_get("username").map_err(storage_error)?,
                         is_bot: row.try_get("is_bot").map_err(storage_error)?,
+                        is_self: false,
                     },
                     message_count: u64::try_from(count).map_err(invalid_data)?,
                 })

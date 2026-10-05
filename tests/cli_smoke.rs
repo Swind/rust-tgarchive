@@ -318,7 +318,7 @@ fn misconfiguration_fails_at_startup_with_a_fix_hint() {
         .env_clear()
         .env("TGARCHIVE_NO_DOTENV", "1")
         .env("DATABASE_URL", &missing_db)
-        .args(["serve", "--query-only"])
+        .args(["serve", "--query-only", "--bind", "127.0.0.1:0"])
         .output()
         .unwrap();
     assert!(!out.status.success());
@@ -334,7 +334,7 @@ fn misconfiguration_fails_at_startup_with_a_fix_hint() {
             "DATABASE_URL",
             format!("sqlite://{}/a.db", dir.path().display()),
         )
-        .args(["serve"])
+        .args(["serve", "--bind", "127.0.0.1:0"])
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);

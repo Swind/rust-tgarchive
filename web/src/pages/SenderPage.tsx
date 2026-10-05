@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { api, ApiError } from '../api/client';
@@ -221,10 +221,19 @@ export default function SenderPage() {
             const sep = key !== lastDay;
             lastDay = key;
             return (
-              <div key={`${m.chat_id}-${m.id}`}>
-                {sep && <div className="date-sep">{formatDate(m.timestamp)}</div>}
-                <MessageItem message={m} showChat={titles.get(m.chat_id) ?? String(m.chat_id)} chatTitle={titles.get(m.chat_id)} />
-              </div>
+              <Fragment key={`${m.chat_id}-${m.id}`}>
+                {sep && (
+                  <div className="date-sep">
+                    <span>{formatDate(m.timestamp)}</span>
+                  </div>
+                )}
+                <MessageItem
+                  message={m}
+                  variant="sender"
+                  showChat={titles.get(m.chat_id) ?? String(m.chat_id)}
+                  chatTitle={titles.get(m.chat_id)}
+                />
+              </Fragment>
             );
           })}
         </div>

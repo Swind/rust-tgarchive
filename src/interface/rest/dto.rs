@@ -374,6 +374,8 @@ pub struct SenderDto {
     pub username: Option<String>,
     /// Telegram's bot flag; null = unknown or not a user.
     pub is_bot: Option<bool>,
+    /// True when the sender is the bound Telegram account.
+    pub is_self: bool,
 }
 
 impl From<SenderInfo> for SenderDto {
@@ -383,6 +385,7 @@ impl From<SenderInfo> for SenderDto {
             display_name: sender.display_name,
             username: sender.username,
             is_bot: sender.is_bot,
+            is_self: sender.is_self,
         }
     }
 }

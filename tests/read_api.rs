@@ -192,7 +192,7 @@ async fn messages_expose_resolved_sender_and_senders_endpoint_counts_by_activity
     let by_id = |id: i64| items.iter().find(|m| m["id"] == id).unwrap();
     assert_eq!(
         by_id(1)["sender"],
-        serde_json::json!({"id": user(1).get(), "display_name": "Alice A", "username": "alice", "is_bot": null})
+        serde_json::json!({"id": user(1).get(), "display_name": "Alice A", "username": "alice", "is_bot": null, "is_self": false})
     );
     assert_eq!(by_id(8)["sender"]["display_name"], "Bob");
     assert!(by_id(8)["sender"]["username"].is_null());
