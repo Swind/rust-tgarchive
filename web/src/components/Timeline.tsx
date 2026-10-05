@@ -6,7 +6,7 @@ import MessageItem from './MessageItem';
 import { dayKey, formatDate } from '../lib/format';
 import { mergeMessages, nextOlderCursor } from '../lib/messages';
 
-export type TimelineFilters = { senderId?: number; toIso?: string; includeDeleted: boolean };
+export type TimelineFilters = { senderId?: number; toIso?: string; includeDeleted: boolean; excludeBots?: boolean };
 
 function Rows({ messages, anchorId, chatTitle }: { messages: Message[]; anchorId?: number; chatTitle?: string | null }) {
   let last = '';
@@ -74,6 +74,7 @@ export function ListTimeline({ chatId, filters, chatTitle }: { chatId: number; f
         sender_id: filters.senderId,
         to: filters.toIso,
         include_deleted: filters.includeDeleted || undefined,
+        exclude_bots: filters.excludeBots || undefined,
       }),
     getNextPageParam: (last) => nextOlderCursor(last),
   });

@@ -56,6 +56,8 @@ pub enum SpecError {
         SenderPageDto,
         SenderChatDto,
         SenderDetailDto,
+        SenderNameDto,
+        SenderNameHistoryDto,
         MessageContextDto,
         MessageDto,
         AttachmentDto,

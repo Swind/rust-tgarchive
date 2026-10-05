@@ -162,6 +162,12 @@ paths:
         required: false
         schema:
           type: boolean
+      - name: exclude_bots
+        in: query
+        description: Hide messages from known bots (`senders.is_bot=1`); unknown senders are kept.
+        required: false
+        schema:
+          type: boolean
       responses:
         '200':
           description: ''
@@ -538,6 +544,12 @@ paths:
         required: false
         schema:
           type: boolean
+      - name: exclude_bots
+        in: query
+        description: Hide messages from known bots (`senders.is_bot=1`); unknown senders are kept.
+        required: false
+        schema:
+          type: boolean
       responses:
         '200':
           description: ''
@@ -629,6 +641,12 @@ paths:
         required: false
         schema:
           type: boolean
+      - name: exclude_bots
+        in: query
+        description: Hide messages from known bots (`senders.is_bot=1`); unknown senders are kept.
+        required: false
+        schema:
+          type: boolean
       - name: sort
         in: query
         description: Result order; default `relevance`.
@@ -697,6 +715,12 @@ paths:
       - name: include_deleted
         in: query
         description: Count deleted messages too.
+        required: false
+        schema:
+          type: boolean
+      - name: is_bot
+        in: query
+        description: '`true` = only bots, `false` = only non-bots (unknown included); omitted = everyone.'
         required: false
         schema:
           type: boolean
@@ -1294,6 +1318,7 @@ components:
       - chat_count
       - is_self
       - chats
+      - name_history
       properties:
         chat_count:
           type: integer
@@ -1315,6 +1340,10 @@ components:
         id:
           type: integer
           format: int64
+        is_bot:
+          type:
+          - boolean
+          - 'null'
         is_self:
           type: boolean
         kind:
@@ -1328,6 +1357,11 @@ components:
           type: integer
           format: int64
           minimum: 0
+        name_history:
+          type: array
+          items:
+            $ref: '#/components/schemas/SenderNameHistoryDto'
+          description: Observed names, newest observation first.
         username:
           type:
           - string
@@ -1345,6 +1379,11 @@ components:
         id:
           type: integer
           format: int64
+        is_bot:
+          type:
+          - boolean
+          - 'null'
+          description: Telegram's bot flag; null = unknown or not a user.
         username:
           type:
           - string
@@ -1356,6 +1395,41 @@ components:
       - chat
       - channel
       - unknown
+    SenderNameDto:
+      type: object
+      description: A historical display name / username combination.
+      properties:
+        display_name:
+          type:
+          - string
+          - 'null'
+        username:
+          type:
+          - string
+          - 'null'
+    SenderNameHistoryDto:
+      type: object
+      description: |-
+        Names tgarchive observed for a sender. Timestamps are when tgarchive saw the names, not when
+        the user changed them.
+      required:
+      - first_seen_at
+      - last_seen_at
+      properties:
+        display_name:
+          type:
+          - string
+          - 'null'
+        first_seen_at:
+          type: string
+          format: date-time
+        last_seen_at:
+          type: string
+          format: date-time
+        username:
+          type:
+          - string
+          - 'null'
     SenderPageDto:
       type: object
       required:
@@ -1376,6 +1450,7 @@ components:
       required:
       - id
       - kind
+      - matched_history
       - message_count
       - chat_count
       - is_self
@@ -1398,6 +1473,11 @@ components:
         id:
           type: integer
           format: int64
+        is_bot:
+          type:
+          - boolean
+          - 'null'
+          description: Telegram's bot flag; null = unknown or not a user.
         is_self:
           type: boolean
           description: The Telegram account this archive is bound to.
@@ -1408,6 +1488,14 @@ components:
           - string
           - 'null'
           format: date-time
+        matched_history:
+          type: boolean
+          description: True when a text query matched only a historical name (see `matched_name`).
+        matched_name:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/SenderNameDto'
+            description: The old display name/username that matched the query; null unless `matched_history`.
         message_count:
           type: integer
           format: int64
@@ -1437,6 +1525,10 @@ components:
         id:
           type: integer
           format: int64
+        is_bot:
+          type:
+          - boolean
+          - 'null'
         message_count:
           type: integer
           format: int64

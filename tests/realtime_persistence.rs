@@ -232,6 +232,7 @@ async fn replaying_the_same_realtime_batch_after_a_crash_leaves_one_row() {
                 post_author: None,
                 time_range: tgarchive::application::TimeRange::new(None, None).unwrap(),
                 include_deleted: false,
+                exclude_bots: false,
             },
             before: None,
             after: None,

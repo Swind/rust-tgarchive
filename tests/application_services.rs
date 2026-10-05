@@ -245,6 +245,7 @@ fn list_query() -> ListMessagesQuery {
             post_author: None,
             time_range: TimeRange::new(None, None).unwrap(),
             include_deleted: false,
+            exclude_bots: false,
         },
         before: None,
         after: None,
@@ -291,6 +292,7 @@ async fn ingestion_uses_one_batch_path_and_propagates_writer_failure() {
                 kind: tgarchive::domain::SenderKind::User,
                 display_name: Some("Sender".into()),
                 username: None,
+                is_bot: None,
             }],
             checkpoint: Some((
                 chat().id,

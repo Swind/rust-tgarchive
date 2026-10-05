@@ -75,6 +75,7 @@ fn filters() -> MessageFilters {
         post_author: None,
         time_range: TimeRange::new(None, None).unwrap(),
         include_deleted: false,
+        exclude_bots: false,
     }
 }
 
@@ -444,6 +445,7 @@ async fn fractional_time_filters_and_cursors_match_second_precision_storage() {
             post_author: None,
             time_range: TimeRange::new(Some(half), None).unwrap(),
             include_deleted: false,
+            exclude_bots: false,
         },
         before: None,
         after: None,
@@ -466,6 +468,7 @@ async fn fractional_time_filters_and_cursors_match_second_precision_storage() {
             post_author: None,
             time_range: TimeRange::new(None, Some(half)).unwrap(),
             include_deleted: false,
+            exclude_bots: false,
         },
         before: None,
         after: None,

@@ -93,6 +93,7 @@ impl Filter {
             post_author: None,
             time_range: TimeRange::new(time(self.from), time(self.to)).unwrap(),
             include_deleted: self.deleted,
+            exclude_bots: false,
         }
     }
 }

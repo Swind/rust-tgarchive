@@ -111,6 +111,7 @@ tgarchive --output json messages list --limit 5
 - `tgarchive senders search <文字> [--sort messages|last-message|name]`：名稱／@username 子字串（NFKC＋不分大小寫，中文可搜部分字）、`@username`（完全相符）或數字 ID；顯示訊息數、聊天室數、最近發言、是否為自己。`tgarchive senders get <id|@username|名稱|me>` 另列各聊天室分佈。
 - `messages list|search --sender <id|@username|名稱|me>`：解析成唯一使用者；名稱有多位候選時列出候選並以非零結束；`me` 為封存綁定的 Telegram 帳號。另有 `--post-author`（頻道貼文署名，完全相符）。
 - REST：`GET /api/v1/senders?q=&sort=messages|last_message|name&limit=&cursor=&include_deleted=`、`GET /api/v1/senders/{id}`（含 `chats` 分佈）；`/messages`、`/messages/search` 支援 `sender_id`、`post_author`。訊息含 `post_author` 與 `forward{from_id,from_name,date}`（轉發來源不影響寄件人歸屬）。UI：頂欄「使用者」、`/senders/:id`，點寄件人名稱即跳轉。
+- Bot 與曾用名稱（migration 0008）：訊息／寄件人帶 `is_bot`（Telegram 的 bot 旗標；群組／頻道與未知為 `null`，之後觀察到非 NULL 值才會更新、NULL 不會清除）。`GET /api/v1/senders?is_bot=true|false`；`exclude_bots=true` 用於 `GET /messages`、`/chats/{id}/messages`、`/messages/search`（CLI `--exclude-bots`；寄件人未知的訊息保留）。`GET /api/v1/senders/{id}` 另含 `name_history: [{display_name, username, first_seen_at, last_seen_at}]`（新到舊），`/senders?q=` 也會比對曾用名稱／曾用 @username（結果帶 `matched_history: true` 與 `matched_name`）。**曾用名稱只代表 tgarchive 觀察到的名稱與時間，不是對方實際改名的時間**；歷史同步取得的是使用者「現在」的資料。CLI：`senders get` 列出曾用名稱，`senders search` 以 `[matched old name: …]` 標示、可加 `--is-bot true|false`。UI：🤖 標記、使用者清單「全部／人／Bot」、搜尋與聊天室「隱藏 bot」、寄件人頁「曾用名稱」、清單「曾用名：…」。
 - 自己發出的訊息（`out` 且無 `from_id`）歸給綁定帳號，帳號資料（get_me）會寫入 `senders`。
 - 舊資料中 `sender_id` 為 NULL 的列：
   - `tgarchive repair senders [--dry-run]`（僅本機，不需 Telegram）：頻道（kind=channel）的 NULL 以頻道本身為寄件人；分批交易、可重複執行、回報每聊天室筆數。**私訊／群組的 NULL 無法判斷方向，不會猜測**，報告中列為「仍無寄件人」，需用下面的重新抓取補上。資料庫被其他程序鎖住時會提示稍後重試。
@@ -177,7 +178,7 @@ curl -s "http://127.0.0.1:8080/api/v1/messages/search?q=keyword"
 
 供 Web UI 使用的讀取能力：
 
-- **寄件人**：`MessageDto.sender` 為 `{ id, display_name, username }`（無寄件人時為 `null`；頻道以自身名義發文時 `display_name` 取聊天室標題），由查詢 JOIN `senders` 取得，無額外 N+1 查詢。`GET /chats/{id}/senders?limit=`（預設 100、最大 1000）回傳 `[{ id, display_name, username, message_count }]`，依 `message_count` 由大到小，不含已刪除訊息。
+- **寄件人**：`MessageDto.sender` 為 `{ id, display_name, username, is_bot }`（無寄件人時為 `null`；頻道以自身名義發文時 `display_name` 取聊天室標題），由查詢 JOIN `senders` 取得，無額外 N+1 查詢。`GET /chats/{id}/senders?limit=`（預設 100、最大 1000）回傳 `[{ id, display_name, username, is_bot, message_count }]`，依 `message_count` 由大到小，不含已刪除訊息。
 - **已刪除訊息**：`messages`、`chats/{id}/messages`、`messages/search`、`chats/{id}/messages/{message_id}`、`.../context` 皆支援 `include_deleted=true`（預設 `false`，行為不變）。`MessageDto` 一律含 `is_deleted` 與 `deleted_at`。只有墓碑（沒有保存訊息本文）的刪除不會出現。
 - **聊天室統計**：`ChatDto.stats`（`GET /chats`、`GET /chats/{id}`、tracking 回應；`POST /chats/refresh` 省略）含 `message_count`（未刪除）、`deleted_count`、`first_message_at`、`last_message_at`、`history_complete`、`last_sync_completed_at`、`last_error`（已清理，可為 `null`）。`GET /chats?sort=title|last_message|message_count`（預設依 chat ID）。
 - **訊息脈絡**：`GET /chats/{id}/messages/{message_id}/context?before=20&after=20`（各 0–100，超過回 400 `invalid_context_size`）回傳 `{ anchor, before, after, has_more_before, has_more_after, before_cursor, after_cursor }`，`before`／`after` 皆由舊到新排序；`before_cursor` 可直接作為 list 端點的 `before`、`after_cursor` 作為 `after` 繼續捲動。錨點不存在（或已刪除且未帶 `include_deleted`）回 404。

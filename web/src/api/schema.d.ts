@@ -536,12 +536,15 @@ export interface components {
             first_message_at?: string | null;
             /** Format: int64 */
             id: number;
+            is_bot?: boolean | null;
             is_self: boolean;
             kind: components["schemas"]["SenderKindDto"];
             /** Format: date-time */
             last_message_at?: string | null;
             /** Format: int64 */
             message_count: number;
+            /** @description Observed names, newest observation first. */
+            name_history: components["schemas"]["SenderNameHistoryDto"][];
             username?: string | null;
         };
         SenderDto: {
@@ -549,10 +552,29 @@ export interface components {
             display_name?: string | null;
             /** Format: int64 */
             id: number;
+            /** @description Telegram's bot flag; null = unknown or not a user. */
+            is_bot?: boolean | null;
             username?: string | null;
         };
         /** @enum {string} */
         SenderKindDto: "user" | "chat" | "channel" | "unknown";
+        /** @description A historical display name / username combination. */
+        SenderNameDto: {
+            display_name?: string | null;
+            username?: string | null;
+        };
+        /**
+         * @description Names tgarchive observed for a sender. Timestamps are when tgarchive saw the names, not when
+         *     the user changed them.
+         */
+        SenderNameHistoryDto: {
+            display_name?: string | null;
+            /** Format: date-time */
+            first_seen_at: string;
+            /** Format: date-time */
+            last_seen_at: string;
+            username?: string | null;
+        };
         SenderPageDto: {
             items: components["schemas"]["SenderProfileDto"][];
             /** @description Opaque cursor; pass it back as `cursor` to get the next page. */
@@ -571,11 +593,16 @@ export interface components {
             first_message_at?: string | null;
             /** Format: int64 */
             id: number;
+            /** @description Telegram's bot flag; null = unknown or not a user. */
+            is_bot?: boolean | null;
             /** @description The Telegram account this archive is bound to. */
             is_self: boolean;
             kind: components["schemas"]["SenderKindDto"];
             /** Format: date-time */
             last_message_at?: string | null;
+            /** @description True when a text query matched only a historical name (see `matched_name`). */
+            matched_history: boolean;
+            matched_name?: null | components["schemas"]["SenderNameDto"];
             /**
              * Format: int64
              * @description Messages by this sender (deleted ones only with `include_deleted=true`).
@@ -592,6 +619,7 @@ export interface components {
             display_name?: string | null;
             /** Format: int64 */
             id: number;
+            is_bot?: boolean | null;
             /**
              * Format: int64
              * @description Non-deleted messages by this sender in the chat.
@@ -776,6 +804,8 @@ export interface operations {
                 limit?: number;
                 /** @description Also return deleted messages (flagged with `is_deleted`/`deleted_at`). */
                 include_deleted?: boolean;
+                /** @description Hide messages from known bots (`senders.is_bot=1`); unknown senders are kept. */
+                exclude_bots?: boolean;
             };
             header?: never;
             path: {
@@ -1142,6 +1172,8 @@ export interface operations {
                 limit?: number;
                 /** @description Also return deleted messages (flagged with `is_deleted`/`deleted_at`). */
                 include_deleted?: boolean;
+                /** @description Hide messages from known bots (`senders.is_bot=1`); unknown senders are kept. */
+                exclude_bots?: boolean;
             };
             header?: never;
             path?: never;
@@ -1200,6 +1232,8 @@ export interface operations {
                 limit?: number;
                 /** @description Also return deleted messages (flagged with `is_deleted`/`deleted_at`). */
                 include_deleted?: boolean;
+                /** @description Hide messages from known bots (`senders.is_bot=1`); unknown senders are kept. */
+                exclude_bots?: boolean;
                 /** @description Result order; default `relevance`. */
                 sort?: components["schemas"]["SearchSortDto"];
             };
@@ -1259,6 +1293,8 @@ export interface operations {
                 cursor?: string;
                 /** @description Count deleted messages too. */
                 include_deleted?: boolean;
+                /** @description `true` = only bots, `false` = only non-bots (unknown included); omitted = everyone. */
+                is_bot?: boolean;
             };
             header?: never;
             path?: never;

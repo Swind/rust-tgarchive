@@ -184,6 +184,10 @@ pub struct Sender {
     pub kind: SenderKind,
     pub display_name: Option<String>,
     pub username: Option<String>,
+    /// `Some` only for users (Telegram's `bot` flag); `None` = unknown / not a user. Never
+    /// clears a stored value.
+    #[serde(default)]
+    pub is_bot: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

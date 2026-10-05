@@ -83,6 +83,7 @@ export default function ChatPane({ chatId }: { chatId: number }) {
   const sender = params.get('sender');
   const date = params.get('date') ?? '';
   const includeDeleted = params.get('deleted') === '1';
+  const hideBots = params.get('hide_bots') === '1';
 
   const update = (key: string, value: string | null) => {
     const next = new URLSearchParams(params);
@@ -100,6 +101,7 @@ export default function ChatPane({ chatId }: { chatId: number }) {
     senderId: sender && /^-?\d+$/.test(sender) ? Number(sender) : undefined,
     toIso: localDayToIso(date, true),
     includeDeleted,
+    excludeBots: hideBots,
   };
 
   return (
@@ -137,6 +139,9 @@ export default function ChatPane({ chatId }: { chatId: number }) {
           <label>
             <input type="checkbox" checked={includeDeleted} onChange={(e) => update('deleted', e.target.checked ? '1' : null)} /> 顯示已刪除
           </label>
+          <label>
+            <input type="checkbox" checked={hideBots} onChange={(e) => update('hide_bots', e.target.checked ? '1' : null)} /> 隱藏 bot
+          </label>
           {messageId !== undefined && (
             <button onClick={() => update('message', null)}>離開脈絡檢視 ✕</button>
           )}
@@ -145,7 +150,7 @@ export default function ChatPane({ chatId }: { chatId: number }) {
       {messageId !== undefined ? (
         <ContextTimeline key={`${messageId}-${includeDeleted}`} chatId={chatId} messageId={messageId} includeDeleted={includeDeleted} chatTitle={c.title} />
       ) : (
-        <ListTimeline key={`${sender}-${date}-${includeDeleted}`} chatId={chatId} filters={filters} chatTitle={c.title} />
+        <ListTimeline key={`${sender}-${date}-${includeDeleted}-${hideBots}`} chatId={chatId} filters={filters} chatTitle={c.title} />
       )}
     </div>
   );

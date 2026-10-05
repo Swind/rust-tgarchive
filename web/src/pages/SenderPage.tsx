@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { api, ApiError } from '../api/client';
+import BotBadge from '../components/BotBadge';
 import { Empty, ErrorBox, KIND_LABEL, useDebounced } from '../components/common';
 import MessageItem, { Highlighted } from '../components/MessageItem';
 import { KIND_SENDER, senderLabel } from '../components/senderFormat';
@@ -108,7 +109,8 @@ export default function SenderPage() {
       <p><Link to="/senders">← 使用者清單</Link></p>
       <header className="sender-head">
         <h2>
-          {senderLabel(s)} {s.is_self && <span className="badge green">自己</span>}
+          {senderLabel(s)} <BotBadge isBot={s.is_bot} />
+          {s.is_self && <span className="badge green">自己</span>}
           <span className="badge gray">{KIND_SENDER[s.kind]}</span>
         </h2>
         <div className="muted small">
@@ -121,6 +123,26 @@ export default function SenderPage() {
           {s.last_message_at && <span>最近 {formatRelative(s.last_message_at)}</span>}
         </div>
       </header>
+
+      {s.name_history.length > 1 && (
+        <section aria-label="曾用名稱">
+          <h3>曾用名稱</h3>
+          <p className="muted small">時間為 tgarchive 觀察到該名稱的時間，不一定是對方實際改名的時間。</p>
+          <ol className="name-history">
+            {s.name_history.map((h, i) => (
+              <li key={`${h.first_seen_at}-${i}`}>
+                <strong>{h.display_name || '（無名稱）'}</strong>
+                {h.username && <> @{h.username}</>}
+                {i === 0 && <span className="badge green">目前</span>}
+                <span className="muted small">
+                  {' '}{formatDateTime(h.first_seen_at)}
+                  {h.last_seen_at !== h.first_seen_at && <> ～ {formatDateTime(h.last_seen_at)}</>}
+                </span>
+              </li>
+            ))}
+          </ol>
+        </section>
+      )}
 
       <section aria-label="聊天室分佈">
         <h3>聊天室分佈</h3>

@@ -101,6 +101,9 @@ pub enum SendersCommand {
         /// Count deleted messages too
         #[arg(long)]
         include_deleted: bool,
+        /// `true`: only bots; `false`: only non-bots
+        #[arg(long)]
+        is_bot: Option<bool>,
     },
     /// Show one sender with its per-chat breakdown
     Get {
@@ -251,6 +254,9 @@ pub struct MessageFilterArgs {
     /// Also include messages deleted on Telegram.
     #[arg(long)]
     pub include_deleted: bool,
+    /// Hide messages from known bots (unknown senders are kept).
+    #[arg(long)]
+    pub exclude_bots: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -482,6 +488,7 @@ fn prepare_query(command: Command) -> Result<PreparedCommand, CliError> {
                 sort,
                 limit,
                 include_deleted,
+                is_bot,
             } => Ok(PreparedCommand::SendersSearch(SenderQuery {
                 text: Some(text),
                 sort: match sort {
@@ -492,6 +499,7 @@ fn prepare_query(command: Command) -> Result<PreparedCommand, CliError> {
                 limit: PageSize::new(limit)?,
                 offset: 0,
                 include_deleted,
+                is_bot,
             })),
             SendersCommand::Get {
                 sender,
@@ -676,6 +684,7 @@ async fn resolve_sender(app: &Application, spec: &str) -> Result<SenderId, CliEr
             limit: PageSize::new(20)?,
             offset: 0,
             include_deleted: true,
+            is_bot: None,
         })
         .await?;
     match page.items.as_slice() {
@@ -719,7 +728,24 @@ fn human_sender(sender: &SenderProfile) -> String {
             .map(|time| time.to_rfc3339())
             .unwrap_or_default(),
         if sender.is_self { "\tself" } else { "" }
-    )
+    ) + if sender.is_bot == Some(true) {
+        "\tbot"
+    } else {
+        ""
+    } + &sender
+        .matched_history
+        .as_ref()
+        .map(|old| {
+            format!(
+                "\t[matched old name: {}{}]",
+                old.display_name.as_deref().unwrap_or(""),
+                old.username
+                    .as_deref()
+                    .map(|name| format!(" @{name}"))
+                    .unwrap_or_default()
+            )
+        })
+        .unwrap_or_default()
 }
 
 #[derive(Serialize)]
@@ -728,6 +754,10 @@ struct SenderOutput<'a> {
     kind: &'static str,
     display_name: &'a Option<String>,
     username: &'a Option<String>,
+    is_bot: Option<bool>,
+    matched_history: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    matched_name: Option<SenderNameOutput<'a>>,
     message_count: u64,
     chat_count: u64,
     first_message_at: Option<DateTime<Utc>>,
@@ -735,6 +765,22 @@ struct SenderOutput<'a> {
     is_self: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     chats: Option<Vec<SenderChatOutput<'a>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name_history: Option<Vec<SenderNameHistoryOutput<'a>>>,
+}
+
+#[derive(Serialize)]
+struct SenderNameOutput<'a> {
+    display_name: &'a Option<String>,
+    username: &'a Option<String>,
+}
+
+#[derive(Serialize)]
+struct SenderNameHistoryOutput<'a> {
+    display_name: &'a Option<String>,
+    username: &'a Option<String>,
+    first_seen_at: DateTime<Utc>,
+    last_seen_at: DateTime<Utc>,
 }
 
 #[derive(Serialize)]
@@ -755,12 +801,19 @@ fn sender_output<'a>(
         kind: sender_kind_name(sender.kind),
         display_name: &sender.display_name,
         username: &sender.username,
+        is_bot: sender.is_bot,
+        matched_history: sender.matched_history.is_some(),
+        matched_name: sender.matched_history.as_ref().map(|old| SenderNameOutput {
+            display_name: &old.display_name,
+            username: &old.username,
+        }),
         message_count: sender.message_count,
         chat_count: sender.chat_count,
         first_message_at: sender.first_message_at,
         last_message_at: sender.last_message_at,
         is_self: sender.is_self,
         chats,
+        name_history: None,
     }
 }
 
@@ -797,7 +850,20 @@ fn render_sender_detail(output: OutputFormat, detail: &SenderDetail) -> Result<S
                 last_message_at: chat.last_message_at,
             })
             .collect();
-        json(&sender_output(&detail.profile, Some(chats)))
+        let mut out = sender_output(&detail.profile, Some(chats));
+        out.name_history = Some(
+            detail
+                .name_history
+                .iter()
+                .map(|entry| SenderNameHistoryOutput {
+                    display_name: &entry.display_name,
+                    username: &entry.username,
+                    first_seen_at: entry.first_seen_at,
+                    last_seen_at: entry.last_seen_at,
+                })
+                .collect(),
+        );
+        json(&out)
     } else {
         let mut lines = vec![human_sender(&detail.profile)];
         lines.extend(detail.chats.iter().map(|chat| {
@@ -812,6 +878,24 @@ fn render_sender_detail(output: OutputFormat, detail: &SenderDetail) -> Result<S
                     .unwrap_or_default()
             )
         }));
+        if !detail.name_history.is_empty() {
+            lines.push(
+                "  name history (newest first; times are when tgarchive observed the name):".into(),
+            );
+            lines.extend(detail.name_history.iter().map(|entry| {
+                format!(
+                    "    {}\t{}\t{} .. {}",
+                    entry.display_name.as_deref().unwrap_or(""),
+                    entry
+                        .username
+                        .as_deref()
+                        .map(|name| format!("@{name}"))
+                        .unwrap_or_default(),
+                    entry.first_seen_at.to_rfc3339(),
+                    entry.last_seen_at.to_rfc3339()
+                )
+            }));
+        }
         Ok(lines.join("\n"))
     }
 }
@@ -920,6 +1004,7 @@ fn convert_filters(
         post_author: args.post_author,
         time_range: TimeRange::new(args.from, args.to)?,
         include_deleted: args.include_deleted,
+        exclude_bots: args.exclude_bots,
     };
     let before = args
         .before

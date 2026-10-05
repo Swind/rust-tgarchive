@@ -582,6 +582,7 @@ pub async fn ingest(store: &SqliteStore, corpus: &Corpus) {
             kind: SenderKind::User,
             display_name: Some(format!("user {i}")),
             username: None,
+            is_bot: None,
         })
         .collect();
     let mut first = Some((chats, senders));

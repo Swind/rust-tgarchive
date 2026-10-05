@@ -86,6 +86,7 @@ fn filters() -> MessageFilters {
         post_author: None,
         time_range: TimeRange::new(None, None).unwrap(),
         include_deleted: false,
+        exclude_bots: false,
     }
 }
 

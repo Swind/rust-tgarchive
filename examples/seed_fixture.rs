@@ -28,6 +28,8 @@ const CAROL: i64 = 3003;
 const TELEGRAM: i64 = 777_000;
 const SELF: i64 = 9000;
 const XIAOMING: i64 = 4004;
+const WEATHER_BOT: i64 = 5005;
+const DANA: i64 = 6006;
 const BIG: i64 = -1_002_000_001;
 const NEWS: i64 = -1_002_000_002;
 const EMPTY: i64 = -1_002_000_003;
@@ -62,6 +64,7 @@ fn sender(id: i64, name: &str, username: Option<&str>) -> Sender {
         kind: SenderKind::User,
         display_name: Some(name.into()),
         username: username.map(Into::into),
+        is_bot: None,
     }
 }
 
@@ -444,6 +447,55 @@ async fn main() {
         store
             .write_batch(IngestBatch {
                 records: chunk.to_vec(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+    }
+
+    // A bot with messages, and a sender observed under three different names (each batch is an
+    // observation at its own `collected_at`, which becomes the history's first_seen_at).
+    let mut bot = sender(WEATHER_BOT, "天氣小幫手", Some("weather_helper_bot"));
+    bot.is_bot = Some(true);
+    let bot_records = (1..=3i64)
+        .map(|i| {
+            let at = base() - Duration::days(36) + Duration::hours(i);
+            created(msg(
+                OLD,
+                200 + i,
+                Some(WEATHER_BOT),
+                at,
+                Some(&format!("天氣預報播報 {i}")),
+            ))
+        })
+        .collect();
+    store
+        .write_batch(IngestBatch {
+            senders: vec![bot],
+            records: bot_records,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    for (i, (days_ago, name, username)) in [
+        (40i64, "Dana Lin", "dana"),
+        (20, "Dana 林", "dana"),
+        (5, "林黛娜", "dana_lin"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let at = base() - Duration::days(days_ago);
+        store
+            .write_batch(IngestBatch {
+                senders: vec![sender(DANA, name, Some(username))],
+                records: vec![created(msg(
+                    OLD,
+                    211 + i as i64,
+                    Some(DANA),
+                    at,
+                    Some(&format!("換名紀錄 {}", i + 1)),
+                ))],
                 ..Default::default()
             })
             .await

@@ -72,26 +72,30 @@ pub fn map_sender(peer_id: PeerId, peer: Option<&Peer>) -> Result<Sender, Mappin
         PeerKind::Chat => SenderKind::Chat,
         PeerKind::Channel => SenderKind::Channel,
     };
-    let (display_name, username) = match peer {
+    let (display_name, username, is_bot) = match peer {
         Some(Peer::User(user)) => (
             display_name(user.first_name(), user.last_name()),
             user.username().map(str::to_owned),
+            user_is_bot(&user.raw),
         ),
         Some(Peer::Group(group)) => (
             group.title().map(str::to_owned),
             group.username().map(str::to_owned),
+            None,
         ),
         Some(Peer::Channel(channel)) => (
             Some(channel.title().to_owned()),
             channel.username().map(str::to_owned),
+            None,
         ),
-        None => (None, None),
+        None => (None, None, None),
     };
     Ok(Sender {
         id: sender_id(peer_id)?,
         kind,
         display_name,
         username,
+        is_bot,
     })
 }
 
@@ -112,7 +116,17 @@ pub fn map_account(user: &grammers_client::peer::User) -> Result<Sender, Mapping
         kind: SenderKind::User,
         display_name: display_name(user.first_name(), user.last_name()),
         username: user.username().map(str::to_owned),
+        is_bot: user_is_bot(&user.raw),
     })
+}
+
+/// Telegram's `bot` flag; `None` for empty/deleted user stubs, which carry no profile data.
+/// Only users get a value: chats and channels stay `None` (not applicable).
+fn user_is_bot(raw: &grammers_client::tl::enums::User) -> Option<bool> {
+    match raw {
+        grammers_client::tl::enums::User::User(user) => Some(user.bot),
+        grammers_client::tl::enums::User::Empty(_) => None,
+    }
 }
 
 /// Maps message and service-message TL fixtures without requiring a live peer cache.
@@ -409,6 +423,73 @@ mod tests {
             sender_id(PeerId::self_user()),
             Err(MappingError::InvalidPeerId)
         ));
+    }
+
+    fn raw_user(bot: bool) -> grammers_client::tl::enums::User {
+        use grammers_client::tl::types::User;
+        User {
+            is_self: false,
+            contact: false,
+            mutual_contact: false,
+            deleted: false,
+            bot,
+            bot_chat_history: false,
+            bot_nochats: false,
+            verified: false,
+            restricted: false,
+            min: false,
+            bot_inline_geo: false,
+            support: false,
+            scam: false,
+            apply_min_photo: false,
+            fake: false,
+            bot_attach_menu: false,
+            premium: false,
+            attach_menu_enabled: false,
+            bot_can_edit: false,
+            close_friend: false,
+            stories_hidden: false,
+            stories_unavailable: false,
+            contact_require_premium: false,
+            bot_business: false,
+            bot_has_main_app: false,
+            bot_forum_view: false,
+            bot_forum_can_manage_topics: false,
+            bot_can_manage_bots: false,
+            bot_guestchat: false,
+            bot_guard: false,
+            id: 7,
+            access_hash: None,
+            first_name: Some("Helper".into()),
+            last_name: None,
+            username: None,
+            phone: None,
+            photo: None,
+            status: None,
+            bot_info_version: None,
+            restriction_reason: None,
+            bot_inline_placeholder: None,
+            lang_code: None,
+            emoji_status: None,
+            usernames: None,
+            stories_max_id: None,
+            color: None,
+            profile_color: None,
+            bot_active_users: None,
+            bot_verification_icon: None,
+            send_paid_messages_stars: None,
+        }
+        .into()
+    }
+
+    #[test]
+    fn bot_flag_comes_from_the_user_and_is_unknown_for_empty_stubs() {
+        use grammers_client::tl::{enums, types};
+
+        assert_eq!(user_is_bot(&raw_user(true)), Some(true));
+        assert_eq!(user_is_bot(&raw_user(false)), Some(false));
+        let empty = enums::User::Empty(types::UserEmpty { id: 7 });
+        assert_eq!(user_is_bot(&empty), None);
     }
 
     #[test]

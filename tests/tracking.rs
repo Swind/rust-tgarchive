@@ -92,6 +92,7 @@ fn user() -> Sender {
         kind: SenderKind::User,
         display_name: Some("u".into()),
         username: None,
+        is_bot: None,
     }
 }
 
@@ -214,6 +215,7 @@ async fn track_and_untrack_are_idempotent_keep_messages_and_survive_refresh() {
                 post_author: None,
                 time_range: TimeRange::new(None, None).unwrap(),
                 include_deleted: false,
+                exclude_bots: false,
             },
             before: None,
             after: None,

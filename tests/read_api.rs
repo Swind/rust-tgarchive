@@ -150,12 +150,14 @@ async fn seed_with_deletions(f: &Fixture) -> ChatId {
                     kind: SenderKind::User,
                     display_name: Some("Alice A".into()),
                     username: Some("alice".into()),
+                    is_bot: None,
                 },
                 Sender {
                     id: user(2),
                     kind: SenderKind::User,
                     display_name: Some("Bob".into()),
                     username: None,
+                    is_bot: None,
                 },
             ],
             records: (1..=10)
@@ -190,7 +192,7 @@ async fn messages_expose_resolved_sender_and_senders_endpoint_counts_by_activity
     let by_id = |id: i64| items.iter().find(|m| m["id"] == id).unwrap();
     assert_eq!(
         by_id(1)["sender"],
-        serde_json::json!({"id": user(1).get(), "display_name": "Alice A", "username": "alice"})
+        serde_json::json!({"id": user(1).get(), "display_name": "Alice A", "username": "alice", "is_bot": null})
     );
     assert_eq!(by_id(8)["sender"]["display_name"], "Bob");
     assert!(by_id(8)["sender"]["username"].is_null());
@@ -203,8 +205,8 @@ async fn messages_expose_resolved_sender_and_senders_endpoint_counts_by_activity
     assert_eq!(
         senders,
         serde_json::json!([
-            {"id": user(1).get(), "display_name": "Alice A", "username": "alice", "message_count": 5},
-            {"id": user(2).get(), "display_name": "Bob", "username": null, "message_count": 2},
+            {"id": user(1).get(), "display_name": "Alice A", "username": "alice", "is_bot": null, "message_count": 5},
+            {"id": user(2).get(), "display_name": "Bob", "username": null, "is_bot": null, "message_count": 2},
         ])
     );
     let (_, limited) = get(

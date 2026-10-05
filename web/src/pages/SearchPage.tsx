@@ -3,6 +3,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { api } from '../api/client';
 import { Empty, ErrorBox, useDebounced } from '../components/common';
+import BotBadge from '../components/BotBadge';
 import { Highlighted, senderName } from '../components/MessageItem';
 import SenderLink from '../components/SenderLink';
 import SenderPicker from '../components/SenderPicker';
@@ -22,6 +23,9 @@ export default function SearchPage() {
   const from = params.get('from') ?? '';
   const to = params.get('to') ?? '';
   const deleted = params.get('include_deleted') === '1';
+  const hideBots = params.get('hide_bots') === '1';
+  const [hideBotsBox, setHideBotsBox] = useState(hideBots);
+  useEffect(() => setHideBotsBox(hideBots), [hideBots]);
   const [deletedBox, setDeletedBox] = useState(deleted);
   useEffect(() => setDeletedBox(deleted), [deleted]);
   const sort: Sort = params.get('sort') === 'time' ? 'time' : 'relevance';
@@ -55,7 +59,7 @@ export default function SearchPage() {
   const titles = useMemo(() => new Map((chats.data ?? []).map((c) => [c.id, chatTitle(c)])), [chats.data]);
 
   const results = useInfiniteQuery({
-    queryKey: ['search', q, chatId, senderId, from, to, deleted, sort],
+    queryKey: ['search', q, chatId, senderId, from, to, deleted, hideBots, sort],
     enabled,
     initialPageParam: undefined as string | undefined,
     queryFn: ({ pageParam }) =>
@@ -66,6 +70,7 @@ export default function SearchPage() {
         from: localDayToIso(from, false),
         to: localDayToIso(to, true),
         include_deleted: deleted || undefined,
+        exclude_bots: hideBots || undefined,
         sort,
         before: pageParam,
         limit: 30,
@@ -107,6 +112,10 @@ export default function SearchPage() {
       </div>
       <div className="filters">
         <SenderPicker value={senderId} onChange={(id) => update({ sender: id === undefined ? '' : String(id) })} />
+        <label><input type="checkbox" checked={hideBotsBox} onChange={(e) => {
+          setHideBotsBox(e.target.checked);
+          update({ hide_bots: e.target.checked ? '1' : '' });
+        }} /> 隱藏 bot</label>
       </div>
       <div className="sort-toggle" role="group" aria-label="排序">
         <span className="muted small">排序</span>
@@ -138,7 +147,7 @@ export default function SearchPage() {
           <li key={`${m.chat_id}-${m.id}`}>
             <Link to={`/chats/${m.chat_id}?message=${m.id}${deleted ? '&deleted=1' : ''}`} className={`result${m.is_deleted ? ' deleted' : ''}`}>
               <div className="muted small">
-                <strong>{titles.get(m.chat_id) ?? m.chat_id}</strong> · <SenderLink id={m.sender?.id ?? m.sender_id} inline>{senderName(m, titles.get(m.chat_id))}</SenderLink> · {formatDateTime(m.timestamp)}
+                <strong>{titles.get(m.chat_id) ?? m.chat_id}</strong> · <SenderLink id={m.sender?.id ?? m.sender_id} inline>{senderName(m, titles.get(m.chat_id))}</SenderLink><BotBadge isBot={m.sender?.is_bot} /> · {formatDateTime(m.timestamp)}
                 {m.is_deleted && <span className="badge red">已刪除</span>}
               </div>
               <div className="text"><Highlighted text={m.snippet ?? m.text ?? ''} query={q} /></div>

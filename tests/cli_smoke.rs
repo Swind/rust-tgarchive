@@ -372,6 +372,7 @@ async fn include_deleted_flag_and_sender_names_work_in_the_cli() {
                 kind: tgarchive::domain::SenderKind::User,
                 display_name: Some("Dana".into()),
                 username: None,
+                is_bot: None,
             }],
             records: vec![
                 IngestRecord {

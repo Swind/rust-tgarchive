@@ -5,8 +5,8 @@ use sqlx::{QueryBuilder, Row, Sqlite};
 
 use crate::{
     application::{
-        RepositoryError, SenderChatStat, SenderDetail, SenderPage, SenderProfile, SenderQuery,
-        SenderSort,
+        RepositoryError, SenderChatStat, SenderDetail, SenderNameHistoryEntry, SenderNameVersion,
+        SenderPage, SenderProfile, SenderQuery, SenderSort,
     },
     domain::{ChatId, SenderId, SenderKind},
     infrastructure::search::normalize_text,
@@ -25,6 +25,7 @@ struct Info {
     display_name: Option<String>,
     username: Option<String>,
     kind: Option<SenderKind>,
+    is_bot: Option<bool>,
 }
 
 struct Aggregate {
@@ -59,22 +60,20 @@ impl Matcher {
     }
 
     fn matches(&self, id: i64, info: &Info) -> bool {
-        let contains = |value: &Option<String>, needle: &str| {
-            value
-                .as_deref()
-                .is_some_and(|value| normalize_text(value).contains(needle))
+        match self {
+            Self::Text { id: wanted, .. } if *wanted == Some(id) => true,
+            _ => self.matches_names(info.display_name.as_deref(), info.username.as_deref()),
+        }
+    }
+
+    fn matches_names(&self, display_name: Option<&str>, username: Option<&str>) -> bool {
+        let contains = |value: Option<&str>, needle: &str| {
+            value.is_some_and(|value| normalize_text(value).contains(needle))
         };
         match self {
             Self::All => true,
-            Self::Username(name) => info
-                .username
-                .as_deref()
-                .is_some_and(|value| normalize_text(value) == *name),
-            Self::Text { text, id: wanted } => {
-                *wanted == Some(id)
-                    || contains(&info.display_name, text)
-                    || contains(&info.username, text)
-            }
+            Self::Username(name) => username.is_some_and(|value| normalize_text(value) == *name),
+            Self::Text { text, .. } => contains(display_name, text) || contains(username, text),
         }
     }
 }
@@ -113,9 +112,12 @@ impl SqliteStore {
     /// Names of every known sender; a chat/channel posting as itself falls back to its title.
     async fn sender_infos(&self) -> Result<HashMap<i64, Info>, RepositoryError> {
         let mut infos = HashMap::new();
-        let rows = sqlx::query("SELECT id, kind, display_name, username FROM senders")
-            .fetch_all(&self.pool)
-            .await?;
+        let bot = if self.pre_0008 { "NULL" } else { "is_bot" };
+        let rows = sqlx::query(&format!(
+            "SELECT id, kind, display_name, username, {bot} AS is_bot FROM senders"
+        ))
+        .fetch_all(&self.pool)
+        .await?;
         for row in rows {
             let kind: String = row.try_get("kind").map_err(storage_error)?;
             infos.insert(
@@ -124,6 +126,7 @@ impl SqliteStore {
                     display_name: row.try_get("display_name").map_err(storage_error)?,
                     username: row.try_get("username").map_err(storage_error)?,
                     kind: Some(parse_sender_kind(&kind)),
+                    is_bot: row.try_get("is_bot").map_err(storage_error)?,
                 },
             );
         }
@@ -138,6 +141,7 @@ impl SqliteStore {
                 display_name: None,
                 username: None,
                 kind: None,
+                is_bot: None,
             });
             if info.display_name.is_none() {
                 info.display_name = title;
@@ -221,6 +225,8 @@ impl SqliteStore {
                 .unwrap_or_else(|| inferred_kind(id)),
             display_name: info.and_then(|info| info.display_name.clone()),
             username: info.and_then(|info| info.username.clone()),
+            is_bot: info.and_then(|info| info.is_bot),
+            matched_history: None,
             message_count: aggregate.map_or(0, |a| a.messages),
             chat_count: aggregate.map_or(0, |a| a.chats),
             first_message_at: time(aggregate.and_then(|a| a.first))?,
@@ -236,6 +242,7 @@ impl SqliteStore {
         let matcher = Matcher::parse(query.text.as_deref());
         let infos = self.sender_infos().await?;
         let account = self.bound_account().await?;
+        let mut history_matches: HashMap<i64, SenderNameVersion> = HashMap::new();
         let candidates: Option<Vec<i64>> = match matcher {
             Matcher::All => None,
             _ => {
@@ -244,6 +251,35 @@ impl SqliteStore {
                     .filter(|(id, info)| matcher.matches(**id, info))
                     .map(|(id, _)| *id)
                     .collect();
+                if !self.pre_0008 {
+                    let current: HashSet<i64> = ids.iter().copied().collect();
+                    // Newest observation first, so the reported old name is the most recent match.
+                    let rows = sqlx::query(
+                        "SELECT sender_id, display_name, username FROM sender_name_history ORDER BY id DESC",
+                    )
+                    .fetch_all(&self.pool)
+                    .await?;
+                    for row in rows {
+                        let id: i64 = row.try_get("sender_id").map_err(storage_error)?;
+                        if current.contains(&id) || history_matches.contains_key(&id) {
+                            continue;
+                        }
+                        let display_name: Option<String> =
+                            row.try_get("display_name").map_err(storage_error)?;
+                        let username: Option<String> =
+                            row.try_get("username").map_err(storage_error)?;
+                        if matcher.matches_names(display_name.as_deref(), username.as_deref()) {
+                            history_matches.insert(
+                                id,
+                                SenderNameVersion {
+                                    display_name,
+                                    username,
+                                },
+                            );
+                        }
+                    }
+                    ids.extend(history_matches.keys().copied());
+                }
                 if let Matcher::Text { id: Some(id), .. } = &matcher
                     && !ids.contains(id)
                 {
@@ -257,7 +293,15 @@ impl SqliteStore {
             .await?;
         let mut profiles = Vec::with_capacity(aggregates.len());
         for (id, aggregate) in &aggregates {
-            profiles.push(Self::profile(*id, infos.get(id), Some(aggregate), account)?);
+            let mut profile = Self::profile(*id, infos.get(id), Some(aggregate), account)?;
+            if query
+                .is_bot
+                .is_some_and(|wanted| wanted != (profile.is_bot == Some(true)))
+            {
+                continue;
+            }
+            profile.matched_history = history_matches.remove(id);
+            profiles.push(profile);
         }
         match query.sort {
             SenderSort::Messages => profiles.sort_by(|a, b| {
@@ -333,6 +377,32 @@ impl SqliteStore {
                 })
             })
             .collect::<Result<Vec<_>, RepositoryError>>()?;
-        Ok(Some(SenderDetail { profile, chats }))
+        let name_history = if self.pre_0008 {
+            Vec::new()
+        } else {
+            sqlx::query("SELECT display_name, username, first_seen_at, last_seen_at FROM sender_name_history WHERE sender_id=? ORDER BY id DESC")
+                .bind(id.get())
+                .fetch_all(&self.pool)
+                .await?
+                .iter()
+                .map(|row| {
+                    Ok(SenderNameHistoryEntry {
+                        display_name: row.try_get("display_name").map_err(storage_error)?,
+                        username: row.try_get("username").map_err(storage_error)?,
+                        first_seen_at: timestamp(
+                            row.try_get("first_seen_at").map_err(storage_error)?,
+                        )?,
+                        last_seen_at: timestamp(
+                            row.try_get("last_seen_at").map_err(storage_error)?,
+                        )?,
+                    })
+                })
+                .collect::<Result<Vec<_>, RepositoryError>>()?
+        };
+        Ok(Some(SenderDetail {
+            profile,
+            chats,
+            name_history,
+        }))
     }
 }

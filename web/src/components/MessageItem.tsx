@@ -2,6 +2,7 @@ import { Link } from 'react-router-dom';
 import type { Message } from '../api/client';
 import { formatDateTime, formatSize, formatTime } from '../lib/format';
 import { highlight } from '../lib/highlight';
+import BotBadge from './BotBadge';
 import SenderLink from './SenderLink';
 
 export function Highlighted({ text, query }: { text: string; query?: string }) {
@@ -55,6 +56,7 @@ export default function MessageItem({
         <strong>
           <SenderLink id={m.sender?.id ?? m.sender_id}>{senderName(m, chatTitle)}</SenderLink>
         </strong>
+        <BotBadge isBot={m.sender?.is_bot} />
         <time dateTime={m.timestamp} title={formatDateTime(m.timestamp)}>
           {formatTime(m.timestamp)}
         </time>

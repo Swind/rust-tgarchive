@@ -7,9 +7,9 @@ use utoipa::ToSchema;
 use crate::{
     application::{
         ChatSort, ChatStats, ChatSummary, MessageContext, MessagePage, MessageView,
-        SearchIndexStatus, SearchSort, SenderChatStat, SenderDetail, SenderInfo, SenderPage,
-        SenderProfile, SenderSort, SenderSummary, SyncChatProgress, SyncJob, SyncJobState,
-        services::ApplicationStatus,
+        SearchIndexStatus, SearchSort, SenderChatStat, SenderDetail, SenderInfo,
+        SenderNameHistoryEntry, SenderNameVersion, SenderPage, SenderProfile, SenderSort,
+        SenderSummary, SyncChatProgress, SyncJob, SyncJobState, services::ApplicationStatus,
     },
     domain::{Attachment, AttachmentKind, Chat, ChatKind, Forward, SenderId, SenderKind},
 };
@@ -209,6 +209,12 @@ pub struct SenderProfileDto {
     /// Profile name; for a channel posting as itself, the channel title.
     pub display_name: Option<String>,
     pub username: Option<String>,
+    /// Telegram's bot flag; null = unknown or not a user.
+    pub is_bot: Option<bool>,
+    /// True when a text query matched only a historical name (see `matched_name`).
+    pub matched_history: bool,
+    /// The old display name/username that matched the query; null unless `matched_history`.
+    pub matched_name: Option<SenderNameDto>,
     /// Messages by this sender (deleted ones only with `include_deleted=true`).
     pub message_count: u64,
     /// Chats in which the sender has messages.
@@ -226,11 +232,51 @@ impl From<SenderProfile> for SenderProfileDto {
             kind: profile.kind.into(),
             display_name: profile.display_name,
             username: profile.username,
+            is_bot: profile.is_bot,
+            matched_history: profile.matched_history.is_some(),
+            matched_name: profile.matched_history.map(Into::into),
             message_count: profile.message_count,
             chat_count: profile.chat_count,
             first_message_at: profile.first_message_at,
             last_message_at: profile.last_message_at,
             is_self: profile.is_self,
+        }
+    }
+}
+
+/// A historical display name / username combination.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct SenderNameDto {
+    pub display_name: Option<String>,
+    pub username: Option<String>,
+}
+
+impl From<SenderNameVersion> for SenderNameDto {
+    fn from(name: SenderNameVersion) -> Self {
+        Self {
+            display_name: name.display_name,
+            username: name.username,
+        }
+    }
+}
+
+/// Names tgarchive observed for a sender. Timestamps are when tgarchive saw the names, not when
+/// the user changed them.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct SenderNameHistoryDto {
+    pub display_name: Option<String>,
+    pub username: Option<String>,
+    pub first_seen_at: DateTime<Utc>,
+    pub last_seen_at: DateTime<Utc>,
+}
+
+impl From<SenderNameHistoryEntry> for SenderNameHistoryDto {
+    fn from(entry: SenderNameHistoryEntry) -> Self {
+        Self {
+            display_name: entry.display_name,
+            username: entry.username,
+            first_seen_at: entry.first_seen_at,
+            last_seen_at: entry.last_seen_at,
         }
     }
 }
@@ -289,12 +335,15 @@ pub struct SenderDetailDto {
     pub kind: SenderKindDto,
     pub display_name: Option<String>,
     pub username: Option<String>,
+    pub is_bot: Option<bool>,
     pub message_count: u64,
     pub chat_count: u64,
     pub first_message_at: Option<DateTime<Utc>>,
     pub last_message_at: Option<DateTime<Utc>>,
     pub is_self: bool,
     pub chats: Vec<SenderChatDto>,
+    /// Observed names, newest observation first.
+    pub name_history: Vec<SenderNameHistoryDto>,
 }
 
 impl From<SenderDetail> for SenderDetailDto {
@@ -305,12 +354,14 @@ impl From<SenderDetail> for SenderDetailDto {
             kind: profile.kind,
             display_name: profile.display_name,
             username: profile.username,
+            is_bot: profile.is_bot,
             message_count: profile.message_count,
             chat_count: profile.chat_count,
             first_message_at: profile.first_message_at,
             last_message_at: profile.last_message_at,
             is_self: profile.is_self,
             chats: detail.chats.into_iter().map(Into::into).collect(),
+            name_history: detail.name_history.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -321,6 +372,8 @@ pub struct SenderDto {
     /// Profile name; for a chat/channel posting as itself, the chat title.
     pub display_name: Option<String>,
     pub username: Option<String>,
+    /// Telegram's bot flag; null = unknown or not a user.
+    pub is_bot: Option<bool>,
 }
 
 impl From<SenderInfo> for SenderDto {
@@ -329,6 +382,7 @@ impl From<SenderInfo> for SenderDto {
             id: sender.id.get(),
             display_name: sender.display_name,
             username: sender.username,
+            is_bot: sender.is_bot,
         }
     }
 }
@@ -338,6 +392,7 @@ pub struct SenderSummaryDto {
     pub id: i64,
     pub display_name: Option<String>,
     pub username: Option<String>,
+    pub is_bot: Option<bool>,
     /// Non-deleted messages by this sender in the chat.
     pub message_count: u64,
 }
@@ -348,6 +403,7 @@ impl From<SenderSummary> for SenderSummaryDto {
             id: summary.sender.id.get(),
             display_name: summary.sender.display_name,
             username: summary.sender.username,
+            is_bot: summary.sender.is_bot,
             message_count: summary.message_count,
         }
     }

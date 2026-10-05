@@ -63,6 +63,7 @@ fn person(raw: i64, name: &str, username: Option<&str>) -> Sender {
         kind: SenderKind::User,
         display_name: Some(name.into()),
         username: username.map(str::to_owned),
+        is_bot: None,
     }
 }
 

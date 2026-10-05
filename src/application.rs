@@ -101,6 +101,9 @@ pub struct MessageFilters {
     /// Also return messages marked deleted (their bodies are retained); tombstones without a
     /// stored message are never returned.
     pub include_deleted: bool,
+    /// Hide messages whose sender is a known bot (`senders.is_bot = 1`). Unknown (NULL) senders
+    /// and messages without a sender are kept.
+    pub exclude_bots: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,6 +188,7 @@ pub struct SenderInfo {
     pub id: SenderId,
     pub display_name: Option<String>,
     pub username: Option<String>,
+    pub is_bot: Option<bool>,
 }
 
 /// A stored message plus read-side details (resolved sender, deletion time).
@@ -289,6 +293,24 @@ pub struct SenderQuery {
     pub offset: u64,
     /// Count deleted messages too.
     pub include_deleted: bool,
+    /// Only bots (`Some(true)`) or only non-bots (`Some(false)`, unknown included).
+    pub is_bot: Option<bool>,
+}
+
+/// A (display name, username) combination observed for a sender.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SenderNameVersion {
+    pub display_name: Option<String>,
+    pub username: Option<String>,
+}
+
+/// One row of `sender_name_history`: when tgarchive observed the names (not when they changed).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SenderNameHistoryEntry {
+    pub display_name: Option<String>,
+    pub username: Option<String>,
+    pub first_seen_at: DateTime<Utc>,
+    pub last_seen_at: DateTime<Utc>,
 }
 
 /// A sender with archive-wide aggregates.
@@ -298,6 +320,9 @@ pub struct SenderProfile {
     pub kind: SenderKind,
     pub display_name: Option<String>,
     pub username: Option<String>,
+    pub is_bot: Option<bool>,
+    /// Set when a text query matched only a historical name; holds the matching old names.
+    pub matched_history: Option<SenderNameVersion>,
     pub message_count: u64,
     pub chat_count: u64,
     pub first_message_at: Option<DateTime<Utc>>,
@@ -319,6 +344,8 @@ pub struct SenderChatStat {
 pub struct SenderDetail {
     pub profile: SenderProfile,
     pub chats: Vec<SenderChatStat>,
+    /// Observed names, newest observation first.
+    pub name_history: Vec<SenderNameHistoryEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -669,6 +696,7 @@ pub trait MessageRepository: Send + Sync {
                 to: None,
             },
             include_deleted: query.include_deleted,
+            exclude_bots: false,
         };
         let empty = || MessagePage {
             items: Vec::new(),
@@ -826,6 +854,7 @@ mod tests {
             post_author: None,
             time_range: TimeRange::new(None, None).unwrap(),
             include_deleted: false,
+            exclude_bots: false,
         }
     }
 
@@ -865,6 +894,7 @@ mod tests {
                 to: Some(DateTime::from_timestamp(1, 0).unwrap()),
             },
             include_deleted: false,
+            exclude_bots: false,
         };
         assert_eq!(
             ListMessagesQuery {

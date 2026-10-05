@@ -35,6 +35,8 @@ pub(super) struct MessageQuery {
     limit: Option<u16>,
     /// Also return deleted messages (flagged with `is_deleted`/`deleted_at`).
     include_deleted: Option<bool>,
+    /// Hide messages from known bots (`senders.is_bot=1`); unknown senders are kept.
+    exclude_bots: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, IntoParams)]
@@ -54,6 +56,8 @@ pub(super) struct SearchQuery {
     limit: Option<u16>,
     /// Also return deleted messages (flagged with `is_deleted`/`deleted_at`).
     include_deleted: Option<bool>,
+    /// Hide messages from known bots (`senders.is_bot=1`); unknown senders are kept.
+    exclude_bots: Option<bool>,
     /// Result order; default `relevance`.
     sort: Option<SearchSortDto>,
 }
@@ -455,6 +459,8 @@ pub(super) struct SenderListQuery {
     cursor: Option<String>,
     /// Count deleted messages too.
     include_deleted: Option<bool>,
+    /// `true` = only bots, `false` = only non-bots (unknown included); omitted = everyone.
+    is_bot: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, IntoParams)]
@@ -486,6 +492,7 @@ pub(super) async fn list_senders(
             limit,
             offset,
             include_deleted: query.include_deleted.unwrap_or(false),
+            is_bot: query.is_bot,
         })
         .await
         .map_err(|error| ApiError::from_application(error, id.0.clone()))?;
@@ -545,7 +552,7 @@ fn build_list_query(
 ) -> Result<ListMessagesQuery, ApiError> {
     let page_size = PageSize::new(query.limit.unwrap_or(PageSize::DEFAULT.get()))
         .map_err(|error| ApiError::from_application(error.into(), request_id.clone()))?;
-    let filters = filters(
+    let mut filters = filters(
         query.chat_id,
         query.sender_id,
         query.post_author,
@@ -554,6 +561,7 @@ fn build_list_query(
         query.include_deleted,
         request_id.clone(),
     )?;
+    filters.exclude_bots = query.exclude_bots.unwrap_or(false);
     let before = decode_cursor(query.before, request_id.clone())?;
     let after = decode_cursor(query.after, request_id.clone())?;
     let result = ListMessagesQuery {
@@ -574,7 +582,7 @@ fn build_search_query(
 ) -> Result<SearchMessagesQuery, ApiError> {
     let page_size = PageSize::new(query.limit.unwrap_or(PageSize::DEFAULT.get()))
         .map_err(|error| ApiError::from_application(error.into(), request_id.clone()))?;
-    let filters = filters(
+    let mut filters = filters(
         query.chat_id,
         query.sender_id,
         query.post_author,
@@ -583,6 +591,7 @@ fn build_search_query(
         query.include_deleted,
         request_id.clone(),
     )?;
+    filters.exclude_bots = query.exclude_bots.unwrap_or(false);
     let sort = SearchSort::from(query.sort.unwrap_or(SearchSortDto::Relevance));
     let (before, after, offset) = match sort {
         SearchSort::Time => (
@@ -643,6 +652,7 @@ fn filters(
         post_author: post_author.filter(|author| !author.is_empty()),
         time_range,
         include_deleted: include_deleted.unwrap_or(false),
+        exclude_bots: false,
     })
 }
 

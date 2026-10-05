@@ -29,6 +29,16 @@ pub struct SqliteStore {
     pub(super) tokenizer: Arc<dyn SearchTokenizer>,
     /// Read-only database opened without migrating: lacks the 0007 columns.
     pub(super) legacy_schema: bool,
+    /// Read-only database opened without migrating: lacks `senders.is_bot` and the name history
+    /// table (migration 0008). Bot flags read as NULL and histories as empty.
+    pub(super) pre_0008: bool,
+}
+
+/// Which migrations a read-only, unmigrated database is missing.
+#[derive(Clone, Copy, Default)]
+pub(super) struct LegacyColumns {
+    pub(super) metadata: bool,
+    pub(super) bot: bool,
 }
 
 impl SqliteStore {
@@ -37,6 +47,7 @@ impl SqliteStore {
             pool,
             tokenizer: default_tokenizer(),
             legacy_schema: false,
+            pre_0008: false,
         }
     }
 
@@ -95,6 +106,13 @@ impl SqliteStore {
 }
 
 impl SqliteStore {
+    pub(super) fn legacy(&self) -> LegacyColumns {
+        LegacyColumns {
+            metadata: self.legacy_schema,
+            bot: self.pre_0008,
+        }
+    }
+
     pub async fn open_existing_readonly(database_url: &str) -> Result<Self, RepositoryError> {
         let mut store = Self::with_pool(open_readonly_pool(database_url).await?);
         let columns: i64 = sqlx::query_scalar(
@@ -103,6 +121,12 @@ impl SqliteStore {
         .fetch_one(&store.pool)
         .await?;
         store.legacy_schema = columns == 0;
+        let bot: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('senders') WHERE name='is_bot'",
+        )
+        .fetch_one(&store.pool)
+        .await?;
+        store.pre_0008 = bot == 0;
         Ok(store)
     }
 }
@@ -215,13 +239,51 @@ async fn save_chat(tx: &mut Transaction<'_, Sqlite>, chat: &Chat) -> Result<(), 
     Ok(())
 }
 
+/// Upserts a sender and maintains `sender_name_history` in the same transaction.
+///
+/// `observed_at` is when tgarchive saw the profile (not when the user changed it). After the
+/// COALESCE merge (NULL never clears a field), a changed display name or username appends a
+/// history row for the merged values; unchanged values only advance `last_seen_at` of the
+/// newest row (never backwards). Rows are never reordered or rewritten.
 async fn save_sender(
     tx: &mut Transaction<'_, Sqlite>,
     sender: &Sender,
+    observed_at: i64,
 ) -> Result<(), RepositoryError> {
-    sqlx::query("INSERT INTO senders(id, kind, display_name, username, created_at, updated_at) VALUES (?, ?, ?, ?, unixepoch(), unixepoch()) ON CONFLICT(id) DO UPDATE SET kind=CASE WHEN excluded.kind='unknown' THEN senders.kind ELSE excluded.kind END, display_name=COALESCE(excluded.display_name, senders.display_name), username=COALESCE(excluded.username, senders.username), updated_at=unixepoch()")
-        .bind(sender.id.get()).bind(sender_kind(sender.kind)).bind(&sender.display_name).bind(&sender.username)
+    let old = sqlx::query("SELECT display_name, username FROM senders WHERE id=?")
+        .bind(sender.id.get())
+        .fetch_optional(&mut **tx)
+        .await?;
+    let (old_name, old_username): (Option<String>, Option<String>) = match &old {
+        Some(row) => (
+            row.try_get("display_name").map_err(storage_error)?,
+            row.try_get("username").map_err(storage_error)?,
+        ),
+        None => (None, None),
+    };
+    sqlx::query("INSERT INTO senders(id, kind, display_name, username, is_bot, created_at, updated_at) VALUES (?, ?, ?, ?, ?, unixepoch(), unixepoch()) ON CONFLICT(id) DO UPDATE SET kind=CASE WHEN excluded.kind='unknown' THEN senders.kind ELSE excluded.kind END, display_name=COALESCE(excluded.display_name, senders.display_name), username=COALESCE(excluded.username, senders.username), is_bot=COALESCE(excluded.is_bot, senders.is_bot), updated_at=unixepoch()")
+        .bind(sender.id.get()).bind(sender_kind(sender.kind)).bind(&sender.display_name).bind(&sender.username).bind(sender.is_bot)
         .execute(&mut **tx).await?;
+    let name = sender.display_name.clone().or(old_name.clone());
+    let username = sender.username.clone().or(old_username.clone());
+    if name.is_none() && username.is_none() {
+        return Ok(());
+    }
+    if name != old_name || username != old_username {
+        sqlx::query("INSERT INTO sender_name_history(sender_id, display_name, username, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?, ?)")
+            .bind(sender.id.get()).bind(&name).bind(&username).bind(observed_at).bind(observed_at)
+            .execute(&mut **tx).await?;
+    } else {
+        let updated = sqlx::query("UPDATE sender_name_history SET last_seen_at=MAX(last_seen_at, ?) WHERE id=(SELECT MAX(id) FROM sender_name_history WHERE sender_id=?)")
+            .bind(observed_at).bind(sender.id.get())
+            .execute(&mut **tx).await?
+            .rows_affected();
+        if updated == 0 {
+            sqlx::query("INSERT INTO sender_name_history(sender_id, display_name, username, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?, ?)")
+                .bind(sender.id.get()).bind(&name).bind(&username).bind(observed_at).bind(observed_at)
+                .execute(&mut **tx).await?;
+        }
+    }
     Ok(())
 }
 
@@ -374,8 +436,19 @@ impl ArchiveWriter for SqliteStore {
         for chat in &batch.chats {
             save_chat(&mut tx, chat).await?;
         }
+        let observed_at = batch
+            .records
+            .iter()
+            .filter_map(|record| match &record.event {
+                MessageEvent::Created(message) | MessageEvent::Updated(message) => {
+                    Some(seconds(message.collected_at))
+                }
+                MessageEvent::Deleted { .. } => None,
+            })
+            .max()
+            .unwrap_or_else(|| Utc::now().timestamp());
         for sender in &batch.senders {
-            save_sender(&mut tx, sender).await?;
+            save_sender(&mut tx, sender, observed_at).await?;
         }
 
         for record in &batch.records {
@@ -554,17 +627,19 @@ async fn attachments_for(
 }
 
 /// `legacy` is a read-only database that predates migration 0007: the metadata columns read as NULL.
-fn message_select(legacy: bool) -> String {
-    let metadata = if legacy {
+fn message_select(legacy: LegacyColumns) -> String {
+    let metadata = if legacy.metadata {
         "NULL AS post_author, NULL AS fwd_from_id, NULL AS fwd_from_name, NULL AS fwd_date"
     } else {
         "m.post_author, m.fwd_from_id, m.fwd_from_name, m.fwd_date"
     };
-    format!("{MESSAGE_SELECT_HEAD}{metadata}{MESSAGE_SELECT_TAIL}")
+    let bot = if legacy.bot { "NULL" } else { "s.is_bot" };
+    format!("{MESSAGE_SELECT_HEAD}{metadata}{MESSAGE_SELECT_MID}{bot}{MESSAGE_SELECT_TAIL}")
 }
 
 const MESSAGE_SELECT_HEAD: &str = "SELECT m.row_id, m.chat_id, m.message_id, m.sender_id, m.timestamp, m.edited_at, m.collected_at, m.text, m.reply_to, ";
-const MESSAGE_SELECT_TAIL: &str = ", CASE WHEN m.is_deleted=1 THEN COALESCE(m.deleted_at, 0) END AS deleted_at, s.display_name AS sender_name, s.username AS sender_username, c.title AS chat_title FROM messages m LEFT JOIN senders s ON s.id=m.sender_id LEFT JOIN chats c ON c.id=m.chat_id";
+const MESSAGE_SELECT_MID: &str = ", CASE WHEN m.is_deleted=1 THEN COALESCE(m.deleted_at, 0) END AS deleted_at, s.display_name AS sender_name, s.username AS sender_username, ";
+const MESSAGE_SELECT_TAIL: &str = " AS sender_is_bot, c.title AS chat_title FROM messages m LEFT JOIN senders s ON s.id=m.sender_id LEFT JOIN chats c ON c.id=m.chat_id";
 
 fn row_message(row: &SqliteRow, attachments: Vec<Attachment>) -> Result<Message, RepositoryError> {
     let sender: Option<i64> = row.try_get("sender_id").map_err(storage_error)?;
@@ -614,6 +689,7 @@ fn row_view(row: &SqliteRow, attachments: Vec<Attachment>) -> Result<MessageView
     let name: Option<String> = row.try_get("sender_name").map_err(storage_error)?;
     let username: Option<String> = row.try_get("sender_username").map_err(storage_error)?;
     let chat_title: Option<String> = row.try_get("chat_title").map_err(storage_error)?;
+    let is_bot: Option<bool> = row.try_get("sender_is_bot").map_err(storage_error)?;
     let sender = message.sender_id.map(|id| SenderInfo {
         id,
         // A chat/channel posting as itself has no profile name of its own: use the chat title.
@@ -623,6 +699,7 @@ fn row_view(row: &SqliteRow, attachments: Vec<Attachment>) -> Result<MessageView
                 .flatten()
         }),
         username,
+        is_bot,
     });
     Ok(MessageView {
         message,
@@ -678,7 +755,7 @@ async fn list_messages(
     after: Option<&crate::application::MessageCursor>,
     page_size: crate::application::PageSize,
     search: Option<&SearchSpec>,
-    legacy: bool,
+    legacy: LegacyColumns,
 ) -> Result<crate::application::MessagePage, RepositoryError> {
     let after_direction = after.is_some();
     let mut query = QueryBuilder::<Sqlite>::new(message_select(legacy));
@@ -704,6 +781,9 @@ async fn list_messages(
         query
             .push(format!(" AND {plus}m.sender_id="))
             .push_bind(sender_id.get());
+    }
+    if filters.exclude_bots && !legacy.bot {
+        query.push(" AND (s.is_bot IS NULL OR s.is_bot=0)");
     }
     if let Some(author) = &filters.post_author {
         query
@@ -813,7 +893,7 @@ impl MessageRepository for SqliteStore {
         let mut tx = self.pool.begin().await?;
         let row = sqlx::query(&format!(
             "{} WHERE m.chat_id=? AND m.message_id=? AND (m.is_deleted=0 OR ?)",
-            message_select(self.legacy_schema)
+            message_select(self.legacy())
         ))
         .bind(chat_id.get())
         .bind(message_id.get())
@@ -841,7 +921,7 @@ impl MessageRepository for SqliteStore {
             query.after.as_ref(),
             query.page_size,
             None,
-            self.legacy_schema,
+            self.legacy(),
         )
         .await?;
         tx.commit().await.map_err(storage_error)?;
@@ -881,7 +961,7 @@ impl MessageRepository for SqliteStore {
             query.after.as_ref(),
             query.page_size,
             Some(&spec),
-            self.legacy_schema,
+            self.legacy(),
         )
         .await?;
         tx.commit().await.map_err(storage_error)?;
@@ -922,7 +1002,8 @@ impl MessageRepository for SqliteStore {
         chat_id: ChatId,
         limit: PageSize,
     ) -> Result<Vec<SenderSummary>, RepositoryError> {
-        let rows = sqlx::query("SELECT m.sender_id, COALESCE(s.display_name, CASE WHEN m.sender_id=m.chat_id THEN c.title END) AS display_name, s.username, COUNT(*) AS message_count FROM messages m LEFT JOIN senders s ON s.id=m.sender_id LEFT JOIN chats c ON c.id=m.chat_id WHERE m.chat_id=? AND m.is_deleted=0 AND m.sender_id IS NOT NULL GROUP BY m.sender_id ORDER BY message_count DESC, m.sender_id LIMIT ?")
+        let bot = if self.pre_0008 { "NULL" } else { "s.is_bot" };
+        let rows = sqlx::query(&format!("SELECT m.sender_id, COALESCE(s.display_name, CASE WHEN m.sender_id=m.chat_id THEN c.title END) AS display_name, s.username, {bot} AS is_bot, COUNT(*) AS message_count FROM messages m LEFT JOIN senders s ON s.id=m.sender_id LEFT JOIN chats c ON c.id=m.chat_id WHERE m.chat_id=? AND m.is_deleted=0 AND m.sender_id IS NOT NULL GROUP BY m.sender_id ORDER BY message_count DESC, m.sender_id LIMIT ?"))
             .bind(chat_id.get())
             .bind(i64::from(limit.get()))
             .fetch_all(&self.pool)
@@ -936,6 +1017,7 @@ impl MessageRepository for SqliteStore {
                             .map_err(invalid_data)?,
                         display_name: row.try_get("display_name").map_err(storage_error)?,
                         username: row.try_get("username").map_err(storage_error)?,
+                        is_bot: row.try_get("is_bot").map_err(storage_error)?,
                     },
                     message_count: u64::try_from(count).map_err(invalid_data)?,
                 })
