@@ -20,6 +20,8 @@
 :root[data-theme='light'] { color-scheme: light; }
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; margin: 0; }
+/* Only inner panes scroll; the document itself never does. */
+html, body { overflow: hidden; }
 body { background: var(--bg); color: var(--fg); font: 14px/1.5 system-ui, 'Noto Sans TC', sans-serif; }
 a { color: var(--accent); }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
@@ -36,7 +38,7 @@ input[type='checkbox'] { padding: 0; }
 .topbar nav a.active { background: var(--accent); color: #fff; }
 .spacer { flex: 1; }
 .icon-btn { border: none; background: none; font-size: 16px; }
-.main { flex: 1; min-height: 0; overflow: auto; }
+.main { flex: 1; min-height: 0; overflow: auto; position: relative; }
 .badge { display: inline-block; padding: 0 8px; border-radius: 10px; font-size: 12px; border: 1px solid currentColor; margin: 0 2px; }
 .badge.green { color: var(--green); } .badge.blue { color: var(--blue); } .badge.amber { color: var(--amber); }
 .badge.red { color: var(--red); } .badge.gray { color: var(--gray); }
@@ -47,7 +49,7 @@ input[type='checkbox'] { padding: 0; }
 .wide { width: 100%; padding: 8px 12px; }
 .row { display: flex; gap: 8px; align-items: center; } .wrap { flex-wrap: wrap; }
 .filters { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin: 8px 0; }
-.split { display: flex; height: 100%; }
+.split { display: flex; height: 100%; min-height: 0; overflow: hidden; }
 .sidebar { width: 320px; flex: none; border-right: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; }
 .sidebar-head { padding: 8px; display: flex; flex-direction: column; gap: 6px; border-bottom: 1px solid var(--border); }
 .tabs { display: flex; } .tabs button { border-radius: 0; } .tabs button[aria-selected='true'] { background: var(--accent); color: #fff; }
@@ -58,11 +60,11 @@ input[type='checkbox'] { padding: 0; }
 .chat-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .chat-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border); } .dot.on { background: var(--green); }
-.pane { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-.chat-pane { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.pane { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.chat-pane { display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; flex: 1; }
 .chat-head { padding: 8px 16px; border-bottom: 1px solid var(--border); } .chat-head h2 { margin: 0; font-size: 18px; }
 .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 6px; }
-.timeline { flex: 1; overflow: auto; padding: 8px 16px 16px; min-height: 0; background: var(--tl-bg); }
+.timeline { flex: 1; overflow: auto; padding: 8px 16px 16px; min-height: 0; background: var(--tl-bg); position: relative; }
 .date-sep { position: sticky; top: 6px; z-index: 2; text-align: center; margin: 14px 0 8px; pointer-events: none; }
 .date-sep span { display: inline-block; padding: 2px 12px; border-radius: 12px; font-size: 12px; color: var(--muted); background: var(--bubble); border: 1px solid var(--bubble-border); }
 .msg { display: flex; align-items: flex-end; gap: 8px; margin-top: 8px; }
@@ -123,7 +125,7 @@ mark { background: var(--mark); color: inherit; }
 .chat-progress li { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; border-top: 1px solid var(--border); padding: 4px 0; }
 .note { color: var(--muted); }
 @media (max-width: 480px) { .timeline { padding: 8px; } .avatar-col, .avatar { width: 28px; height: 28px; font-size: 12px; } .bubble { max-width: calc(100% - 36px); } }
-@media (max-width: 720px) { .split { flex-direction: column; } .sidebar { width: auto; max-height: 40%; } }
+@media (max-width: 720px) { .split { flex-direction: column; } .sidebar { width: auto; max-height: 40%; flex: none; } .chat-pane { height: auto; } }
 .sender-link { color: inherit; text-decoration: none; cursor: pointer; }
 .sender-link:hover { text-decoration: underline; color: var(--accent); }
 .forward, .post-author { margin: 2px 0; }

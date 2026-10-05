@@ -169,3 +169,34 @@ test('messages from the chat itself fall back to the chat title', async ({ page 
   // Two legacy rows have no sender at all.
   expect(new Set(await articles(page).locator('header strong').allTextContents())).toEqual(new Set(['Daily News 每日快訊', '未知']));
 });
+
+test.describe('page scrolling', () => {
+  for (const viewport of [
+    { width: 1300, height: 850 },
+    { width: 390, height: 800 },
+  ]) {
+    test(`only the timeline scrolls at ${viewport.width}px`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      await page.goto(`/chats/${CHAT.big}`);
+      await expect(page.locator('article.msg').first()).toBeVisible();
+      // Load older pages too: the bug only showed once many messages were rendered.
+      for (let i = 0; i < 3; i++) {
+        await page.locator('.timeline').evaluate((el) => (el.scrollTop = 0));
+        await page.waitForTimeout(400);
+      }
+      const sizes = await page.evaluate(() => {
+        const doc = document.scrollingElement!;
+        const main = document.querySelector('.main')!;
+        const timeline = document.querySelector('.timeline')!;
+        return {
+          doc: doc.scrollHeight - doc.clientHeight,
+          main: main.scrollHeight - main.clientHeight,
+          timeline: timeline.scrollHeight - timeline.clientHeight,
+        };
+      });
+      expect(sizes.doc, 'document must not scroll').toBeLessThanOrEqual(1);
+      expect(sizes.main, 'main must not scroll on the chat page').toBeLessThanOrEqual(1);
+      expect(sizes.timeline, 'timeline scrolls').toBeGreaterThan(100);
+    });
+  }
+});
