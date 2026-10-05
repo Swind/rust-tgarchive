@@ -1,0 +1,21 @@
+# Usage:
+#   docker compose run --rm tgarchive auth login    # first time only (interactive)
+#   docker compose up -d
+# .env (see README) provides TELEGRAM_API_ID / TELEGRAM_API_HASH.
+services:
+  tgarchive:
+    image: ghcr.io/swind/rust-tgarchive:latest
+    env_file: .env
+    environment:
+      # the paths below live on the volume; .env must not override them
+      DATABASE_URL: sqlite:///data/telegram.db
+      TELEGRAM_SESSION_FILE: /data/telegram.session
+    ports:
+      # The REST API has no authentication: publish to localhost only.
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - tgarchive-data:/data
+    restart: unless-stopped
+
+volumes:
+  tgarchive-data:

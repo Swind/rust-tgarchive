@@ -3,8 +3,8 @@ set -eu
 
 cargo fmt --all -- --check
 # If the openapi.yml test fails, regenerate: cargo run -q -- openapi --format yaml > openapi.yml
-cargo test --all-targets
-cargo clippy --all-targets -- -D warnings
+cargo test --all-targets --locked
+cargo clippy --all-targets --locked -- -D warnings
 
 # Web UI (skipped when Node is unavailable; web/dist is committed so Rust builds never need it)
 if command -v npm >/dev/null 2>&1; then

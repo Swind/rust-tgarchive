@@ -158,3 +158,10 @@ Update-gap reconciliation：`differenceTooLong`／`channelDifferenceTooLong`（�
 - 測試：`tests/senders.rs`（端點、CJK、migration 0007、repair、refetch、CLI）、mapper 單元測試、`web/e2e/senders.spec.ts`。
 - Bot 旗標與曾用名稱（migration 0008）：`senders.is_bot`（mapper 取 grammers `User.bot`；僅使用者，其餘維持 NULL；upsert 非 NULL 覆蓋、NULL 不清除）；`sender_name_history`（合併後名稱／username 變動才新增列，相同則推進最新列 `last_seen_at`；同交易；時間為 tgarchive 觀察時間）。API：`SenderDto`／`SenderProfileDto`／`SenderDetailDto` 含 `is_bot`；`GET /senders?is_bot=`、`/messages`、`/chats/{id}/messages`、`/messages/search` 的 `exclude_bots=true`（排除 `is_bot=1` 的寄件人；未知與無寄件人保留）；`GET /senders/{id}` 含 `name_history`（新到舊）；`/senders?q=` 也比對曾用名稱與 username（`matched_history`、`matched_name`）。CLI：`--exclude-bots`、`senders search --is-bot`、`senders get` 列曾用名稱、搜尋標示 `[matched old name: …]`。UI：🤖 標記（時間軸／搜尋／清單／詳細頁）、清單「全部／人／Bot」、搜尋與聊天室時間軸「隱藏 bot」（URL `bot=`／`hide_bots=1`）、寄件人頁「曾用名稱」、清單「曾用名：…」提示。測試：`tests/sender_bots_history.rs`、mapper 單元測試、`web/e2e/senders.spec.ts`；fixture 新增 bot 與三個名稱的改名者（`examples/seed_fixture.rs`）。
 - 限制：曾用名稱只記錄 tgarchive 觀察到的名稱（未同步期間的改名看不到）；脈絡檢視（`/messages/{id}/context`）不套用 `exclude_bots`；senders 清單於 Rust 端過濾／排序（senders 表小；候選 ≤2000 以 IN 查詢聚合，否則全域聚合）；私訊舊資料需 refetch；轉發來源僅儲存名稱／ID，不解析名稱。
+
+## Docker、CI 與發佈
+
+- 應用：`serve --allow-non-loopback`／`TGARCHIVE_ALLOW_NON_LOOPBACK=1` opt-in 非 loopback 綁定（預設仍拒絕；啟用時 WARN）；新增 `healthcheck` 子命令（std TcpStream HTTP/1.0，無新依賴）。測試：`tests/cli_smoke.rs`（旗標／env 放行並警告、`0` 仍拒絕、healthcheck 2xx／503／連線失敗）。
+- `Dockerfile`（rust:1.98.1-bookworm 建置、BuildKit cache mount、`--locked`；runtime `debian:bookworm-slim`＋ca-certificates、uid 10001、`/data` volume、HEALTHCHECK）與 `.dockerignore`（allow-list）；`docker-compose.yml`。本機驗證：db init、`serve --query-only`、`/health/ready`、`/api/v1/status`、UI、非 root、healthy、`--help` 皆通過（映像約 158 MB）。
+- `.github/workflows/ci.yml`（rust／web／e2e；`workflow_call` 供 release 重用）、`release.yml`（tag `v*`：CI＋版本檢查→GHCR 映像，amd64、provenance＋SBOM）、`dependabot.yml`；actionlint 無問題。
+- 尚未在真正的 GitHub runner 上執行（e2e 的 docker／uid 對應、GHCR 推送、gha cache 需首次執行確認）；無 LICENSE，故無 license label；GHCR package 首次發佈後需手動設為 public。

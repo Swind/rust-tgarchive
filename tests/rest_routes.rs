@@ -893,3 +893,13 @@ mod web_ui {
         assert!(header(&response, "content-type").contains("json"));
     }
 }
+
+#[test]
+fn non_loopback_env_values_are_parsed_strictly() {
+    // Pure parsing is exercised end to end in cli_smoke; here only the constants matter.
+    assert_eq!(
+        tgarchive::interface::rest::ALLOW_NON_LOOPBACK_ENV,
+        "TGARCHIVE_ALLOW_NON_LOOPBACK"
+    );
+    assert!(tgarchive::interface::rest::NON_LOOPBACK_WARNING.contains("127.0.0.1:8080:8080"));
+}

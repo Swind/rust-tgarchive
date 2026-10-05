@@ -173,6 +173,17 @@ pub fn apply_dev_cors(router: axum::Router, cors: Option<CorsLayer>) -> axum::Ro
     }
 }
 
+pub const ALLOW_NON_LOOPBACK_ENV: &str = "TGARCHIVE_ALLOW_NON_LOOPBACK";
+pub const NON_LOOPBACK_WARNING: &str = "REST API has no authentication; publish the port only to localhost, e.g. -p 127.0.0.1:8080:8080";
+
+/// True when `TGARCHIVE_ALLOW_NON_LOOPBACK` is set to a non-empty value other than `0`/`false`.
+pub fn allow_non_loopback_from_env() -> bool {
+    std::env::var(ALLOW_NON_LOOPBACK_ENV).is_ok_and(|value| {
+        let value = value.trim();
+        !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+    })
+}
+
 pub fn validate_loopback_bind(address: SocketAddr) -> Result<(), &'static str> {
     if address.ip().is_loopback() {
         Ok(())

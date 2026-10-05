@@ -92,7 +92,12 @@ pub async fn run() -> Result<(), CliError> {
                 .map_err(|error| CliError::OpenApi(error.to_string()))?;
             println!("{document}");
         }
-        PreparedInvocation::Serve { bind, query_only } => serve(bind, query_only).await?,
+        PreparedInvocation::Serve {
+            bind,
+            query_only,
+            allow_non_loopback,
+        } => serve(bind, query_only, allow_non_loopback).await?,
+        PreparedInvocation::Healthcheck { url } => healthcheck(url)?,
         PreparedInvocation::AuthLogin { phone } => auth_login(phone).await?,
         PreparedInvocation::RefreshChats { output } => {
             let config = Config::load(None);
@@ -433,14 +438,82 @@ fn query_only_notice(
     }
 }
 
-async fn serve(bind: Option<std::net::SocketAddr>, query_only: bool) -> Result<(), CliError> {
+/// Minimal HTTP/1.0 GET over std::net so the runtime image needs no curl.
+fn healthcheck(url: Option<String>) -> Result<(), CliError> {
+    use std::io::{Read, Write};
+    let url = match url {
+        Some(url) => url,
+        None => {
+            let bind = Config::server_bind(None).map_err(CliError::InvalidInput)?;
+            format!("http://127.0.0.1:{}/health/ready", bind.port())
+        }
+    };
+    let rest = url.strip_prefix("http://").ok_or_else(|| {
+        CliError::InvalidInput("healthcheck --url must start with http://".into())
+    })?;
+    let (host, path) = match rest.split_once('/') {
+        Some((host, path)) => (host, format!("/{path}")),
+        None => (rest, "/".to_owned()),
+    };
+    let fail = |message: String| CliError::Server(format!("healthcheck failed: {message}"));
+    let timeout = std::time::Duration::from_secs(5);
+    let address = std::net::ToSocketAddrs::to_socket_addrs(host)
+        .map_err(|error| fail(error.to_string()))?
+        .next()
+        .ok_or_else(|| fail(format!("cannot resolve {host}")))?;
+    let mut stream = std::net::TcpStream::connect_timeout(&address, timeout)
+        .map_err(|error| fail(error.to_string()))?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .and_then(|()| stream.set_write_timeout(Some(timeout)))
+        .map_err(|error| fail(error.to_string()))?;
+    stream
+        .write_all(format!("GET {path} HTTP/1.0\r\nHost: {host}\r\n\r\n").as_bytes())
+        .map_err(|error| fail(error.to_string()))?;
+    let mut head = [0u8; 32];
+    let mut filled = 0;
+    while filled < head.len() {
+        match stream.read(&mut head[filled..]) {
+            Ok(0) => break,
+            Ok(read) => filled += read,
+            Err(error) => return Err(fail(error.to_string())),
+        }
+    }
+    let line = String::from_utf8_lossy(&head[..filled]);
+    let status = line.split_whitespace().nth(1).unwrap_or("");
+    if status.starts_with('2') {
+        Ok(())
+    } else {
+        Err(fail(format!(
+            "{url} answered {:?}",
+            line.lines().next().unwrap_or("")
+        )))
+    }
+}
+
+async fn serve(
+    bind: Option<std::net::SocketAddr>,
+    query_only: bool,
+    allow_non_loopback: bool,
+) -> Result<(), CliError> {
     let config = Config::load(None);
     config
         .validate_database_path()
         .map_err(CliError::InvalidInput)?;
     let bind = Config::server_bind(bind).map_err(CliError::InvalidInput)?;
     let cors = rest::dev_cors_from_env().map_err(CliError::InvalidInput)?;
-    rest::validate_loopback_bind(bind).map_err(|error| CliError::InvalidInput(error.into()))?;
+    if allow_non_loopback || rest::allow_non_loopback_from_env() {
+        if !bind.ip().is_loopback() {
+            tracing::warn!(address = %bind, "{}", rest::NON_LOOPBACK_WARNING);
+        }
+    } else {
+        rest::validate_loopback_bind(bind).map_err(|error| {
+            CliError::InvalidInput(format!(
+                "{error}; pass --allow-non-loopback or set {} to override",
+                rest::ALLOW_NON_LOOPBACK_ENV
+            ))
+        })?;
+    }
     let listener = TcpListener::bind(bind)
         .await
         .map_err(|error| CliError::Server(format!("cannot bind REST server: {error}")))?;

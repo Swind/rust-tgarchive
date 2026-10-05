@@ -442,3 +442,121 @@ async fn include_deleted_flag_and_sender_names_work_in_the_cli() {
     assert_eq!(json["text"], "older message");
     assert!(json["deleted_at"].is_string());
 }
+
+fn non_loopback_serve_warns(configure: impl FnOnce(&mut Command)) -> String {
+    use std::io::{BufRead, BufReader};
+    let directory = tempfile::tempdir().unwrap();
+    let url = database_url(&directory);
+    assert!(invoke(&url, &["db", "init"]).status.success());
+    let mut command = Command::new(BIN);
+    command
+        .env_clear()
+        .env("TGARCHIVE_NO_DOTENV", "1")
+        .env("DATABASE_URL", &url)
+        .stderr(std::process::Stdio::piped());
+    configure(&mut command);
+    let mut child = command.spawn().unwrap();
+    let mut lines = BufReader::new(child.stderr.take().unwrap()).lines();
+    let mut seen = String::new();
+    for line in lines.by_ref().map_while(Result::ok) {
+        seen.push_str(&line);
+        seen.push('\n');
+        if line.contains("no authentication") {
+            break;
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    seen
+}
+
+#[test]
+fn non_loopback_bind_is_allowed_by_flag_with_a_warning() {
+    let seen = non_loopback_serve_warns(|command| {
+        command.args([
+            "serve",
+            "--query-only",
+            "--bind",
+            "0.0.0.0:0",
+            "--allow-non-loopback",
+        ]);
+    });
+    assert!(seen.contains("-p 127.0.0.1:8080:8080"), "{seen}");
+}
+
+#[test]
+fn non_loopback_bind_is_allowed_by_env_with_a_warning() {
+    let seen = non_loopback_serve_warns(|command| {
+        command
+            .env("TGARCHIVE_ALLOW_NON_LOOPBACK", "1")
+            .env("SERVER_BIND", "0.0.0.0:0")
+            .args(["serve", "--query-only"]);
+    });
+    assert!(seen.contains("no authentication"), "{seen}");
+}
+
+#[test]
+fn non_loopback_env_set_to_zero_still_rejects() {
+    let out = Command::new(BIN)
+        .env_clear()
+        .env("TGARCHIVE_NO_DOTENV", "1")
+        .env("TGARCHIVE_ALLOW_NON_LOOPBACK", "0")
+        .args(["serve", "--query-only", "--bind", "0.0.0.0:0"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("loopback") && stderr.contains("--allow-non-loopback"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn healthcheck_succeeds_on_2xx_and_fails_otherwise() {
+    use std::io::{Read, Write};
+    for (status_line, ok) in [("200 OK", true), ("503 Service Unavailable", false)] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0u8; 512];
+            let _ = stream.read(&mut buffer);
+            let request = String::from_utf8_lossy(&buffer).into_owned();
+            stream
+                .write_all(format!("HTTP/1.0 {status_line}\r\n\r\n").as_bytes())
+                .unwrap();
+            request
+        });
+        let out = Command::new(BIN)
+            .env_clear()
+            .env("TGARCHIVE_NO_DOTENV", "1")
+            .args([
+                "healthcheck",
+                "--url",
+                &format!("http://127.0.0.1:{port}/health/ready"),
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.success(),
+            ok,
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            server
+                .join()
+                .unwrap()
+                .starts_with("GET /health/ready HTTP/1.0")
+        );
+    }
+    let out = Command::new(BIN)
+        .env_clear()
+        .env("TGARCHIVE_NO_DOTENV", "1")
+        .env("SERVER_BIND", "127.0.0.1:1")
+        .arg("healthcheck")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+}

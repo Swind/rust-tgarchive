@@ -1,0 +1,38 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    ignore:
+      # vendored and pinned via [patch.crates-io]
+      - dependency-name: grammers-client
+      - dependency-name: grammers-session
+    groups:
+      cargo-minor-patch:
+        update-types: [minor, patch]
+  - package-ecosystem: npm
+    directory: /web
+    schedule:
+      interval: weekly
+    groups:
+      web-minor-patch:
+        update-types: [minor, patch]
+  - package-ecosystem: npm
+    directory: /web/e2e
+    schedule:
+      interval: weekly
+    ignore:
+      # screenshot baselines depend on the Playwright image version (see scripts/e2e.sh); bump deliberately
+      - dependency-name: "@playwright/test"
+    groups:
+      e2e-minor-patch:
+        update-types: [minor, patch]
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly

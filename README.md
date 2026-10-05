@@ -1,5 +1,7 @@
 # tgarchive
 
+[![CI](https://github.com/Swind/rust-tgarchive/actions/workflows/ci.yml/badge.svg)](https://github.com/Swind/rust-tgarchive/actions/workflows/ci.yml)
+
 > Unofficial archive tool using the Telegram API; not affiliated with Telegram.
 
 > 先前的執行檔名稱為 `telegram-archive`，現已更名為 `tgarchive`。舊環境變數 `TELEGRAM_ARCHIVE_NO_DOTENV` 仍被接受（已棄用），請改用 `TGARCHIVE_NO_DOTENV`。
@@ -153,7 +155,8 @@ tgarchive serve --bind 127.0.0.1:9000
 ```
 
 - 若未設定 `TELEGRAM_API_ID`／`TELEGRAM_API_HASH`（例如 `.env` 不在目前工作目錄），`serve` 會退回只查詢模式：啟動時於 stderr 印出警告，**即時收集不會執行**，`/api/v1/status` 的 `collector.detail` 會註明 Telegram 未設定。明確指定 `--query-only` 則不印警告，detail 註明為 `--query-only`。
-- 只能綁定 loopback 位址；**API 沒有身分驗證**。遠端存取請自行用 SSH tunnel 或有驗證的反向代理。
+- 預設只能綁定 loopback 位址；**API 沒有身分驗證**。遠端存取請自行用 SSH tunnel 或有驗證的反向代理。容器內必須綁 `0.0.0.0`，因此提供明確 opt-in：`serve --allow-non-loopback` 或環境變數 `TGARCHIVE_ALLOW_NON_LOOPBACK=1`（`0`／`false`／空值視為未設定）；啟用且綁定非 loopback 時，啟動會印出 WARN。預設行為不變。
+- `tgarchive healthcheck [--url http://127.0.0.1:8080/health/ready]`：以純 std HTTP/1.0 探測執行中的伺服器（2xx 則 exit 0），預設埠取自 `SERVER_BIND`；供 Docker HEALTHCHECK 使用（映像內沒有 curl）。
 - Collector 狀態請查 `GET /api/v1/status`：`starting → catching_up → running → reconnecting → stopped／failed`（`--query-only` 為 `disabled`）。該回應也含 `unresolved_deletions`（無法對應聊天室的刪除數）。`/health/live` 為存活檢查；`/health/ready` 在資料庫不可用或 collector `failed` 時回 503。
 - `tgarchive status` 是獨立程序，只讀資料庫，**看不到**執行中伺服器的 collector，會顯示 `disabled`；請用 REST。
 
@@ -222,6 +225,36 @@ set -a; . ./.env; set +a; LIVE_TELEGRAM=1 LIVE_TEST_CHAT_ID=-4893203104 cargo te
 - 執行前**不可**有 archive `serve`（或任何使用同一 archive session 的程序）在跑（owner lock）。
 - 失敗時會印出 serve 日誌尾段（已遮蔽 api_hash／手機號碼）。
 
+## Docker
+
+映像 `ghcr.io/swind/rust-tgarchive`（linux/amd64，以非 root uid 10001 執行，`debian:bookworm-slim` 基底，約 160 MB）。所有狀態都在 `/data` volume：`telegram.db`（含 `-wal`／`-shm`）與 `telegram.session`（等同帳號存取權，權限 0600）。容器內預設環境變數：`DATABASE_URL=sqlite:///data/telegram.db`、`TELEGRAM_SESSION_FILE=/data/telegram.session`、`SERVER_BIND=0.0.0.0:8080`、`TGARCHIVE_ALLOW_NON_LOOPBACK=1`；`TELEGRAM_API_ID`／`TELEGRAM_API_HASH` 需自行提供（`-e` 或 `--env-file .env`）。
+
+```sh
+# 第一次：互動登入（需要 TTY）
+docker run -it --rm -v tgarchive:/data -e TELEGRAM_API_ID -e TELEGRAM_API_HASH \
+  ghcr.io/swind/rust-tgarchive auth login
+
+# 追蹤聊天室等管理指令：同一 volume、同樣用 run
+docker run --rm -v tgarchive:/data -e TELEGRAM_API_ID -e TELEGRAM_API_HASH \
+  ghcr.io/swind/rust-tgarchive chats list
+
+# 背景執行（REST API 沒有驗證：務必只發佈到 localhost）
+docker run -d --name tgarchive --restart unless-stopped \
+  -v tgarchive:/data -p 127.0.0.1:8080:8080 \
+  -e TELEGRAM_API_ID -e TELEGRAM_API_HASH \
+  ghcr.io/swind/rust-tgarchive
+```
+
+或使用根目錄的 [docker-compose.yml](docker-compose.yml)（`env_file: .env`，埠只綁 `127.0.0.1`）。
+
+- **同一 session 只能有一個程序**：登入或管理指令前請先 `docker stop tgarchive`（或使用 `serve --query-only` 的另一容器，它不連 Telegram）。
+- 使用 bind mount 時，目錄必須可由 uid 10001 寫入（`chown 10001:10001 ./data`）；具名 volume 會自動沿用映像內 `/data` 的擁有者。
+- 工作目錄是 `/data`，因此 `/data/.env` 會被自動載入（行程環境變數仍優先）；不需要它時可忽略。
+- **備份**：映像內沒有 `sqlite3`。最簡單：`docker stop tgarchive` 後複製整個 volume（`docker run --rm -v tgarchive:/data -v "$PWD":/backup debian:bookworm-slim cp -a /data/. /backup/`；停止後 WAL 已併入）。不停機的一致性備份請在主機以 `sqlite3` 對 volume 內的 `telegram.db` 執行 `.backup`（見下節）。session 檔請加密保存。
+- **升級**：`docker pull ghcr.io/swind/rust-tgarchive:<版本>`，`docker rm -f tgarchive` 後以相同 volume 重新 `docker run`；資料庫 migration 於啟動時自動套用，升級前建議先備份。標籤：`<版本>`、`<主.次>`、`latest`（不含 pre-release）、`sha-<短碼>`。
+- **Healthcheck**：映像內建 `HEALTHCHECK`（每 30 秒執行 `tgarchive healthcheck`，即 `GET /health/ready`）；`docker ps` 會顯示 `healthy`／`unhealthy`。`/health/ready` 在資料庫不可用或 collector `failed` 時回 503。
+- 本機建置：`docker build -t tgarchive .`（不需要 Node，`web/dist` 已提交）。
+
 ## 備份與安全
 
 資料庫使用 WAL，**不要只用 `cp telegram.db`**（會漏掉 `-wal` 內容）。使用 SQLite 一致性備份：
@@ -234,7 +267,8 @@ sqlite3 telegram.db "VACUUM INTO 'backup.db'"
 
 - session 檔（權限 0600）**等同帳號存取權**：外洩者可登入你的帳號。請妥善備份、加密保存，不要提交 Git。
 - `api_hash`、手機號碼、登入碼、密碼不會寫入日誌；日誌（INFO/WARN）也不含訊息內容。
-- 設定錯誤（資料庫／session 路徑、非 loopback 綁定）會在啟動時失敗並說明修正方式。
+- 設定錯誤（資料庫／session 路徑、未 opt-in 的非 loopback 綁定）會在啟動時失敗並說明修正方式。
+- `TGARCHIVE_ALLOW_NON_LOOPBACK=1`／`--allow-non-loopback` 會讓**未驗證**的 REST API（含同步、追蹤等寫入端點與所有訊息內容）暴露給網路上能連到該埠的任何人。只在容器內使用，並以 `-p 127.0.0.1:8080:8080` 發佈；要遠端存取請放在有驗證的反向代理或 SSH tunnel 之後。
 
 ## 復原行為與限制
 
@@ -251,6 +285,14 @@ sqlite3 telegram.db "VACUUM INTO 'backup.db'"
 ```sh
 scripts/check.sh   # fmt、test、clippy（有 npm 時另含 web typecheck／lint／test／build 與 dist 一致性）
 ```
+
+### CI 與發佈
+
+- `.github/workflows/ci.yml`：`rust`（fmt、clippy `-D warnings`、test，皆 `--locked`）與 `web`（typecheck、lint、test、build、`web/dist` 一致性）在每次 push 到 `main` 與每個 PR 執行；`e2e`（Playwright，`scripts/e2e.sh`）只在 push 到 `main`、tag 發佈與手動觸發（`run_e2e`）時執行，失敗時上傳 `web/e2e/test-results`。`scripts/check.sh` 與 CI 步驟一致。
+- 發佈：更新 `Cargo.toml` 的 `version`（並讓 `Cargo.lock` 跟著更新）→ commit → `git tag vX.Y.Z` → `git push origin main vX.Y.Z`。`release.yml` 會先跑完整 CI（含 E2E）、確認 tag 與 `Cargo.toml` 版本一致，再建置 amd64 映像並推到 `ghcr.io/swind/rust-tgarchive`（附 buildx provenance／SBOM attestation）。含 `-` 的 tag（如 `v0.2.0-rc.1`）視為 pre-release，不更新 `latest` 與 `<主.次>`。
+- **第一次發佈後**：到 GitHub → 該 repo 的 Packages → `rust-tgarchive` → Package settings，把 visibility 改為 Public（GHCR 預設為 private），並確認已連結到此 repo。
+- 建議的 repo 設定：對 `main` 啟用 branch protection／ruleset，要求 PR 與 status checks `rust`、`web` 通過（`e2e` 不在 PR 執行，不要設為必要）；Actions 預設 token 權限設為 read-only。Dependabot（`.github/dependabot.yml`）每週更新 Actions、cargo（忽略已 vendor 的 grammers-*）、npm（`web`、`web/e2e`；`@playwright/test` 不自動升級，因截圖基準綁定映像版本）與 Dockerfile 基底映像。
+- 此 repo 目前沒有 LICENSE 檔，因此映像不帶 license label。
 
 ### E2E 測試
 

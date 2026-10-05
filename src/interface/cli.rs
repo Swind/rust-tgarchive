@@ -64,6 +64,19 @@ pub enum Command {
         bind: Option<SocketAddr>,
         #[arg(long, help = "Serve archive queries without opening Telegram")]
         query_only: bool,
+        #[arg(
+            long,
+            help = "Allow a non-loopback --bind/SERVER_BIND (the API has no authentication; also TGARCHIVE_ALLOW_NON_LOOPBACK=1)"
+        )]
+        allow_non_loopback: bool,
+    },
+    /// Probe a running server's health endpoint (exit 0 when it answers 2xx); used by the Docker HEALTHCHECK
+    Healthcheck {
+        #[arg(
+            long,
+            help = "default: http://127.0.0.1:<SERVER_BIND port>/health/ready"
+        )]
+        url: Option<String>,
     },
     Openapi {
         #[arg(long, value_enum, default_value = "json")]
@@ -334,6 +347,10 @@ pub enum PreparedInvocation {
     Serve {
         bind: Option<SocketAddr>,
         query_only: bool,
+        allow_non_loopback: bool,
+    },
+    Healthcheck {
+        url: Option<String>,
     },
     OpenApi {
         format: OpenApiCliFormat,
@@ -396,7 +413,16 @@ pub fn prepare(cli: Cli) -> Result<PreparedInvocation, CliError> {
             output,
             command: PreparedCommand::SearchStatus,
         }),
-        Command::Serve { bind, query_only } => Ok(PreparedInvocation::Serve { bind, query_only }),
+        Command::Serve {
+            bind,
+            query_only,
+            allow_non_loopback,
+        } => Ok(PreparedInvocation::Serve {
+            bind,
+            query_only,
+            allow_non_loopback,
+        }),
+        Command::Healthcheck { url } => Ok(PreparedInvocation::Healthcheck { url }),
         Command::Openapi { format } => Ok(PreparedInvocation::OpenApi { format }),
         Command::Auth {
             command: AuthCommand::Login { phone },
@@ -508,6 +534,7 @@ fn prepare_query(command: Command) -> Result<PreparedCommand, CliError> {
         },
         Command::Status => Ok(PreparedCommand::Status),
         Command::Serve { .. }
+        | Command::Healthcheck { .. }
         | Command::Openapi { .. }
         | Command::Auth { .. }
         | Command::Repair { .. }
