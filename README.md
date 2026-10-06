@@ -250,31 +250,28 @@ Notes:
 
 ## Docker
 
-Image `ghcr.io/swind/rust-tgarchive` (linux/amd64, runs as non-root uid 10001, `debian:bookworm-slim` base, about 160 MB). All state lives in the `/data` volume: `telegram.db` (with `-wal` / `-shm`) and `telegram.session` (equivalent to account access, mode 0600). Default environment variables inside the container: `DATABASE_URL=sqlite:///data/telegram.db`, `TELEGRAM_SESSION_FILE=/data/telegram.session`, `SERVER_BIND=0.0.0.0:8080`, `TGARCHIVE_ALLOW_NON_LOOPBACK=1`; you must supply `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` yourself (`-e` or `--env-file .env`).
+Image `ghcr.io/swind/rust-tgarchive` (linux/amd64, `gcr.io/distroless/cc-debian12:nonroot` base, default uid 65532). The runtime contains only the stripped `tgarchive` binary, glibc/libgcc and CA certificates: **no shell, package manager, curl or sqlite3**, so `docker exec ... sh` does not work. All state lives in `/data`: `telegram.db` (with `-wal` / `-shm`) and `telegram.session` (equivalent to account access, mode 0600). Default environment variables inside the container: `DATABASE_URL=sqlite:///data/telegram.db`, `TELEGRAM_SESSION_FILE=/data/telegram.session`, `SERVER_BIND=0.0.0.0:8080`, `TGARCHIVE_ALLOW_NON_LOOPBACK=1`.
+
+Setup with [docker-compose.yml](docker-compose.yml) (state in the host directory `./data`):
 
 ```sh
-# First time: interactive login (needs a TTY)
-docker run -it --rm -v tgarchive:/data -e TELEGRAM_API_ID -e TELEGRAM_API_HASH \
-  ghcr.io/swind/rust-tgarchive auth login
-
-# Management commands such as tracking chats: same volume, also via run
-docker run --rm -v tgarchive:/data -e TELEGRAM_API_ID -e TELEGRAM_API_HASH \
-  ghcr.io/swind/rust-tgarchive chats list
-
-# Run in the background (the REST API has no authentication: publish to localhost only)
-docker run -d --name tgarchive --restart unless-stopped \
-  -v tgarchive:/data -p 127.0.0.1:8080:8080 \
-  -e TELEGRAM_API_ID -e TELEGRAM_API_HASH \
-  ghcr.io/swind/rust-tgarchive
+mkdir -p data                      # create it yourself so it is owned by you, not root
+cat > .env <<'EOF'
+TELEGRAM_API_ID=...
+TELEGRAM_API_HASH=...
+EOF
+docker compose run --rm tgarchive auth login   # first time only (interactive, needs a TTY)
+docker compose up -d
 ```
 
-Or use [docker-compose.yml](docker-compose.yml) in the repository root (`env_file: .env`, port bound to `127.0.0.1` only).
-
-- **One process per session**: before logging in or running management commands, run `docker stop tgarchive` first (or use a separate container running `serve --query-only`, which does not connect to Telegram).
-- With a bind mount, the directory must be writable by uid 10001 (`chown 10001:10001 ./data`); a named volume automatically inherits the ownership of `/data` in the image.
+- The compose service runs as `${TGARCHIVE_UID:-1000}:${TGARCHIVE_GID:-1000}`, so `./data` must be writable by that user. If your host user is not 1000:1000, run `export TGARCHIVE_UID=$(id -u) TGARCHIVE_GID=$(id -g)` before running compose, or put the numeric IDs in `.env`.
+- **Network exposure**: the REST API has no authentication, so the port is published on `127.0.0.1:8080` by default. To expose it on the LAN, explicitly opt in with `TGARCHIVE_BIND_IP=<host LAN IP>` (or `0.0.0.0`), and only on a network you trust.
+- Management commands (e.g. `docker compose run --rm tgarchive chats list`) use the same `./data`.
+- **One process per session**: before logging in or running management commands, run `docker compose stop` first (or use a separate container running `serve --query-only`, which does not connect to Telegram).
+- With plain `docker run`, bind-mount a directory writable by the container user (`-v "$PWD/data:/data" --user "$(id -u):$(id -g)"`).
 - The working directory is `/data`, so `/data/.env` is loaded automatically (process environment variables still take precedence); ignore it if you do not need it.
-- **Backup**: the image has no `sqlite3`. Simplest: after `docker stop tgarchive`, copy the whole volume (`docker run --rm -v tgarchive:/data -v "$PWD":/backup debian:bookworm-slim cp -a /data/. /backup/`; once stopped, the WAL has been merged). For a consistent backup without downtime, run `.backup` with `sqlite3` on the host against `telegram.db` inside the volume (see the next section). Store the session file encrypted.
-- **Upgrade**: `docker pull ghcr.io/swind/rust-tgarchive:<version>`, `docker rm -f tgarchive`, then `docker run` again with the same volume; database migrations are applied automatically at startup, and a backup before upgrading is recommended. Tags: `<version>`, `<major.minor>`, `latest` (excluding pre-releases) and `sha-<short>`.
+- **Backup**: stop the stack (`docker compose stop`, which merges the WAL) and copy `./data` on the host; or run `.backup` with host `sqlite3` against `data/telegram.db` for a consistent backup without downtime. Store the session file encrypted.
+- **Upgrade**: change the image tag in `docker-compose.yml`, then `docker compose pull && docker compose up -d`. Database migrations are applied automatically at startup; back up `./data` first. Tags: `<version>`, `<major.minor>`, `latest` (excluding pre-releases) and `sha-<short>`.
 - **Healthcheck**: the image has a built-in `HEALTHCHECK` (runs `tgarchive healthcheck` every 30 seconds, i.e. `GET /health/ready`); `docker ps` shows `healthy` / `unhealthy`. `/health/ready` returns 503 when the database is unavailable or the collector is `failed`.
 - Local build: `docker build -t tgarchive .` (no Node needed; `web/dist` is committed).
 

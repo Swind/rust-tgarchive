@@ -10,26 +10,22 @@ COPY src ./src
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo build --release --locked --bin tgarchive \
-    && install -D target/release/tgarchive /out/tgarchive
+    && install -D -s target/release/tgarchive /out/tgarchive \
+    && mkdir /out/data
 
-FROM debian:bookworm-slim
+FROM gcr.io/distroless/cc-debian12:nonroot
 LABEL org.opencontainers.image.title="tgarchive" \
       org.opencontainers.image.description="Local Telegram message archive: collector, SQLite store, CLI, REST API and web UI" \
       org.opencontainers.image.source="https://github.com/Swind/rust-tgarchive"
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
-    && rm -rf /var/lib/apt/lists/* \
-    && useradd --uid 10001 --user-group --no-create-home --shell /usr/sbin/nologin tgarchive \
-    && mkdir /data && chown 10001:10001 /data
 COPY --from=builder /out/tgarchive /usr/local/bin/tgarchive
-USER 10001:10001
+COPY --from=builder --chown=65532:65532 /out/data /data
+USER 65532:65532
 WORKDIR /data
-VOLUME /data
 ENV DATABASE_URL=sqlite:///data/telegram.db \
     TELEGRAM_SESSION_FILE=/data/telegram.session \
     SERVER_BIND=0.0.0.0:8080 \
     TGARCHIVE_ALLOW_NON_LOOPBACK=1
 EXPOSE 8080
-HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 CMD ["tgarchive", "healthcheck"]
-ENTRYPOINT ["tgarchive"]
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 CMD ["/usr/local/bin/tgarchive", "healthcheck"]
+ENTRYPOINT ["/usr/local/bin/tgarchive"]
 CMD ["serve"]
