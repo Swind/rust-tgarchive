@@ -1,5 +1,13 @@
 # Implementation status
 
+## 大型 Rust 模組按職責拆分（2026-10-08）
+
+- application 保留公開型別／port 匯出，拆成 messages、senders、chats、error、ingestion、ports；bootstrap 保留 CLI 分派，拆出 auth、database、server、runtime、sync。sync engine 與 coordinator 分離。
+- SQLite store 的 archive／messages／chats／sync／tracking repository 實作移至標準 store 子模組；Telegram realtime 分出 batch 正規化；mapper、realtime、media、file_session 的大型內嵌測試移至子模組。
+- CLI 分成 args／prepare／execute／query／render；REST routes 分成 chats／messages／media／health／query，DTO 分成 chat／message／sender／status／media。既有公開路徑、CLI 行為與 OpenAPI 維持；未新增依賴、未改資料庫 schema 或下載／同步邏輯。
+- 主要入口行數：application 1056→24、bootstrap 1097→172、SQLite store 1398→312、Telegram realtime 1278→414、CLI 1156→33、REST routes 905→15、DTO 860→28。剩餘較長的 engine／services 與測試檔按其一致職責保留。
+- 驗收：原有 85 個 src 單元測試全保留，59 段 SQLite SQL、application／bootstrap 字串常值核對一致；完整 Rust 262 passed／2 ignored、Docker Playwright 64 passed；fmt、all-target Clippy（warnings denied）、rustdoc（warnings denied）通過。文件建置時順手將既有 snippet 文件對私有常數的連結改為純文字。版本維持 0.1.5。
+
 ## 圖片下載進度 Web UI（2026-10-08）
 
 - 新增唯讀 `GET /api/v1/media/downloads/status`，依 chat／preview 或 archive 彙總目前附件的 queued、running、succeeded、failed、interrupted、unavailable、superseded；retrying 為 failed 中已安排重試的子集合。排除已刪訊息與已更換圖片的舊工作，query-only 可讀、舊 schema 回傳空列表。

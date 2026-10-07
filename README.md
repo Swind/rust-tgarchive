@@ -317,6 +317,8 @@ sqlite3 telegram.db "VACUUM INTO 'backup.db'"
 
 ## Development
 
+`src/application.rs` re-exports the application contracts from message, sender, chat, ingestion, error and port modules; existing imports remain stable. `src/bootstrap.rs` dispatches commands, with authentication, database setup, server lifecycle, background runtime and CLI sync wiring under `src/bootstrap/`. Sync coordination is separate from the engine. SQLite repository implementations live under `sqlite/store/`; CLI parsing, execution, query conversion and rendering, and REST route/DTO groups each have their own modules. Large inline unit tests live beside their production module in a `tests.rs` child module.
+
 ```sh
 scripts/check.sh   # fmt, test, clippy (with npm, also web typecheck / lint / test / build and dist consistency)
 ```

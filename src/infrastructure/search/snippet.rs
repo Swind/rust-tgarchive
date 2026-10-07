@@ -3,7 +3,7 @@ use super::normalize::normalize_with_map;
 const WINDOW: usize = 120;
 const LEAD: usize = 30;
 
-/// Excerpt of at most [`WINDOW`] characters (plus `…` markers) starting shortly before the
+/// Excerpt of at most `WINDOW` characters (plus `…` markers) starting shortly before the
 /// earliest occurrence of any needle. Works on `char`s, never on byte offsets. `None` when no
 /// needle occurs in the text.
 pub fn make_snippet(text: &str, needles: &[String]) -> Option<String> {
