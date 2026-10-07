@@ -1,3 +1,4 @@
+pub mod media;
 mod repair;
 mod search;
 mod senders;

@@ -17,6 +17,7 @@ use crate::{
 };
 
 use super::{
+    media::enqueue_attachment_downloads,
     open_existing_pool, open_pool, open_readonly_pool,
     search::{index_message, read_state},
     storage_error,
@@ -32,6 +33,8 @@ pub struct SqliteStore {
     /// Read-only database opened without migrating: lacks `senders.is_bot` and the name history
     /// table (migration 0008). Bot flags read as NULL and histories as empty.
     pub(super) pre_0008: bool,
+    /// Read-only database opened without migrating: lacks media tables from migration 0009.
+    pub(super) pre_0009_media: bool,
 }
 
 /// Which migrations a read-only, unmigrated database is missing.
@@ -48,6 +51,7 @@ impl SqliteStore {
             tokenizer: default_tokenizer(),
             legacy_schema: false,
             pre_0008: false,
+            pre_0009_media: false,
         }
     }
 
@@ -127,6 +131,12 @@ impl SqliteStore {
         .fetch_one(&store.pool)
         .await?;
         store.pre_0008 = bot == 0;
+        let media: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='media_downloads'",
+        )
+        .fetch_one(&store.pool)
+        .await?;
+        store.pre_0009_media = media == 0;
         Ok(store)
     }
 }
@@ -480,6 +490,13 @@ impl ArchiveWriter for SqliteStore {
                     if let (MessageSource::Refetch, Some((row_id, _))) = (record.source, &previous)
                     {
                         backfill_metadata(&mut tx, *row_id, message).await?;
+                        enqueue_attachment_downloads(
+                            &mut tx,
+                            message.chat_id.get(),
+                            message.id.get(),
+                            *row_id,
+                        )
+                        .await?;
                         continue;
                     }
                     let result = sqlx::query("INSERT INTO messages(chat_id, message_id, sender_id, timestamp, edited_at, collected_at, created_at, updated_at, text, reply_to, version_at, source_priority, post_author, fwd_from_id, fwd_from_name, fwd_date) SELECT ?, ?, ?, ?, ?, ?, unixepoch(), unixepoch(), ?, ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS(SELECT 1 FROM message_tombstones WHERE chat_id=? AND message_id=?) AND NOT (? > -1000000000000 AND EXISTS(SELECT 1 FROM common_message_tombstones WHERE message_id=?)) ON CONFLICT(chat_id, message_id) DO UPDATE SET sender_id=COALESCE(excluded.sender_id, messages.sender_id), post_author=COALESCE(excluded.post_author, messages.post_author), fwd_from_id=COALESCE(excluded.fwd_from_id, messages.fwd_from_id), fwd_from_name=COALESCE(excluded.fwd_from_name, messages.fwd_from_name), fwd_date=COALESCE(excluded.fwd_date, messages.fwd_date), timestamp=excluded.timestamp, edited_at=excluded.edited_at, collected_at=excluded.collected_at, updated_at=unixepoch(), text=excluded.text, reply_to=excluded.reply_to, version_at=excluded.version_at, source_priority=excluded.source_priority WHERE (excluded.version_at > messages.version_at OR (excluded.version_at = messages.version_at AND excluded.source_priority >= messages.source_priority)) AND messages.is_deleted=0")
@@ -512,6 +529,13 @@ impl ArchiveWriter for SqliteStore {
                                 .await?;
                         }
                         replace_attachments(&mut tx, row_id, &message.attachments).await?;
+                        enqueue_attachment_downloads(
+                            &mut tx,
+                            message.chat_id.get(),
+                            message.id.get(),
+                            row_id,
+                        )
+                        .await?;
                         sqlx::query("UPDATE chat_sync_state SET oldest_message_id=CASE WHEN oldest_message_id IS NULL OR ?<oldest_message_id THEN ? ELSE oldest_message_id END, newest_message_id=CASE WHEN newest_message_id IS NULL OR ?>newest_message_id THEN ? ELSE newest_message_id END, updated_at=unixepoch() WHERE chat_id=?")
                             .bind(message.id.get()).bind(message.id.get()).bind(message.id.get()).bind(message.id.get()).bind(message.chat_id.get())
                             .execute(&mut *tx).await?;
