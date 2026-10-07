@@ -1,5 +1,12 @@
 # Implementation status
 
+## 手動版本與 main image build number（2026-10-07）
+
+- 基礎版本維持 0.1.5，僅由使用者決定何時手動修改；CI 不自動 bump、不回寫版本。
+- 每次 main push 執行完整 CI 與雙架構 image 編譯，發布 `<version>-build.<github.run_number>`／SHA tag，並在該 commit 仍是 main head 時更新 `main`。各次 main CI 保留獨立執行，不互相取消或替換待執行工作。
+- 手動 v* tag 驗證 Cargo 版本後另外更新正式版本 tag；只有非 prerelease 更新 minor／latest。Compose 預設 main，可由 `TGARCHIVE_IMAGE_TAG` 固定 build 或正式版本。
+- 驗收：actionlint 與 diff check 通過；執行 workflow 版本步驟確認 main／相符 tag 成功、錯誤版本 tag 被拒絕；模擬 main promotion 確認 repository 轉小寫、過期 commit 不更新；Compose 預設與固定 build tag 均解析正確。
+
 ## v0.1.5 release 修正（2026-10-07）
 
 - v0.1.4 CI 的 session 取消測試以固定 80ms 等待 blocking writer，負載下可能在寫入完成前檢查舊值。測試改用 started/release 訊號確保取消發生於寫入期間，再等待既有 write gate 釋放後檢查磁碟與記憶體狀態；不改 production session 寫入流程。

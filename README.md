@@ -1,5 +1,6 @@
 # tgarchive
 
+[![Image build](https://github.com/Swind/rust-tgarchive/actions/workflows/release.yml/badge.svg?branch=main)](https://github.com/Swind/rust-tgarchive/actions/workflows/release.yml)
 [![CI](https://github.com/Swind/rust-tgarchive/actions/workflows/ci.yml/badge.svg)](https://github.com/Swind/rust-tgarchive/actions/workflows/ci.yml)
 
 > Unofficial archive tool using the Telegram API; not affiliated with Telegram.
@@ -283,7 +284,7 @@ docker compose up -d
 - With plain `docker run`, bind-mount a directory writable by the container user (`-v "$PWD/data:/data" --user "$(id -u):$(id -g)"`).
 - The working directory is `/data`, so `/data/.env` is loaded automatically (process environment variables still take precedence); ignore it if you do not need it.
 - **Backup**: stop the stack (`docker compose stop`, which merges the WAL) and copy `./data` on the host, including `media`; a SQLite-only backup does not include images. If `MEDIA_DIR` points outside `./data`, back up that directory too. Store the session file encrypted.
-- **Upgrade**: change the image tag in `docker-compose.yml`, then `docker compose pull && docker compose up -d`. Database migrations are applied automatically at startup; back up `./data` first. Tags: `<version>`, `<major.minor>`, `latest` (excluding pre-releases) and `sha-<short>`.
+- **Upgrade**: Compose defaults to the latest successful `main` image. Run `docker compose pull && docker compose up -d` to update. To pin a build, set `TGARCHIVE_IMAGE_TAG=0.1.5-build.123` in `.env`; to use a manual release, set it to `0.1.5` or `latest`. Database migrations are applied automatically at startup; back up `./data` first.
 - **Healthcheck**: the image has a built-in `HEALTHCHECK` (runs `tgarchive healthcheck` every 30 seconds, i.e. `GET /health/ready`); `docker ps` shows `healthy` / `unhealthy`. `/health/ready` returns 503 when the database is unavailable or the collector is `failed`.
 - Local build: `docker build -t tgarchive .` (no Node needed; `web/dist` is committed).
 
@@ -320,8 +321,11 @@ scripts/check.sh   # fmt, test, clippy (with npm, also web typecheck / lint / te
 
 ### CI and releases
 
-- `.github/workflows/ci.yml`: `rust` (fmt, clippy `-D warnings`, test, all with `--locked`) and `web` (typecheck, lint, test, build, `web/dist` consistency) run on every push to `main` and every PR; `e2e` (Playwright, `scripts/e2e.sh`) runs only on pushes to `main`, tag releases and manual dispatch (`run_e2e`), and uploads `web/e2e/test-results` on failure. `scripts/check.sh` matches the CI steps.
-- Release: update `version` in `Cargo.toml` (and let `Cargo.lock` follow) → commit → `git tag vX.Y.Z` → `git push origin main vX.Y.Z`. `release.yml` first runs the full CI (including E2E), checks that the tag matches the `Cargo.toml` version, then builds the multi-arch (amd64 + arm64, arm64 via QEMU) image and pushes it to `ghcr.io/swind/rust-tgarchive` (with buildx provenance / SBOM attestation). A tag containing `-` (such as `v0.2.0-rc.1`) is treated as a pre-release and does not update `latest` or `<major.minor>`.
+- The base version (currently `0.1.5`) is changed manually. CI never bumps it or writes version changes back to the repository.
+- Every push to `main` runs `release.yml`: full Rust, web and Playwright CI, then a multi-arch (amd64 + arm64 via QEMU) GHCR image build with provenance and SBOM. Each build publishes `<version>-build.<number>` (for example `0.1.5-build.123`) and `sha-<short>`. The build number is GitHub's `github.run_number` for this workflow; release-tag runs also consume numbers, failed runs can leave gaps, and reruns keep the same number and may replace that build tag. The image labels include its build version, build number and source revision. The binary/API version stays at the manual base version.
+- Successful builds update the rolling `main` tag only if their commit is still the head of `main`. Main builds leave `latest` and manual version tags unchanged. Separate main runs are not cancelled or replaced by CI concurrency grouping.
+- `.github/workflows/ci.yml` is reused by image builds, runs directly on PRs, and supports manual dispatch (`run_e2e`). It checks Rust fmt/clippy/tests with `--locked`, web typecheck/lint/tests/build and committed `web/dist`; image builds always include E2E. Failure artifacts include `web/e2e/test-results`. `scripts/check.sh` matches the local CI checks.
+- Manual release: update `version` in `Cargo.toml`, update `Cargo.lock`, regenerate `openapi.yml` with `cargo run -q -- openapi --format yaml > openapi.yml`, then commit, `git tag vX.Y.Z`, and `git push origin main vX.Y.Z`. The workflow validates the tag against Cargo, runs full CI, and additionally publishes `<version>`, `<major.minor>` and `latest`. Pre-release tags such as `v0.2.0-rc.1` publish their exact version but leave `latest` and `<major.minor>` unchanged.
 - **After the first release**: on GitHub go to the repo's Packages → `rust-tgarchive` → Package settings, change visibility to Public (GHCR defaults to private), and confirm the package is linked to this repo.
 - Recommended repo settings: enable branch protection / a ruleset on `main` requiring a PR and passing status checks `rust` and `web` (`e2e` does not run on PRs, so do not make it required); set the default Actions token permissions to read-only. Dependabot (`.github/dependabot.yml`) updates weekly: Actions, cargo (ignoring the vendored grammers-*), npm (`web`, `web/e2e`; `@playwright/test` is not upgraded automatically because screenshot baselines are tied to the image version) and the Dockerfile base image.
 - The repo currently has no LICENSE file, so the image carries no license label.

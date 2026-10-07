@@ -4,8 +4,6 @@ name: CI
 # to pin them to commit SHAs if stricter supply-chain hygiene is wanted.
 
 on:
-  push:
-    branches: [main]
   pull_request:
   workflow_dispatch:
     inputs:
@@ -21,7 +19,7 @@ on:
         default: false
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.ref }}-${{ github.event_name == 'pull_request' && 'pr' || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:

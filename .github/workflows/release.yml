@@ -2,6 +2,7 @@ name: Release
 
 on:
   push:
+    branches: [main]
     tags: ['v*']
 
 permissions:
@@ -13,22 +14,31 @@ jobs:
     with:
       run_e2e: true
 
-  verify-version:
+  version:
     runs-on: ubuntu-latest
+    outputs:
+      cargo_version: ${{ steps.version.outputs.cargo_version }}
+      image_version: ${{ steps.version.outputs.image_version }}
+      build_number: ${{ steps.version.outputs.build_number }}
     steps:
       - uses: actions/checkout@v7
-      - name: Tag must match Cargo.toml version
+      - id: version
+        name: Read version and validate release tag
         env:
-          TAG: ${{ github.ref_name }}
+          REF: ${{ github.ref }}
+          RUN_NUMBER: ${{ github.run_number }}
         run: |
           cargo_version=$(sed -n '/^\[package\]/,/^\[/{s/^version *= *"\(.*\)"/\1/p}' Cargo.toml | head -n1)
-          if [ "$TAG" != "v$cargo_version" ]; then
-            echo "::error::Tag $TAG does not match Cargo.toml version v$cargo_version; bump Cargo.toml and re-tag."
+          if [[ "$REF" == refs/tags/* ]] && [ "${REF#refs/tags/}" != "v$cargo_version" ]; then
+            echo "::error::Tag ${REF#refs/tags/} does not match Cargo.toml version v$cargo_version; bump Cargo.toml and re-tag."
             exit 1
           fi
+          echo "cargo_version=$cargo_version" >> "$GITHUB_OUTPUT"
+          echo "image_version=$cargo_version-build.$RUN_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "build_number=$RUN_NUMBER" >> "$GITHUB_OUTPUT"
 
   image:
-    needs: [ci, verify-version]
+    needs: [ci, version]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -48,12 +58,18 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository }}
+          flavor: latest=false
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}},enable=${{ !contains(github.ref_name, '-') }}
-            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+            type=raw,value=${{ needs.version.outputs.image_version }}
+            type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
             type=sha,format=short
-      - uses: docker/build-push-action@v7
+          labels: |
+            org.opencontainers.image.version=${{ needs.version.outputs.image_version }}
+            io.tgarchive.build-number=${{ needs.version.outputs.build_number }}
+      - id: build
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -64,3 +80,17 @@ jobs:
           cache-to: type=gha,mode=max
           provenance: mode=max
           sbom: true
+      - name: Move main tag if this commit is still current
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE: ghcr.io/${{ github.repository }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          image="${IMAGE,,}"
+          current_main=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
+          if [ "$current_main" = "$GITHUB_SHA" ]; then
+            docker buildx imagetools create --tag "$image:main" "$image@$DIGEST"
+          else
+            echo "Skipping main tag: $GITHUB_SHA is no longer the head of main."
+          fi
