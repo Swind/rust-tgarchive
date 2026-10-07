@@ -523,10 +523,21 @@ async fn serve(
             eprintln!("warning: {warning}");
         }
         let application = readonly_application(&config.database_url, detail).await?;
+        let media_store = SqliteStore::open_existing_readonly(&config.database_url)
+            .await
+            .map_err(|error| CliError::Database(error.to_string()))?;
+        let media = rest::MediaContext {
+            store: media_store,
+            media_dir: config.media_directory().map_err(CliError::InvalidInput)?,
+            worker_enabled: false,
+        };
         tracing::info!(address = %listener.local_addr().unwrap_or(bind), mode = "query_only", "REST server listening");
         return serve_router(
             listener,
-            rest::apply_dev_cors(rest::router(application), cors),
+            rest::apply_dev_cors(
+                rest::router_with_media(application, None, Some(media)),
+                cors,
+            ),
             None,
         )
         .await;
@@ -535,8 +546,19 @@ async fn serve(
     let telegram = Config::telegram().map_err(CliError::InvalidInput)?;
     telegram.validate_paths().map_err(CliError::InvalidInput)?;
     SyncPacing::from_env().map_err(CliError::InvalidInput)?;
+    let media_dir = config.media_directory().map_err(CliError::InvalidInput)?;
+    tokio::fs::create_dir_all(&media_dir)
+        .await
+        .map_err(|error| CliError::Server(format!("cannot create media directory: {error}")))?;
     let adapter = open_authorized_telegram(&telegram).await?;
-    let result = serve_with_telegram(listener, &config.database_url, adapter.clone(), cors).await;
+    let result = serve_with_telegram(
+        listener,
+        &config.database_url,
+        adapter.clone(),
+        media_dir,
+        cors,
+    )
+    .await;
     let shutdown = adapter
         .shutdown()
         .await
@@ -550,6 +572,7 @@ async fn serve_with_telegram(
     listener: TcpListener,
     database_url: &str,
     adapter: Arc<TelegramAdapter>,
+    media_dir: std::path::PathBuf,
     cors: Option<tower_http::cors::CorsLayer>,
 ) -> Result<(), CliError> {
     let store = Arc::new(
@@ -561,6 +584,7 @@ async fn serve_with_telegram(
     let result = async {
         bind_account(&store, &adapter).await?;
         let mut runtime = start_sync_runtime(store.clone(), adapter.clone()).await?;
+        runtime.start_media(adapter.clone(), store.clone(), media_dir.clone());
         let collector =
             CollectorStatusHandle::new(ComponentStatus::new(ComponentState::Starting, None));
         runtime.start_realtime(adapter.clone(), store.clone(), collector.clone());
@@ -578,7 +602,15 @@ async fn serve_with_telegram(
         let serving = serve_router(
             listener,
             rest::apply_dev_cors(
-                rest::router_with_sync(application, Some(Arc::clone(&runtime.coordinator))),
+                rest::router_with_media(
+                    application,
+                    Some(Arc::clone(&runtime.coordinator)),
+                    Some(rest::MediaContext {
+                        store: (*store).clone(),
+                        media_dir: media_dir.clone(),
+                        worker_enabled: true,
+                    }),
+                ),
                 cors,
             ),
             Some(&runtime),
@@ -600,6 +632,12 @@ struct SyncRuntime {
     sink: IngestSink,
     writer: JoinHandle<Result<(), RepositoryError>>,
     realtime: Option<RealtimeTask>,
+    media: Option<MediaTask>,
+}
+
+struct MediaTask {
+    cancel: CancellationToken,
+    handle: JoinHandle<()>,
 }
 
 struct RealtimeTask {
@@ -608,6 +646,22 @@ struct RealtimeTask {
 }
 
 impl SyncRuntime {
+    fn start_media(
+        &mut self,
+        adapter: Arc<TelegramAdapter>,
+        store: Arc<SqliteStore>,
+        directory: std::path::PathBuf,
+    ) {
+        let cancel = CancellationToken::new();
+        let handle = crate::infrastructure::media::MediaWorker::spawn(
+            adapter,
+            (*store).clone(),
+            directory,
+            Arc::clone(self.engine.pacer()),
+            cancel.clone(),
+        );
+        self.media = Some(MediaTask { cancel, handle });
+    }
     /// Starts catch-up plus live updates on the same writer and engine as history sync.
     fn start_realtime(
         &mut self,
@@ -639,7 +693,27 @@ impl SyncRuntime {
             sink,
             writer,
             realtime,
+            media,
         } = self;
+        let media_result = match media {
+            Some(MediaTask { cancel, mut handle }) => {
+                cancel.cancel();
+                match tokio::time::timeout(std::time::Duration::from_secs(10), &mut handle).await {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(error)) => {
+                        Err(CliError::Telegram(format!("media worker failed: {error}")))
+                    }
+                    Err(_) => {
+                        handle.abort();
+                        let _ = handle.await;
+                        Err(CliError::Telegram(
+                            "media worker shutdown exceeded its deadline".into(),
+                        ))
+                    }
+                }
+            }
+            None => Ok(()),
+        };
         // Producers stop first so the writer can drain once every sender is dropped.
         let realtime_result = match realtime {
             Some(RealtimeTask { cancel, mut handle }) => {
@@ -694,6 +768,7 @@ impl SyncRuntime {
             }
         };
         realtime_result?;
+        media_result?;
         coordinator_result?;
         writer_result
     }
@@ -732,6 +807,7 @@ async fn start_sync_runtime(
         sink,
         writer: writer_task,
         realtime: None,
+        media: None,
     })
 }
 
@@ -765,6 +841,11 @@ async fn serve_router(
                         stop.cancel();
                         let _ = (&mut server).await;
                         break Err(CliError::Server("ingestion writer stopped unexpectedly".into()));
+                    }
+                    if runtime.media.as_ref().is_some_and(|task| task.handle.is_finished()) {
+                        stop.cancel();
+                        let _ = (&mut server).await;
+                        break Err(CliError::Server("media worker stopped unexpectedly".into()));
                     }
                 }
             }

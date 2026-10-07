@@ -29,6 +29,22 @@ pub struct ApiError {
 }
 
 impl ApiError {
+    pub(crate) fn media_unavailable(request_id: impl Into<String>) -> Self {
+        Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "media_unavailable",
+            "Media downloads are not enabled",
+            request_id,
+        )
+    }
+    pub(crate) fn storage(request_id: impl Into<String>) -> Self {
+        Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "storage_unavailable",
+            "Storage is unavailable or read-only",
+            request_id,
+        )
+    }
     pub(crate) fn malformed(request_id: impl Into<String>) -> Self {
         Self::new(
             StatusCode::BAD_REQUEST,

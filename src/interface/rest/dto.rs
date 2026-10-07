@@ -12,7 +12,54 @@ use crate::{
         SenderSummary, SyncChatProgress, SyncJob, SyncJobState, services::ApplicationStatus,
     },
     domain::{Attachment, AttachmentKind, Chat, ChatKind, Forward, SenderId, SenderKind},
+    infrastructure::persistence::sqlite::media::{MediaDownload, MediaPolicy},
 };
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct MediaPolicyDto {
+    pub auto_archive: bool,
+}
+
+impl From<MediaPolicy> for MediaPolicyDto {
+    fn from(value: MediaPolicy) -> Self {
+        Self {
+            auto_archive: value.auto_archive,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct MediaDownloadDto {
+    pub id: i64,
+    pub ordinal: i64,
+    pub variant: String,
+    pub state: String,
+    pub width: Option<i32>,
+    pub height: Option<i32>,
+    pub byte_size: Option<i64>,
+    pub next_attempt_at: Option<i64>,
+    pub content_url: Option<String>,
+    pub last_error: Option<String>,
+}
+
+impl From<MediaDownload> for MediaDownloadDto {
+    fn from(value: MediaDownload) -> Self {
+        let content_url =
+            (value.state == "succeeded").then(|| format!("/api/v1/media/{}/content", value.id));
+        Self {
+            id: value.id,
+            ordinal: value.ordinal,
+            variant: value.variant,
+            state: value.state,
+            width: value.width,
+            height: value.height,
+            byte_size: value.byte_size,
+            next_attempt_at: value.next_attempt_at,
+            content_url,
+            last_error: value.last_error,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct ChatDto {

@@ -12,6 +12,8 @@ export type Status = S['StatusDto'];
 export type SyncJob = S['SyncJobDto'];
 export type TrackResult = S['TrackChatDto'];
 export type Attachment = S['AttachmentDto'];
+export type MediaDownload = S['MediaDownloadDto'];
+export type MediaPolicy = S['MediaPolicyDto'];
 export type SenderProfile = S['SenderProfileDto'];
 export type SenderPage = S['SenderPageDto'];
 export type SenderDetail = S['SenderDetailDto'];
@@ -39,10 +41,14 @@ export function buildQuery(query?: Query): string {
   return text ? `?${text}` : '';
 }
 
-async function request<T>(method: string, path: string, query?: Query): Promise<T> {
+async function request<T>(method: string, path: string, query?: Query, jsonBody?: unknown): Promise<T> {
   let response: Response;
   try {
-    response = await fetch(path + buildQuery(query), { method, headers: { accept: 'application/json' } });
+    response = await fetch(path + buildQuery(query), {
+      method,
+      headers: { accept: 'application/json', ...(jsonBody === undefined ? {} : { 'content-type': 'application/json' }) },
+      body: jsonBody === undefined ? undefined : JSON.stringify(jsonBody),
+    });
   } catch {
     throw new ApiError('無法連線到伺服器，請確認 tgarchive serve 是否仍在執行', 0, 'network');
   }
@@ -74,6 +80,15 @@ export const api = {
   health: (kind: 'live' | 'ready') => request<S['HealthDto']>('GET', `/health/${kind}`),
   chats: (sort?: ChatSort) => request<Chat[]>('GET', '/api/v1/chats', { sort }),
   chat: (id: number) => request<Chat>('GET', chatPath(id)),
+  mediaPolicy: (id: number) => request<MediaPolicy>('GET', `${chatPath(id)}/media-policy`),
+  setMediaPolicy: (id: number, auto_archive: boolean) =>
+    request<MediaPolicy>('PATCH', `${chatPath(id)}/media-policy`, undefined, { auto_archive }),
+  messageMedia: (chatId: number, messageId: number) =>
+    request<MediaDownload[]>('GET', `${chatPath(chatId)}/messages/${messageId}/media`),
+  media: (id: number) => request<MediaDownload>('GET', `/api/v1/media/${enc(id)}`),
+  archiveMedia: (id: string) => request<MediaDownload>('POST', `/api/v1/media/${enc(id)}/archive`),
+  retryMedia: (id: string) => request<MediaDownload>('POST', `/api/v1/media/${enc(id)}/retry`),
+  backfillMedia: (chatId: number) => request<MediaDownload[]>('POST', `${chatPath(chatId)}/media/downloads`),
   refreshChats: () => request<Chat[]>('POST', '/api/v1/chats/refresh'),
   track: (id: number, backfill: boolean) =>
     request<TrackResult>('PUT', `${chatPath(id)}/tracking`, { backfill: backfill || undefined }),

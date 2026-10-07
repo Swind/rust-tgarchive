@@ -144,6 +144,50 @@ async fn manual_archive_deduplicates_and_disable_only_blocks_automatic_archive()
 }
 
 #[tokio::test]
+async fn disabled_automatic_archive_can_be_requested_manually_again() {
+    let (_dir, store, chat) = setup().await;
+    ChatRepository::set_tracked(&store, chat, true)
+        .await
+        .unwrap();
+    store
+        .set_media_policy(chat.get(), MediaPolicy { auto_archive: true })
+        .await
+        .unwrap();
+    ingest(
+        &store,
+        chat,
+        vec![message(
+            chat,
+            1,
+            vec![image(AttachmentKind::Photo, "p", "image/jpeg")],
+        )],
+    )
+    .await;
+    let jobs = store.message_media(chat.get(), 1).await.unwrap();
+    let preview = jobs.iter().find(|job| job.variant == "preview").unwrap();
+    let archive = jobs.iter().find(|job| job.variant == "archive").unwrap();
+    store
+        .set_media_policy(
+            chat.get(),
+            MediaPolicy {
+                auto_archive: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store.get_media(archive.id).await.unwrap().unwrap().state,
+        "interrupted"
+    );
+    let requested = store.request_archive(preview.id).await.unwrap().unwrap();
+    assert_eq!(requested.id, archive.id);
+    assert_eq!(requested.state, "queued");
+    assert_eq!(requested.trigger, "manual");
+    assert_eq!(requested.attempts, 0);
+    assert!(store.media_allowed(&requested).await.unwrap());
+}
+
+#[tokio::test]
 async fn untracked_and_deleted_messages_are_not_current_or_allowed() {
     let (_dir, store, chat) = setup().await;
     ChatRepository::set_tracked(&store, chat, true)

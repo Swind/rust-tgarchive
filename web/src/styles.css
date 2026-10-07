@@ -99,6 +99,11 @@ input[type='checkbox'] { padding: 0; }
 .msg.system header { justify-content: center; align-items: center; }
 .msg.system .placeholder { margin: 0; }
 .chips { list-style: none; padding: 0; margin: 2px 0; display: flex; gap: 6px; flex-wrap: wrap; }
+.media-preview { flex-basis: 100%; display: grid; justify-items: start; gap: 6px; padding-top: 6px; }
+.media-gallery { display: flex; flex-wrap: wrap; gap: 8px; }
+.media-preview img { display: block; max-width: min(100%, 360px); max-height: 360px; border-radius: 8px; object-fit: contain; background: var(--surface); }
+.media-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.media-policy { display: inline-flex; align-items: center; gap: 6px; margin: 8px 0; }
 .chip { background: var(--tl-bg); border: 1px solid var(--border); border-radius: 10px; padding: 0 8px; font-size: 12px; }
 .chat-title { color: var(--accent); }
 .more { display: block; margin: 8px auto; }

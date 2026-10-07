@@ -1,9 +1,9 @@
 use axum::{
     extract::{
-        FromRequestParts, Path, Query,
-        rejection::{PathRejection, QueryRejection},
+        FromRequest, FromRequestParts, Json, Path, Query,
+        rejection::{JsonRejection, PathRejection, QueryRejection},
     },
-    http::request::Parts,
+    http::{Request, request::Parts},
 };
 use serde::de::DeserializeOwned;
 
@@ -11,6 +11,7 @@ use super::{ApiError, RequestId};
 
 pub(crate) struct ApiQuery<T>(pub T);
 pub(crate) struct ApiPath<T>(pub T);
+pub(crate) struct ApiJson<T>(pub T);
 
 fn request_id(parts: &Parts) -> String {
     parts
@@ -18,6 +19,28 @@ fn request_id(parts: &Parts) -> String {
         .get::<RequestId>()
         .map(|id| id.0.clone())
         .unwrap_or_else(|| "unknown".to_owned())
+}
+
+impl<S, T> FromRequest<S> for ApiJson<T>
+where
+    S: Send + Sync,
+    T: DeserializeOwned + Send,
+{
+    type Rejection = ApiError;
+
+    async fn from_request(
+        request: Request<axum::body::Body>,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        let id = request
+            .extensions()
+            .get::<RequestId>()
+            .map_or_else(|| "unknown".to_owned(), |id| id.0.clone());
+        Json::<T>::from_request(request, state)
+            .await
+            .map(|Json(value)| Self(value))
+            .map_err(|_: JsonRejection| ApiError::malformed(id))
+    }
 }
 
 impl<S, T> FromRequestParts<S> for ApiQuery<T>

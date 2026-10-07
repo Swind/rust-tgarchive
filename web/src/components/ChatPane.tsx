@@ -50,6 +50,10 @@ function Actions({ chat }: { chat: Chat }) {
       if (syncConflict(error) !== error) void qc.invalidateQueries({ queryKey: ['sync-status'] });
     },
   });
+  const backfillMedia = useMutation({
+    mutationFn: () => api.backfillMedia(chat.id),
+    onSuccess: () => setNote('已排入預覽補下載'),
+  });
   const syncError =
     sync.error instanceof ApiError && sync.error.status === 409 && sync.error.code === 'chat_not_tracked'
       ? new Error('此聊天室尚未開始收集，請先按「開始收集」')
@@ -76,17 +80,32 @@ function Actions({ chat }: { chat: Chat }) {
       <button disabled={sync.isPending || syncBlocked} onClick={() => sync.mutate()}>
         同步
       </button>
+      <button disabled={backfillMedia.isPending} onClick={() => backfillMedia.mutate()}>
+        補下載預覽
+      </button>
       {syncBlocked && <span className="note" role="status">{status.isPending ? '正在確認同步狀態…' : <>此聊天室已有同步工作，請稍後查看<Link to="/sync">同步頁面</Link></>}</span>}
       {note && <span className="note" role="status">{note}</span>}
-      <ErrorBox error={track.error ?? untrack.error ?? syncError ?? status.error} />
+      <ErrorBox error={track.error ?? untrack.error ?? syncError ?? backfillMedia.error ?? status.error} />
     </div>
   );
 }
 
 export default function ChatPane({ chatId }: { chatId: number }) {
   const [params, setParams] = useSearchParams();
+  const [mediaPolicyDraft, setMediaPolicyDraft] = useState<{ chatId: number; value: boolean } | null>(null);
+  const queryClient = useQueryClient();
   const chat = useQuery({ queryKey: ['chat', chatId], queryFn: () => api.chat(chatId) });
   const senders = useQuery({ queryKey: ['senders', chatId], queryFn: () => api.senders(chatId) });
+  const policy = useQuery({ queryKey: ['media-policy', chatId], queryFn: () => api.mediaPolicy(chatId) });
+  const savePolicy = useMutation({
+    mutationFn: (autoArchive: boolean) => api.setMediaPolicy(chatId, autoArchive),
+    onSuccess: (value) => {
+      queryClient.setQueryData(['media-policy', chatId], value);
+      setMediaPolicyDraft(null);
+    },
+    onError: () => setMediaPolicyDraft(null),
+    onSettled: () => void queryClient.invalidateQueries({ queryKey: ['media-policy', chatId] }),
+  });
 
   const messageParam = params.get('message');
   const messageId = messageParam && /^\d+$/.test(messageParam) ? Number(messageParam) : undefined;
@@ -134,6 +153,23 @@ export default function ChatPane({ chatId }: { chatId: number }) {
         </div>
         {s?.last_error && <div className="error">⚠️ 上次同步失敗：{s.last_error}</div>}
         <Actions chat={c} />
+        <label className="media-policy">
+          <input
+            type="checkbox"
+            aria-label="自動下載封存版本"
+            checked={mediaPolicyDraft?.chatId === chatId ? mediaPolicyDraft.value : policy.data?.auto_archive ?? false}
+            disabled={policy.isPending || policy.isError || savePolicy.isPending}
+            onChange={(event) => {
+              const value = event.target.checked;
+              setMediaPolicyDraft({ chatId, value });
+              savePolicy.mutate(value);
+            }}
+          />
+          自動下載封存版本
+        </label>
+        <span className="muted small">預覽圖片會自動下載</span>
+        {policy.error && <ErrorBox error={policy.error} />}
+        {savePolicy.error && <ErrorBox error={savePolicy.error} />}
         <div className="filters">
           <select aria-label="寄件人" value={sender ?? ''} onChange={(e) => update('sender', e.target.value || null)}>
             <option value="">所有寄件人</option>

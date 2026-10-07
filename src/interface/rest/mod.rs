@@ -7,6 +7,7 @@ mod web;
 
 use std::{
     net::SocketAddr,
+    path::PathBuf,
     sync::{
         Arc, OnceLock,
         atomic::{AtomicU64, Ordering},
@@ -32,6 +33,7 @@ use tower_http::{
 };
 
 use crate::application::{services::Application, sync::SyncCoordinator};
+use crate::infrastructure::persistence::sqlite::SqliteStore;
 
 pub use error::{ApiError, ErrorEnvelope};
 pub use openapi::{OpenApiFormat, export_openapi, openapi_document};
@@ -47,6 +49,14 @@ static PROCESS_NONCE: OnceLock<u128> = OnceLock::new();
 pub struct RestState {
     pub application: Arc<Application>,
     pub sync: Option<Arc<SyncCoordinator>>,
+    pub media: Option<MediaContext>,
+}
+
+#[derive(Clone)]
+pub struct MediaContext {
+    pub store: SqliteStore,
+    pub media_dir: PathBuf,
+    pub worker_enabled: bool,
 }
 
 pub fn router(application: Arc<Application>) -> Router {
@@ -57,12 +67,31 @@ pub fn router_with_sync(
     application: Arc<Application>,
     sync: Option<Arc<SyncCoordinator>>,
 ) -> Router {
-    let state = RestState { application, sync };
+    router_with_media(application, sync, None)
+}
+
+pub fn router_with_media(
+    application: Arc<Application>,
+    sync: Option<Arc<SyncCoordinator>>,
+    media: Option<MediaContext>,
+) -> Router {
+    let state = RestState {
+        application,
+        sync,
+        media,
+    };
     Router::new()
         .route("/api/v1/status", get(routes::status))
         .route("/api/v1/chats", get(routes::list_chats))
         .route("/api/v1/chats/refresh", axum::routing::post(routes::refresh_chats))
         .route("/api/v1/chats/{chat_id}", get(routes::get_chat))
+        .route("/api/v1/chats/{chat_id}/media-policy", get(routes::get_media_policy).patch(routes::set_media_policy))
+        .route("/api/v1/chats/{chat_id}/media/downloads", axum::routing::post(routes::backfill_media))
+        .route("/api/v1/chats/{chat_id}/messages/{message_id}/media", get(routes::message_media))
+        .route("/api/v1/media/{media_id}", get(routes::get_media))
+        .route("/api/v1/media/{media_id}/content", get(routes::media_content))
+        .route("/api/v1/media/{media_id}/archive", axum::routing::post(routes::archive_media))
+        .route("/api/v1/media/{media_id}/retry", axum::routing::post(routes::retry_media))
         .route(
             "/api/v1/chats/{chat_id}/tracking",
             axum::routing::put(routes::track_chat).delete(routes::untrack_chat),

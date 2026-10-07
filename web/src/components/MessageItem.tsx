@@ -1,10 +1,69 @@
 import { Link } from 'react-router-dom';
-import type { Message } from '../api/client';
+import { useEffect, useRef, useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { api, type Message } from '../api/client';
 import { colorIndex, initials, type GroupPos } from '../lib/bubble';
 import { formatDateTime, formatSize, formatTime } from '../lib/format';
 import { highlight } from '../lib/highlight';
 import BotBadge from './BotBadge';
 import SenderLink from './SenderLink';
+
+function MediaPreview({ chatId, messageId, ordinal }: { chatId: number; messageId: number; ordinal: number }) {
+  const [visible, setVisible] = useState(false);
+  const [brokenPreviewUrl, setBrokenPreviewUrl] = useState<string | null>(null);
+  const ref = useRef<HTMLDivElement>(null);
+  const qc = useQueryClient();
+  useEffect(() => {
+    const node = ref.current;
+    if (!node) return;
+    const observer = new IntersectionObserver(([entry]) => {
+      if (entry?.isIntersecting) { setVisible(true); observer.disconnect(); }
+    }, { rootMargin: '200px' });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+  const media = useQuery({
+    queryKey: ['message-media', chatId, messageId],
+    queryFn: () => api.messageMedia(chatId, messageId),
+    enabled: visible,
+    refetchInterval: (query) => query.state.data?.some((item) => ['queued', 'running'].includes(item.state) || (item.state === 'failed' && item.next_attempt_at != null)) ? 1500 : false,
+  });
+  const preview = media.data?.find((item) => item.ordinal === ordinal && item.variant === 'preview');
+  const archive = media.data?.find((item) => item.ordinal === ordinal && item.variant === 'archive');
+  const archiveRequest = useMutation({
+    mutationFn: () => api.archiveMedia(String(preview!.id)),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['message-media', chatId, messageId] }),
+  });
+  const retry = useMutation({
+    mutationFn: () => api.retryMedia(String(preview!.id)),
+    onSuccess: () => {
+      setBrokenPreviewUrl(null);
+      void qc.invalidateQueries({ queryKey: ['message-media', chatId, messageId] });
+    },
+  });
+  const retryArchive = useMutation({
+    mutationFn: () => api.archiveMedia(String(preview!.id)),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['message-media', chatId, messageId] }),
+  });
+  return <div className="media-preview" ref={ref}>
+    {!visible || media.isPending ? <span className="muted">圖片預覽…</span> : null}
+    {preview?.state === 'succeeded' && preview.content_url && preview.content_url !== brokenPreviewUrl && <img loading="lazy" src={preview.content_url} alt="Telegram 圖片預覽" onError={() => setBrokenPreviewUrl(preview.content_url ?? null)} />}
+    {preview?.content_url && preview.content_url === brokenPreviewUrl && <span className="muted">本地預覽檔目前無法讀取</span>}
+    {preview && ['queued', 'running'].includes(preview.state) && <span className="muted">預覽{preview.state === 'queued' ? '排隊中' : '下載中'}…</span>}
+    {preview && ['failed', 'unavailable', 'interrupted'].includes(preview.state) && <button onClick={() => retry.mutate()} disabled={retry.isPending}>預覽失敗 · 重試</button>}
+    {!preview && visible && !media.isPending && <span className="muted">預覽尚未排入</span>}
+    {media.error && <span role="status" className="error">無法讀取圖片下載狀態</span>}
+    {retry.error && <span role="status" className="error">無法重試預覽下載</span>}
+    {preview && <div className="media-actions">
+      {archive?.state === 'succeeded' && archive.content_url ? <a href={archive.content_url} target="_blank" rel="noreferrer">查看封存版本</a> : null}
+      {archive && ['queued', 'running'].includes(archive.state) ? <span className="muted">封存{archive.state === 'queued' ? '排隊中' : '下載中'}…</span> : null}
+      {archive && ['failed', 'unavailable', 'interrupted'].includes(archive.state) ? <button disabled={retryArchive.isPending} onClick={() => retryArchive.mutate()}>封存失敗 · 重試</button> : null}
+      {!archive && <button disabled={archiveRequest.isPending} onClick={() => archiveRequest.mutate()}>下載封存版本</button>}
+      {archiveRequest.error && <span role="status" className="error">無法排入封存下載</span>}
+      {retryArchive.error && <span role="status" className="error">無法重試封存下載</span>}
+    </div>}
+  </div>;
+}
 
 export function Highlighted({ text, query }: { text: string; query?: string }) {
   if (!query) return <>{text}</>;
@@ -170,6 +229,15 @@ export default function MessageItem({
               </li>
             ))}
           </ul>
+        )}
+        {!m.is_deleted && m.attachments.some((a) => a.kind === 'photo' || (a.kind === 'document' && ['image/jpeg', 'image/png', 'image/webp'].includes(a.mime_type ?? ''))) && (
+          <div className="media-gallery">
+            {m.attachments.map((a, i) =>
+              a.kind === 'photo' || (a.kind === 'document' && ['image/jpeg', 'image/png', 'image/webp'].includes(a.mime_type ?? ''))
+                ? <MediaPreview key={`${i}:${a.kind}:${a.telegram_file_id}`} chatId={m.chat_id} messageId={m.id} ordinal={i} />
+                : null,
+            )}
+          </div>
         )}
         {m.post_author && <p className="post-author muted small">— {m.post_author}</p>}
         <footer>
