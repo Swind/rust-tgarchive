@@ -1,5 +1,12 @@
 # Implementation status
 
+## Web UI sync conflict fix (2026-10-07)
+
+- 原因：同步按鈕只在 POST pending 時停用，工作排隊／執行期間仍可重複送出，觸發 coordinator 的 409 `conflict` 保護。
+- 修正：共用同步狀態查詢；同 chat／all 工作阻擋聊天室同步與重試，任何 active 工作阻擋同步全部。工作結束後自動恢復；成功提交與 backfill 後刷新狀態，409 race 顯示中文說明並保留 request ID。
+- 驗收：前端 typecheck／lint／12 unit tests／build 通過；26 個 Playwright sync/chat/visual 案例通過（新增 mock fixtures 修正後重跑 sync suite）；既有 coordinator conflict/shutdown test 通過。`web/dist` 已重新產生並由瀏覽器測試驗證內嵌版本。
+- 未變更正在使用的外部部署；需重建 binary／image 並重啟部署才會套用。
+
 執行規劃：[telegram_message_archive_execution_plan.md](telegram_message_archive_execution_plan.md)。
 
 實作者：GPT-6 Luna subagents。驗收及 commit：主 agent。

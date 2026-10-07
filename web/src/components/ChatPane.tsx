@@ -1,8 +1,9 @@
 import { useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, ApiError, type Chat } from '../api/client';
 import { ErrorBox, KIND_LABEL, JobBadge } from './common';
+import { hasActiveChatSync, syncConflict, useSyncStatus } from '../lib/syncStatus';
 import { ContextTimeline, ListTimeline } from './Timeline';
 import { formatDateTime, formatRelative, localDayToIso } from '../lib/format';
 
@@ -10,14 +11,18 @@ function Actions({ chat }: { chat: Chat }) {
   const qc = useQueryClient();
   const [backfill, setBackfill] = useState(false);
   const [note, setNote] = useState<React.ReactNode>(null);
+  const status = useSyncStatus();
+  const activeSync = status.data ? hasActiveChatSync(status.data.sync_jobs, chat.id) : false;
+  const syncBlocked = status.isPending || activeSync;
   const done = () => {
     void qc.invalidateQueries({ queryKey: ['chats'] });
     void qc.invalidateQueries({ queryKey: ['chat', chat.id] });
   };
   const track = useMutation({
     mutationFn: () => api.track(chat.id, backfill),
-    onSuccess: (r) => {
+    onSuccess: async (r) => {
       done();
+      if (r.backfill_job_id) await qc.invalidateQueries({ queryKey: ['sync-status'] });
       setNote(
         r.backfill_job_id ? (
           <>補歷史工作 <code>{r.backfill_job_id}</code>（{r.backfill === 'already_running' ? '沿用執行中的工作' : '已排入佇列'}）</>
@@ -36,15 +41,19 @@ function Actions({ chat }: { chat: Chat }) {
   });
   const sync = useMutation({
     mutationFn: () => api.syncChat(chat.id),
-    onSuccess: (job) => {
+    onSuccess: async (job) => {
       done();
+      await qc.invalidateQueries({ queryKey: ['sync-status'] });
       setNote(<>已建立同步工作 <code>{job.id}</code> <JobBadge state={job.state} /></>);
+    },
+    onError: (error) => {
+      if (syncConflict(error) !== error) void qc.invalidateQueries({ queryKey: ['sync-status'] });
     },
   });
   const syncError =
     sync.error instanceof ApiError && sync.error.status === 409 && sync.error.code === 'chat_not_tracked'
       ? new Error('此聊天室尚未開始收集，請先按「開始收集」')
-      : sync.error;
+      : syncConflict(sync.error);
   return (
     <div className="actions">
       {chat.tracked ? (
@@ -64,11 +73,12 @@ function Actions({ chat }: { chat: Chat }) {
           </label>
         </>
       )}
-      <button disabled={sync.isPending} onClick={() => sync.mutate()}>
+      <button disabled={sync.isPending || syncBlocked} onClick={() => sync.mutate()}>
         同步
       </button>
+      {syncBlocked && <span className="note" role="status">{status.isPending ? '正在確認同步狀態…' : <>此聊天室已有同步工作，請稍後查看<Link to="/sync">同步頁面</Link></>}</span>}
       {note && <span className="note" role="status">{note}</span>}
-      <ErrorBox error={track.error ?? untrack.error ?? syncError} />
+      <ErrorBox error={track.error ?? untrack.error ?? syncError ?? status.error} />
     </div>
   );
 }
