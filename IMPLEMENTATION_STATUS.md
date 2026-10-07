@@ -1,5 +1,11 @@
 # Implementation status
 
+## 圖片下載進度 Web UI（2026-10-08）
+
+- 新增唯讀 `GET /api/v1/media/downloads/status`，依 chat／preview 或 archive 彙總目前附件的 queued、running、succeeded、failed、interrupted、unavailable、superseded；retrying 為 failed 中已安排重試的子集合。排除已刪訊息與已更換圖片的舊工作，query-only 可讀、舊 schema 回傳空列表。
+- 同步頁與聊天室顯示累計下載統計，每 2 秒更新；補下載成功立即刷新進度與訊息圖片查詢。沿用既有持久化 media worker，未建立虛構的 sync job 或批次歷程。
+- 驗收：完整 Rust 262 passed／2 ignored、fmt／all-target Clippy 通過；前端 typecheck／lint／12 unit tests／build 通過；Docker Playwright 64 案例通過，新增補下載排隊到完成、切換同步頁的驗收，更新同步頁視覺基準與 web/dist。版本維持 0.1.5。
+
 ## 手動版本與 main image build number（2026-10-07）
 
 - 基礎版本維持 0.1.5，僅由使用者決定何時手動修改；CI 不自動 bump、不回寫版本。

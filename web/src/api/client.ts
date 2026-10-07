@@ -13,6 +13,7 @@ export type SyncJob = S['SyncJobDto'];
 export type TrackResult = S['TrackChatDto'];
 export type Attachment = S['AttachmentDto'];
 export type MediaDownload = S['MediaDownloadDto'];
+export type MediaProgress = S['MediaProgressDto'];
 export type MediaPolicy = S['MediaPolicyDto'];
 export type SenderProfile = S['SenderProfileDto'];
 export type SenderPage = S['SenderPageDto'];
@@ -86,6 +87,7 @@ export const api = {
   messageMedia: (chatId: number, messageId: number) =>
     request<MediaDownload[]>('GET', `${chatPath(chatId)}/messages/${messageId}/media`),
   media: (id: number) => request<MediaDownload>('GET', `/api/v1/media/${enc(id)}`),
+  mediaProgress: () => request<MediaProgress[]>('GET', '/api/v1/media/downloads/status'),
   archiveMedia: (id: string) => request<MediaDownload>('POST', `/api/v1/media/${enc(id)}/archive`),
   retryMedia: (id: string) => request<MediaDownload>('POST', `/api/v1/media/${enc(id)}/retry`),
   backfillMedia: (chatId: number) => request<MediaDownload[]>('POST', `${chatPath(chatId)}/media/downloads`),

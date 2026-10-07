@@ -19,9 +19,9 @@ use crate::{
 use super::{
     ApiError, RequestId, RestState,
     dto::{
-        ChatDto, ChatSortDto, HealthDto, MediaDownloadDto, MediaPolicyDto, MessageContextDto,
-        MessageDto, MessagePageDto, SearchSortDto, SenderDetailDto, SenderPageDto, SenderSortDto,
-        SenderSummaryDto, StatusDto, SyncJobDto, TrackChatDto,
+        ChatDto, ChatSortDto, HealthDto, MediaDownloadDto, MediaPolicyDto, MediaProgressDto,
+        MessageContextDto, MessageDto, MessagePageDto, SearchSortDto, SenderDetailDto,
+        SenderPageDto, SenderSortDto, SenderSummaryDto, StatusDto, SyncJobDto, TrackChatDto,
     },
     extract::{ApiJson, ApiPath, ApiQuery},
 };
@@ -892,4 +892,14 @@ fn decode_cursor(
             crate::interface::cursor::decode(&value).map_err(|_| ApiError::malformed(request_id))
         })
         .transpose()
+}
+
+#[utoipa::path(get, path = "/api/v1/media/downloads/status", responses((status=200, body=[MediaProgressDto]), (status=503, body=super::ErrorEnvelope)))]
+pub(super) async fn media_progress(
+    State(state): State<RestState>,
+    Extension(id): Extension<RequestId>,
+) -> Result<Json<Vec<MediaProgressDto>>, ApiError> {
+    let media = media_context(&state, &id.0)?;
+    media_result(media.store.media_progress().await, &id.0)
+        .map(|items| Json(items.into_iter().map(Into::into).collect()))
 }

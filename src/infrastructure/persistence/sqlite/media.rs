@@ -27,6 +27,22 @@ pub struct MediaDownload {
     pub last_error: Option<String>,
 }
 
+#[derive(Clone, Debug, sqlx::FromRow)]
+pub struct MediaProgress {
+    pub chat_id: i64,
+    pub title: Option<String>,
+    pub variant: String,
+    pub total: i64,
+    pub queued: i64,
+    pub running: i64,
+    pub succeeded: i64,
+    pub failed: i64,
+    pub interrupted: i64,
+    pub unavailable: i64,
+    pub superseded: i64,
+    pub retrying: i64,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MediaPolicy {
     pub auto_archive: bool,
@@ -57,6 +73,15 @@ fn from_row(row: &sqlx::sqlite::SqliteRow) -> Result<MediaDownload, RepositoryEr
 const COLUMNS: &str = "id, chat_id, message_id, ordinal, telegram_media_id, media_kind, variant, trigger, state, relative_path, content_type, byte_size, width, height, attempts, next_attempt_at, last_error";
 
 impl SqliteStore {
+    /// Counts current attachment jobs; replacement/deletion history is excluded.
+    pub async fn media_progress(&self) -> Result<Vec<MediaProgress>, RepositoryError> {
+        if self.pre_0009_media {
+            return Ok(Vec::new());
+        }
+        Ok(sqlx::query_as::<_, MediaProgress>("SELECT d.chat_id,c.title,d.variant,COUNT(*) AS total, SUM(d.state='queued') AS queued, SUM(d.state='running') AS running, SUM(d.state='succeeded') AS succeeded, SUM(d.state='failed') AS failed, SUM(d.state='interrupted') AS interrupted, SUM(d.state='unavailable') AS unavailable, SUM(d.state='superseded') AS superseded, SUM(d.state='failed' AND d.next_attempt_at IS NOT NULL) AS retrying FROM media_downloads d JOIN chats c ON c.id=d.chat_id JOIN messages m ON m.chat_id=d.chat_id AND m.message_id=d.message_id JOIN attachments a ON a.message_row_id=m.row_id AND a.ordinal=d.ordinal AND a.kind=d.media_kind AND a.telegram_file_id=d.telegram_media_id WHERE m.is_deleted=0 GROUP BY d.chat_id,c.title,d.variant ORDER BY d.chat_id,d.variant")
+            .fetch_all(&self.pool).await?)
+    }
+
     pub async fn get_media_policy(&self, chat_id: i64) -> Result<MediaPolicy, RepositoryError> {
         if self.pre_0009_media {
             return Ok(MediaPolicy::default());

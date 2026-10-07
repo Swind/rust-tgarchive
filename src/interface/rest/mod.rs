@@ -82,6 +82,7 @@ pub fn router_with_media(
     };
     Router::new()
         .route("/api/v1/status", get(routes::status))
+        .route("/api/v1/media/downloads/status", get(routes::media_progress))
         .route("/api/v1/chats", get(routes::list_chats))
         .route("/api/v1/chats/refresh", axum::routing::post(routes::refresh_chats))
         .route("/api/v1/chats/{chat_id}", get(routes::get_chat))

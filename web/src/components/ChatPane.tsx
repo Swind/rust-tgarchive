@@ -6,6 +6,7 @@ import { ErrorBox, KIND_LABEL, JobBadge } from './common';
 import { hasActiveChatSync, syncConflict, useSyncStatus } from '../lib/syncStatus';
 import { ContextTimeline, ListTimeline } from './Timeline';
 import { formatDateTime, formatRelative, localDayToIso } from '../lib/format';
+import MediaProgress from './MediaProgress';
 
 function Actions({ chat }: { chat: Chat }) {
   const qc = useQueryClient();
@@ -52,7 +53,13 @@ function Actions({ chat }: { chat: Chat }) {
   });
   const backfillMedia = useMutation({
     mutationFn: () => api.backfillMedia(chat.id),
-    onSuccess: () => setNote('已排入預覽補下載'),
+    onSuccess: async () => {
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ['media-progress'] }),
+        qc.invalidateQueries({ queryKey: ['message-media'] }),
+      ]);
+      setNote('已排入預覽補下載');
+    },
   });
   const syncError =
     sync.error instanceof ApiError && sync.error.status === 409 && sync.error.code === 'chat_not_tracked'
@@ -153,6 +160,7 @@ export default function ChatPane({ chatId }: { chatId: number }) {
         </div>
         {s?.last_error && <div className="error">⚠️ 上次同步失敗：{s.last_error}</div>}
         <Actions chat={c} />
+        <MediaProgress chatId={chatId} compact />
         <label className="media-policy">
           <input
             type="checkbox"

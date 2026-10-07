@@ -63,3 +63,27 @@ test('a cancelled automatic archive can be requested manually', async ({ page })
   expect(requested).toBe(true);
   await expect(page.getByLabel('自動下載封存版本')).not.toBeChecked();
 });
+
+test('preview backfill progress refreshes on chat and sync pages', async ({ page }) => {
+  let queued = false;
+  let complete = false;
+  await page.route('**/api/v1/media/downloads/status', (route) => route.fulfill({ json: queued ? [{
+    chat_id: CHAT.big, title: '測試圖片頻道', variant: 'preview', total: 3,
+    queued: complete ? 0 : 2, running: complete ? 0 : 1, succeeded: complete ? 3 : 0,
+    failed: 0, retrying: 0, interrupted: 0, unavailable: 0, superseded: 0,
+  }] : [] }));
+  await page.route(`**/api/v1/chats/${CHAT.big}/media/downloads`, (route) => {
+    queued = true;
+    return route.fulfill({ status: 202, json: [] });
+  });
+  await page.goto(`/chats/${CHAT.big}`);
+  await expect(page.getByText('目前沒有圖片下載工作')).toBeVisible();
+  await page.getByRole('button', { name: '補下載預覽' }).click();
+  const progress = page.locator('.media-progress');
+  await expect(progress.getByText('排隊 2', { exact: true })).toBeVisible();
+  await expect(progress.getByText('下載中 1', { exact: true })).toBeVisible();
+  complete = true;
+  await expect(progress.getByText('完成 3', { exact: true })).toBeVisible();
+  await page.goto('/sync');
+  await expect(page.locator('.media-progress').getByText('完成 3', { exact: true })).toBeVisible();
+});

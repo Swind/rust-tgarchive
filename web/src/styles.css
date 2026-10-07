@@ -128,6 +128,11 @@ mark { background: var(--mark); color: inherit; }
 .error-inline { color: var(--red); }
 .chat-progress { list-style: none; margin: 4px 12px 8px; padding: 0; }
 .chat-progress li { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; border-top: 1px solid var(--border); padding: 4px 0; }
+.media-progress { margin: 12px 0; }
+.media-progress h3 { margin: 0 0 6px; font-size: 15px; }
+.media-progress-row { display: flex; gap: 4px 12px; align-items: baseline; flex-wrap: wrap; padding: 4px 0; border-top: 1px solid var(--border); }
+.media-progress-row > strong { min-width: 120px; }
+.chat-head .media-progress { margin: 6px 0; }
 .note { color: var(--muted); }
 @media (max-width: 480px) { .timeline { padding: 8px; } .avatar-col, .avatar { width: 28px; height: 28px; font-size: 12px; } .bubble { max-width: calc(100% - 36px); } }
 @media (max-width: 720px) { .split { flex-direction: column; } .sidebar { width: auto; max-height: 40%; flex: none; } .chat-pane { height: auto; } }

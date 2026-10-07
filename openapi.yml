@@ -600,6 +600,26 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorEnvelope'
+  /api/v1/media/downloads/status:
+    get:
+      tags:
+      - routes
+      operationId: media_progress
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/MediaProgressDto'
+        '503':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
   /api/v1/media/{media_id}:
     get:
       tags:
@@ -1366,6 +1386,58 @@ components:
       properties:
         auto_archive:
           type: boolean
+    MediaProgressDto:
+      type: object
+      description: Cumulative current image downloads, grouped by chat and variant. Retrying is a subset of failed.
+      required:
+      - chat_id
+      - variant
+      - total
+      - queued
+      - running
+      - succeeded
+      - failed
+      - interrupted
+      - unavailable
+      - superseded
+      - retrying
+      properties:
+        chat_id:
+          type: integer
+          format: int64
+        failed:
+          type: integer
+          format: int64
+        interrupted:
+          type: integer
+          format: int64
+        queued:
+          type: integer
+          format: int64
+        retrying:
+          type: integer
+          format: int64
+        running:
+          type: integer
+          format: int64
+        succeeded:
+          type: integer
+          format: int64
+        superseded:
+          type: integer
+          format: int64
+        title:
+          type:
+          - string
+          - 'null'
+        total:
+          type: integer
+          format: int64
+        unavailable:
+          type: integer
+          format: int64
+        variant:
+          type: string
     MessageContextDto:
       type: object
       description: Messages around an anchor, both lists oldest first.

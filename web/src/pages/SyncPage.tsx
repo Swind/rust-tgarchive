@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, ApiError, type SyncJob } from '../api/client';
 import { Empty, ErrorBox, JobBadge, isActiveJob } from '../components/common';
+import MediaProgress from '../components/MediaProgress';
 import { formatDateTime, formatRelative } from '../lib/format';
 import { hasActiveChatSync, hasActiveSync, syncConflict, useSyncStatus } from '../lib/syncStatus';
 
@@ -119,6 +120,7 @@ export default function SyncPage() {
   return (
     <div className="page">
       <h2>同步</h2>
+      <MediaProgress />
       <div className="row">
         <button className="primary" disabled={syncAll.isPending || syncAllBlocked} onClick={() => syncAll.mutate()}>同步全部</button>
         {syncAllBlocked && <span className="note" role="status">{status.isPending ? '正在確認同步狀態…' : '已有同步工作，請稍後再同步全部'}</span>}

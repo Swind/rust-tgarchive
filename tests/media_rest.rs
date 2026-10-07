@@ -287,3 +287,55 @@ async fn download_mutations_report_missing_worker_and_bad_json_keeps_error_envel
     let (status, _, _) = call(&app, "GET", "/api/v1/chats/-10002/media-policy", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn media_progress_is_readable_without_worker_and_counts_only_current_sources() {
+    let (_dir, store, chat, app) = setup(false).await;
+    let path = "/api/v1/media/downloads/status";
+    let (status, rows, _) = call(&app, "GET", path, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(rows[0]["queued"], 1);
+    assert_eq!(rows[0]["total"], 1);
+    assert_eq!(rows[0]["title"], "media");
+    let job = store.claim_media().await.unwrap().unwrap();
+    let (_, rows, _) = call(&app, "GET", path, None).await;
+    assert_eq!(rows[0]["running"], 1);
+    store
+        .fail_media(job.id, "failed", "rate limited", Some(i64::MAX))
+        .await
+        .unwrap();
+    let (_, rows, _) = call(&app, "GET", path, None).await;
+    assert_eq!(rows[0]["failed"], 1);
+    assert_eq!(rows[0]["retrying"], 1);
+    for state in ["failed", "interrupted", "unavailable", "superseded"] {
+        store.fail_media(job.id, state, "test", None).await.unwrap();
+        let (_, rows, _) = call(&app, "GET", path, None).await;
+        assert_eq!(rows[0][state], 1);
+        assert_eq!(rows[0]["retrying"], 0);
+        assert_eq!(rows[0]["total"], 1);
+    }
+    store.request_archive(job.id).await.unwrap();
+    let (_, rows, _) = call(&app, "GET", path, None).await;
+    assert_eq!(rows.as_array().unwrap().len(), 2);
+    assert_eq!(rows[0]["variant"], "archive");
+    assert_eq!(rows[0]["queued"], 1);
+    let pool = sqlx::SqlitePool::connect(&format!(
+        "sqlite://{}",
+        _dir.path().join("media.db").display()
+    ))
+    .await
+    .unwrap();
+    sqlx::query("UPDATE attachments SET telegram_file_id='replacement' WHERE message_row_id=(SELECT row_id FROM messages WHERE chat_id=? AND message_id=8)").bind(chat.get()).execute(&pool).await.unwrap();
+    let (_, rows, _) = call(&app, "GET", path, None).await;
+    assert_eq!(rows, json!([]));
+    sqlx::query("UPDATE attachments SET telegram_file_id='file-photo'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE messages SET is_deleted=1")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (_, rows, _) = call(&app, "GET", path, None).await;
+    assert_eq!(rows, json!([]));
+}

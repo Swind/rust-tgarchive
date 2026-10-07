@@ -822,3 +822,39 @@ mod tests {
         assert_eq!(parse_retry_after("boom"), None);
     }
 }
+
+/// Cumulative current image downloads, grouped by chat and variant. Retrying is a subset of failed.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct MediaProgressDto {
+    pub chat_id: i64,
+    pub title: Option<String>,
+    pub variant: String,
+    pub total: i64,
+    pub queued: i64,
+    pub running: i64,
+    pub succeeded: i64,
+    pub failed: i64,
+    pub interrupted: i64,
+    pub unavailable: i64,
+    pub superseded: i64,
+    pub retrying: i64,
+}
+
+impl From<crate::infrastructure::persistence::sqlite::media::MediaProgress> for MediaProgressDto {
+    fn from(value: crate::infrastructure::persistence::sqlite::media::MediaProgress) -> Self {
+        Self {
+            chat_id: value.chat_id,
+            title: value.title,
+            variant: value.variant,
+            total: value.total,
+            queued: value.queued,
+            running: value.running,
+            succeeded: value.succeeded,
+            failed: value.failed,
+            interrupted: value.interrupted,
+            unavailable: value.unavailable,
+            superseded: value.superseded,
+            retrying: value.retrying,
+        }
+    }
+}

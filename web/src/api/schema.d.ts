@@ -196,6 +196,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/media/downloads/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["media_progress"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/media/{media_id}": {
         parameters: {
             query?: never;
@@ -554,6 +570,31 @@ export interface components {
         };
         MediaPolicyDto: {
             auto_archive: boolean;
+        };
+        /** @description Cumulative current image downloads, grouped by chat and variant. Retrying is a subset of failed. */
+        MediaProgressDto: {
+            /** Format: int64 */
+            chat_id: number;
+            /** Format: int64 */
+            failed: number;
+            /** Format: int64 */
+            interrupted: number;
+            /** Format: int64 */
+            queued: number;
+            /** Format: int64 */
+            retrying: number;
+            /** Format: int64 */
+            running: number;
+            /** Format: int64 */
+            succeeded: number;
+            /** Format: int64 */
+            superseded: number;
+            title?: string | null;
+            /** Format: int64 */
+            total: number;
+            /** Format: int64 */
+            unavailable: number;
+            variant: string;
         };
         /** @description Messages around an anchor, both lists oldest first. */
         MessageContextDto: {
@@ -1402,6 +1443,33 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    media_progress: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MediaProgressDto"][];
                 };
             };
             503: {
