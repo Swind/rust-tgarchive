@@ -25,6 +25,7 @@ The web UI is in Traditional Chinese; UI labels mentioned below are given in Eng
   - [Terms of service reminder](#terms-of-service-reminder)
 - [serve and status](#serve-and-status)
 - [Web UI](#web-ui)
+- [Image previews and archives](#image-previews-and-archives)
 - [REST and OpenAPI](#rest-and-openapi)
 - [One process per session](#one-process-per-session)
 - [Live-account acceptance test](#live-account-acceptance-test)
@@ -54,6 +55,7 @@ RUST_LOG=info                      # defaults to warn when unset
 SYNC_PAGE_DELAY_MS=1000            # optional; minimum interval between history requests, see "Rate limiting and pacing"
 SYNC_MAX_FLOOD_WAIT_SECS=300       # optional; longest FLOOD_WAIT we are willing to wait
 TGARCHIVE_DEV_CORS_ORIGIN=http://127.0.0.1:5173  # optional; local frontend development only, see "REST and OpenAPI"
+MEDIA_DIR=./media                 # optional; defaults to media beside the SQLite database
 ```
 
 **The binary automatically loads `.env` from the current working directory on startup** (before configuration is parsed):
@@ -248,6 +250,16 @@ Notes:
 - No archive `serve` (or any process using the same archive session) may be running beforehand (owner lock).
 - On failure it prints the tail of the serve log (with api_hash / phone number masked).
 
+## Image previews and archives
+
+When `serve` is connected to Telegram, new images in tracked chats automatically queue a preview download. The Web UI shows the local preview and its download state. Photo previews use an available image version with a longest edge of at most 800 pixels; JPEG/PNG/WebP documents use Telegram's thumbnail. A document without a suitable thumbnail shows an unavailable preview instead of downloading its full file automatically.
+
+Each chat has an **Automatically download archive version** (自動下載封存版本) checkbox, off by default. Enabling it adds the largest available Photo version or the full image document alongside the preview. Previews remain enabled. Changing this setting does not scan existing history or delete completed files. You can also request an individual archive with **Download archive version** (下載封存版本).
+
+For images already in the database, use **Backfill previews** (補下載預覽) in the chat. Downloads are durable and deduplicated, use the current Telegram session, and are limited to 20 MiB per file. Missing/deleted sources or lost chat access can prevent a later download. Telegram's largest Photo version can still be compressed and is not necessarily the original uploaded file.
+
+Files live in `MEDIA_DIR`, defaulting to a `media` directory beside the database (`/data/media` with the supplied Compose configuration). SQLite stores source identity, preview/archive state and file paths; image bytes remain on disk. Query-only servers can display completed local images, but cannot enqueue Telegram downloads or save settings to their read-only database. Back up both the database and media directory. Deleted/replaced images remain on disk but their old content URLs are no longer available through the API.
+
 ## Docker
 
 Image `ghcr.io/swind/rust-tgarchive` (linux/amd64 and linux/arm64, selected automatically under the same tag; `gcr.io/distroless/cc-debian12:nonroot` base, default uid 65532). The runtime contains only the stripped `tgarchive` binary, glibc/libgcc and CA certificates: **no shell, package manager, curl or sqlite3**, so `docker exec ... sh` does not work. All state lives in `/data`: `telegram.db` (with `-wal` / `-shm`) and `telegram.session` (equivalent to account access, mode 0600). Default environment variables inside the container: `DATABASE_URL=sqlite:///data/telegram.db`, `TELEGRAM_SESSION_FILE=/data/telegram.session`, `SERVER_BIND=0.0.0.0:8080`, `TGARCHIVE_ALLOW_NON_LOOPBACK=1`.
@@ -270,7 +282,7 @@ docker compose up -d
 - **One process per session**: before logging in or running management commands, run `docker compose stop` first (or use a separate container running `serve --query-only`, which does not connect to Telegram).
 - With plain `docker run`, bind-mount a directory writable by the container user (`-v "$PWD/data:/data" --user "$(id -u):$(id -g)"`).
 - The working directory is `/data`, so `/data/.env` is loaded automatically (process environment variables still take precedence); ignore it if you do not need it.
-- **Backup**: stop the stack (`docker compose stop`, which merges the WAL) and copy `./data` on the host; or run `.backup` with host `sqlite3` against `data/telegram.db` for a consistent backup without downtime. Store the session file encrypted.
+- **Backup**: stop the stack (`docker compose stop`, which merges the WAL) and copy `./data` on the host, including `media`; a SQLite-only backup does not include images. If `MEDIA_DIR` points outside `./data`, back up that directory too. Store the session file encrypted.
 - **Upgrade**: change the image tag in `docker-compose.yml`, then `docker compose pull && docker compose up -d`. Database migrations are applied automatically at startup; back up `./data` first. Tags: `<version>`, `<major.minor>`, `latest` (excluding pre-releases) and `sha-<short>`.
 - **Healthcheck**: the image has a built-in `HEALTHCHECK` (runs `tgarchive healthcheck` every 30 seconds, i.e. `GET /health/ready`); `docker ps` shows `healthy` / `unhealthy`. `/health/ready` returns 503 when the database is unavailable or the collector is `failed`.
 - Local build: `docker build -t tgarchive .` (no Node needed; `web/dist` is committed).

@@ -12,6 +12,7 @@ services:
       # the paths below live in ./data; .env must not override them
       DATABASE_URL: sqlite:///data/telegram.db
       TELEGRAM_SESSION_FILE: /data/telegram.session
+      MEDIA_DIR: /data/media
     ports:
       # The REST API has no authentication: loopback by default.
       - "${TGARCHIVE_BIND_IP:-127.0.0.1}:8080:8080"

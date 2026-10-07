@@ -23,6 +23,7 @@ USER 65532:65532
 WORKDIR /data
 ENV DATABASE_URL=sqlite:///data/telegram.db \
     TELEGRAM_SESSION_FILE=/data/telegram.session \
+    MEDIA_DIR=/data/media \
     SERVER_BIND=0.0.0.0:8080 \
     TGARCHIVE_ALLOW_NON_LOOPBACK=1
 EXPOSE 8080

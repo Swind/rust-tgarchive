@@ -1,5 +1,13 @@
 # Implementation status
 
+## 圖片預覽與按需封存（2026-10-07）
+
+- D1 已驗收：migration 0009、持久化下載佇列與 chat 的 `auto_archive`（預設 false）；tracked chat 的 accepted 圖片固定排入 preview，自動封存另行選擇。換圖保留不同來源 ID、手動請求去重，完成時以 SQL 再核對目前附件與收集政策。
+- D2/D3 已驗收：沿用 Telegram adapter 的當前連線重取來源、Photo 尺寸選擇、JPEG/PNG/WebP document 縮圖／完整檔、20 MiB 串流上限、私人 partial 檔與原子改名、限次重試／共享 FloodWait、停機取消與 join；啟動清理 partial、恢復中斷工作、重新排程遺失或格式不符的成功檔案。
+- D4 已驗收：本地圖片串流、下載狀態／重試／手動封存／補預覽／channel 設定 API 與 OpenAPI；Web UI lazy preview、工作狀態、封存按鈕與額外自動封存勾選框。query-only 可讀本地圖，不能排下載或寫設定。
+- 自動驗收：完整 Rust suite 261 passed、2 ignored；fmt／all-target Clippy（warnings denied）；前端 typecheck／lint／12 unit tests／build；Docker Playwright 63 案例通過，包括新增預覽與封存 lifecycle。`web/dist` 已更新。
+- D5 文件與 Compose/Docker 的 `/data/media` 設定完成；真實帳號下載驗收與新版 image 發布待後續。現有 v0.1.3 image 尚未包含此功能。沒有修改外部部署。
+
 ## Web UI sync conflict fix (2026-10-07)
 
 - 原因：同步按鈕只在 POST pending 時停用，工作排隊／執行期間仍可重複送出，觸發 coordinator 的 409 `conflict` 保護。
