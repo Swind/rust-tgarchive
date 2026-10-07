@@ -1,5 +1,11 @@
 # Implementation status
 
+## v0.1.5 release 修正（2026-10-07）
+
+- v0.1.4 CI 的 session 取消測試以固定 80ms 等待 blocking writer，負載下可能在寫入完成前檢查舊值。測試改用 started/release 訊號確保取消發生於寫入期間，再等待既有 write gate 釋放後檢查磁碟與記憶體狀態；不改 production session 寫入流程。
+- 發版後完整回歸亦發現 `openapi.yml` 版本未隨 Cargo 更新，已重新產生為 0.1.5；Cargo、lock、Compose tag 同步更新。
+- 驗收：取消測試連續 50 次通過；完整 Rust suite 261 passed、2 ignored；fmt、all-target Clippy（warnings denied）、前端 API 型別產生／typecheck 通過。保留既有 v0.1.4 tag，以 v0.1.5 發布修正。
+
 ## 圖片預覽與按需封存（2026-10-07）
 
 - D1 已驗收：migration 0009、持久化下載佇列與 chat 的 `auto_archive`（預設 false）；tracked chat 的 accepted 圖片固定排入 preview，自動封存另行選擇。換圖保留不同來源 ID、手動請求去重，完成時以 SQL 再核對目前附件與收集政策。

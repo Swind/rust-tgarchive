@@ -487,31 +487,37 @@ mod tests {
 
     #[tokio::test]
     async fn cancelled_write_finishes_and_failed_write_keeps_acknowledged_state() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-
         let (_dir, path) = path();
         let session = Arc::new(FileSession::open(&path).await.unwrap());
         let background = Arc::clone(&session);
-        let writer_started = Arc::new(AtomicBool::new(false));
-        let writer_started_signal = Arc::clone(&writer_started);
+        let (writer_started, started) = tokio::sync::oneshot::channel();
+        let (release_writer, released) = std::sync::mpsc::channel();
         let cancelled = tokio::spawn(async move {
             background
                 .update_with(
                     |data| data.home_dc = 4,
                     move |path, bytes| {
-                        writer_started_signal.store(true, Ordering::Release);
-                        std::thread::sleep(std::time::Duration::from_millis(40));
+                        writer_started.send(()).unwrap();
+                        released.recv().unwrap();
                         atomic_replace(path, bytes)
                     },
                 )
                 .await
         });
-        while !writer_started.load(Ordering::Acquire) {
-            tokio::task::yield_now().await;
-        }
+        started.await.unwrap();
         cancelled.abort();
-        let _ = cancelled.await;
-        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        assert!(cancelled.await.unwrap_err().is_cancelled());
+        release_writer.send(()).unwrap();
+        // The blocking writer keeps this gate until both persistence and the in-memory update
+        // finish, even when the async caller is cancelled. Wait for that boundary, not a delay.
+        drop(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                session.write_gate.lock(),
+            )
+            .await
+            .expect("cancelled session writer did not release its gate"),
+        );
         assert_eq!(session.home_dc_id().unwrap(), 4);
         assert_eq!(
             FileSession::open(&path)
