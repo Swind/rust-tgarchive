@@ -156,6 +156,31 @@ impl Config {
     pub fn telegram_configuration_requested() -> bool {
         env::var_os("TELEGRAM_API_ID").is_some() || env::var_os("TELEGRAM_API_HASH").is_some()
     }
+
+    pub fn media_directory(&self) -> Result<PathBuf, String> {
+        if let Some(path) = env::var_os("MEDIA_DIR") {
+            let path = PathBuf::from(path);
+            if path.is_relative() {
+                return Ok(std::env::current_dir().unwrap_or_default().join(path));
+            }
+            return Ok(path);
+        }
+        let database = self
+            .database_url
+            .strip_prefix("sqlite://")
+            .or_else(|| self.database_url.strip_prefix("sqlite:"))
+            .ok_or_else(|| "DATABASE_URL must start with sqlite://".to_owned())?;
+        let database = database.split('?').next().unwrap_or(database);
+        let path = Path::new(database);
+        if database.is_empty() || database == ":memory:" {
+            return Ok(PathBuf::from("/data/media"));
+        }
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        Ok(parent.join("media"))
+    }
 }
 
 impl fmt::Debug for TelegramConfig {

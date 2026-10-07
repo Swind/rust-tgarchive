@@ -320,3 +320,40 @@ async fn refetch_schedules_the_attachment_identity_already_stored() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].telegram_media_id, "stored-id");
 }
+
+#[tokio::test]
+async fn missing_completed_media_can_be_requeued_without_resurrecting_stale_identity() {
+    let (_dir, store, chat) = setup().await;
+    ChatRepository::set_tracked(&store, chat, true)
+        .await
+        .unwrap();
+    ingest(
+        &store,
+        chat,
+        vec![message(
+            chat,
+            1,
+            vec![image(AttachmentKind::Photo, "p", "image/jpeg")],
+        )],
+    )
+    .await;
+    let job = store.claim_media().await.unwrap().unwrap();
+    store
+        .finish_media(
+            job.id,
+            "1.preview.jpg",
+            "image/jpeg",
+            10,
+            Some(10),
+            Some(10),
+        )
+        .await
+        .unwrap();
+    assert_eq!(store.list_completed_media().await.unwrap().len(), 1);
+    assert!(store.invalidate_missing_media(job.id).await.unwrap());
+    assert!(!store.invalidate_missing_media(job.id).await.unwrap());
+    assert_eq!(
+        store.get_media(job.id).await.unwrap().unwrap().state,
+        "queued"
+    );
+}

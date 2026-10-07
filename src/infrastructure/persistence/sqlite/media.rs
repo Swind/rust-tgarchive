@@ -227,6 +227,19 @@ impl SqliteStore {
         .await?;
         Ok(())
     }
+
+    pub async fn list_completed_media(&self) -> Result<Vec<MediaDownload>, RepositoryError> {
+        let rows = sqlx::query(&format!("SELECT d.{0} FROM media_downloads d JOIN messages m ON m.chat_id=d.chat_id AND m.message_id=d.message_id JOIN attachments a ON a.message_row_id=m.row_id AND a.ordinal=d.ordinal WHERE d.state='succeeded' AND m.is_deleted=0 AND a.kind=d.media_kind AND a.telegram_file_id=d.telegram_media_id ORDER BY d.id", COLUMNS.replace(", ", ", d.")))
+            .fetch_all(&self.pool).await?;
+        rows.iter().map(from_row).collect()
+    }
+
+    /// Requeues a completed file only if its source identity is still current.
+    pub async fn invalidate_missing_media(&self, id: i64) -> Result<bool, RepositoryError> {
+        let result = sqlx::query("UPDATE media_downloads SET state='queued',attempts=0,next_attempt_at=NULL,last_error='local media file is missing or invalid',relative_path=NULL,content_type=NULL,byte_size=NULL,width=NULL,height=NULL WHERE id=? AND state='succeeded' AND EXISTS (SELECT 1 FROM messages m JOIN attachments a ON a.message_row_id=m.row_id WHERE m.chat_id=media_downloads.chat_id AND m.message_id=media_downloads.message_id AND m.is_deleted=0 AND a.ordinal=media_downloads.ordinal AND a.kind=media_downloads.media_kind AND a.telegram_file_id=media_downloads.telegram_media_id)")
+            .bind(id).execute(&self.pool).await?;
+        Ok(result.rows_affected() != 0)
+    }
 }
 
 pub(super) async fn enqueue_attachment_downloads(

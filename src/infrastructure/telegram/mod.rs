@@ -5,6 +5,7 @@
 
 pub mod auth;
 pub mod file_session;
+pub mod media;
 
 pub use auth::{AuthError, LoginChallenge, LoginProgress, PasswordChallenge};
 pub use session::{OpenError, TelegramAdapter};
