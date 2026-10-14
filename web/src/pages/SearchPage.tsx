@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { useSearchParams } from 'react-router-dom';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { api } from '../api/client';
 import { Empty, ErrorBox, useDebounced } from '../components/common';
@@ -7,6 +7,7 @@ import BotBadge from '../components/BotBadge';
 import { Highlighted, senderName } from '../components/MessageItem';
 import SenderLink from '../components/SenderLink';
 import SenderPicker from '../components/SenderPicker';
+import SearchResultLink, { useRestoreSearchScroll } from '../components/SearchResultLink';
 import { formatDateTime, localDayToIso } from '../lib/format';
 import { nextOlderCursor } from '../lib/messages';
 import { chatTitle } from './ChatsPage';
@@ -78,6 +79,7 @@ export default function SearchPage() {
     getNextPageParam: nextOlderCursor,
   });
   const items = results.data?.pages.flatMap((p) => p.items) ?? [];
+  useRestoreSearchScroll(!results.isPending);
   const status = useQuery({ queryKey: ['status'], queryFn: api.status, refetchInterval: 15000 });
   const index = status.data?.search_index;
   const singleChar = [...q].length === 1 && /\p{Script=Han}/u.test(q);
@@ -145,13 +147,13 @@ export default function SearchPage() {
       <ul className="results">
         {items.map((m) => (
           <li key={`${m.chat_id}-${m.id}`}>
-            <Link to={`/chats/${m.chat_id}?message=${m.id}${deleted ? '&deleted=1' : ''}`} className={`result${m.is_deleted ? ' deleted' : ''}`}>
+            <SearchResultLink to={`/chats/${m.chat_id}?message=${m.id}${deleted ? '&deleted=1' : ''}`} className={`result${m.is_deleted ? ' deleted' : ''}`}>
               <div className="muted small">
                 <strong>{titles.get(m.chat_id) ?? m.chat_id}</strong> · <SenderLink id={m.sender?.id ?? m.sender_id} inline>{senderName(m, titles.get(m.chat_id))}</SenderLink><BotBadge isBot={m.sender?.is_bot} /> · {formatDateTime(m.timestamp)}
                 {m.is_deleted && <span className="badge red">已刪除</span>}
               </div>
               <div className="text"><Highlighted text={m.snippet ?? m.text ?? ''} query={q} /></div>
-            </Link>
+            </SearchResultLink>
           </li>
         ))}
       </ul>

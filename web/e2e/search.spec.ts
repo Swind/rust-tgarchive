@@ -1,4 +1,4 @@
-import { expect, test } from './fixtures';
+import { CHAT, expect, test } from './fixtures';
 
 const box = (page: import('@playwright/test').Page) => page.getByLabel('搜尋關鍵字');
 
@@ -149,6 +149,77 @@ test('URL holds search state: deep link, filters, back navigation', async ({ pag
   await page.goBack();
   await expect(page.getByLabel('聊天室')).toHaveValue('-1002000002');
   await expect(page.getByLabel('包含已刪除')).toBeChecked();
+});
+
+test('return to search preserves filters, loaded pages and scroll after leaving context', async ({ page }) => {
+  await page.goto(`/search?q=訊息&sort=time&chat=${CHAT.big}&hide_bots=1&include_deleted=1`);
+  const results = page.locator('a.result');
+  await expect(results).toHaveCount(30);
+  await page.getByRole('button', { name: '載入更多', exact: true }).click();
+  await expect(results).toHaveCount(60);
+  await results.nth(45).scrollIntoViewIfNeeded();
+  const top = await page.locator('.main').evaluate((el) => el.scrollTop);
+  expect(top).toBeGreaterThan(0);
+  const url = page.url();
+  await results.nth(45).click();
+  const back = page.getByRole('link', { name: '← 返回搜尋結果' });
+  await expect(back).toBeVisible();
+  await page.getByRole('button', { name: '離開脈絡檢視 ✕' }).click();
+  await expect(page).not.toHaveURL(/message=/);
+  await back.click();
+  await expect(page).toHaveURL(url);
+  await expect(box(page)).toHaveValue('訊息');
+  await expect(page.getByLabel('包含已刪除')).toBeChecked();
+  await expect(page.getByLabel('隱藏 bot')).toBeChecked();
+  await expect(page.getByRole('button', { name: '時間', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await expect(results).toHaveCount(60);
+  await expect.poll(() => page.locator('.main').evaluate((el) => el.scrollTop)).toBeCloseTo(top, 0);
+});
+
+test('browser Back restores the search result scroll position', async ({ page }) => {
+  await page.goto('/search?q=訊息&sort=time');
+  const results = page.locator('a.result');
+  await expect(results).toHaveCount(30);
+  await results.nth(20).scrollIntoViewIfNeeded();
+  const top = await page.locator('.main').evaluate((el) => el.scrollTop);
+  await results.nth(20).click();
+  await expect(page.locator('article.anchor')).toBeVisible();
+  await page.goBack();
+  await expect(results).toHaveCount(30);
+  await expect.poll(() => page.locator('.main').evaluate((el) => el.scrollTop)).toBeCloseTo(top, 0);
+});
+
+test('return to sender search restores the sender query instead of opening global search', async ({ page }) => {
+  await page.goto('/senders/2002?q=訊息&sort=time');
+  const results = page.locator('a.result');
+  await expect(results.first()).toBeVisible();
+  const url = page.url();
+  await results.first().click();
+  await expect(page.locator('article.anchor')).toBeVisible();
+  await page.getByRole('link', { name: '← 返回搜尋結果' }).click();
+  await expect(page).toHaveURL(url);
+  await expect(page.getByLabel('在此使用者的發言中搜尋')).toHaveValue('訊息');
+  await expect(results.first()).toBeVisible();
+});
+
+test('following a reply keeps the original search return destination', async ({ page }) => {
+  await page.goto(`/search?q=205&chat=${CHAT.big}`);
+  const result = page.locator('a.result');
+  await expect(result).toHaveCount(1);
+  const url = page.url();
+  await result.click();
+  await page.locator('#m-205').getByRole('link', { name: /回覆 #100/ }).click();
+  await expect(page).toHaveURL(/message=100/);
+  await page.getByRole('link', { name: '← 返回搜尋結果' }).click();
+  await expect(page).toHaveURL(url);
+  await expect(box(page)).toHaveValue('205');
+  await expect(result).toHaveCount(1);
+});
+
+test('direct chat visits do not show an unrelated search return link', async ({ page }) => {
+  await page.goto(`/chats/${CHAT.big}?message=101`);
+  await expect(page.locator('article.anchor')).toBeVisible();
+  await expect(page.getByRole('link', { name: '← 返回搜尋結果' })).toHaveCount(0);
 });
 
 for (const width of [360, 768, 1400, 1600]) {

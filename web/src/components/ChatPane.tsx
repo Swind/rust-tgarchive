@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { Link, useLocation, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, ApiError, type Chat } from '../api/client';
 import { ErrorBox, KIND_LABEL, JobBadge } from './common';
@@ -7,6 +7,7 @@ import { hasActiveChatSync, syncConflict, useSyncStatus } from '../lib/syncStatu
 import { ContextTimeline, ListTimeline } from './Timeline';
 import { formatDateTime, formatRelative, localDayToIso } from '../lib/format';
 import MediaProgress from './MediaProgress';
+import { searchReturnFrom } from './SearchResultLink';
 
 function Actions({ chat }: { chat: Chat }) {
   const qc = useQueryClient();
@@ -98,6 +99,8 @@ function Actions({ chat }: { chat: Chat }) {
 }
 
 export default function ChatPane({ chatId }: { chatId: number }) {
+  const location = useLocation();
+  const searchReturn = searchReturnFrom(location.state);
   const [params, setParams] = useSearchParams();
   const [mediaPolicyDraft, setMediaPolicyDraft] = useState<{ chatId: number; value: boolean } | null>(null);
   const queryClient = useQueryClient();
@@ -126,7 +129,7 @@ export default function ChatPane({ chatId }: { chatId: number }) {
     if (value) next.set(key, value);
     else next.delete(key);
     if (key !== 'message') next.delete('message');
-    setParams(next);
+    setParams(next, { state: location.state });
   };
 
   if (chat.isPending) return <div className="empty">載入中…</div>;
@@ -143,6 +146,7 @@ export default function ChatPane({ chatId }: { chatId: number }) {
   return (
     <div className="chat-pane">
       <header className="chat-head">
+        {searchReturn && <Link to={searchReturn.to} state={{ searchScrollTop: searchReturn.scrollTop }}>← 返回搜尋結果</Link>}
         <h2>
           {c.title || c.id} <span className="badge gray">{KIND_LABEL[c.kind]}</span>{' '}
           <span className={`badge ${c.tracked ? 'green' : 'gray'}`}>{c.tracked ? '收集中' : '未收集'}</span>

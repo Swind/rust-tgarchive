@@ -5,6 +5,7 @@ import { api, ApiError } from '../api/client';
 import BotBadge from '../components/BotBadge';
 import { Empty, ErrorBox, KIND_LABEL, useDebounced } from '../components/common';
 import MessageItem, { Highlighted } from '../components/MessageItem';
+import SearchResultLink, { useRestoreSearchScroll } from '../components/SearchResultLink';
 import { KIND_SENDER, senderLabel } from '../components/senderFormat';
 import { dayKey, formatDate, formatDateTime, formatRelative, localDayToIso } from '../lib/format';
 import { nextOlderCursor } from '../lib/messages';
@@ -89,6 +90,7 @@ export default function SenderPage() {
   });
   const active = q.length > 0 ? results : timeline;
   const items = active.data?.pages.flatMap((p) => p.items) ?? [];
+  useRestoreSearchScroll(!sender.isPending && !active.isPending);
 
   if (id === undefined) return <div className="page"><Empty>無效的使用者 ID</Empty></div>;
   if (sender.isPending) return <div className="page"><Empty>載入中…</Empty></div>;
@@ -204,13 +206,13 @@ export default function SenderPage() {
         <ul className="results" aria-label="搜尋結果">
           {items.map((m) => (
             <li key={`${m.chat_id}-${m.id}`}>
-              <Link to={`/chats/${m.chat_id}?message=${m.id}${deleted ? '&deleted=1' : ''}`} className={`result${m.is_deleted ? ' deleted' : ''}`}>
+              <SearchResultLink to={`/chats/${m.chat_id}?message=${m.id}${deleted ? '&deleted=1' : ''}`} className={`result${m.is_deleted ? ' deleted' : ''}`}>
                 <div className="muted small">
                   <strong>{titles.get(m.chat_id) ?? m.chat_id}</strong> · {formatDateTime(m.timestamp)}
                   {m.is_deleted && <span className="badge red">已刪除</span>}
                 </div>
                 <div className="text"><Highlighted text={m.snippet ?? m.text ?? ''} query={q} /></div>
-              </Link>
+              </SearchResultLink>
             </li>
           ))}
         </ul>

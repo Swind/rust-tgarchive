@@ -1,4 +1,4 @@
-import { Link } from 'react-router-dom';
+import { Link, useLocation } from 'react-router-dom';
 import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, type Message } from '../api/client';
@@ -118,6 +118,7 @@ export default function MessageItem({
   pos?: GroupPos;
   replyTo?: Message;
 }) {
+  const location = useLocation();
   const senderVariant = variant === 'sender';
   const id = m.sender?.id ?? m.sender_id;
   const name = senderName(m, chatTitle);
@@ -204,7 +205,7 @@ export default function MessageItem({
           </p>
         )}
         {m.reply_to != null && (
-          <Link className="reply" to={`/chats/${m.chat_id}?message=${m.reply_to}`}>
+          <Link className="reply" to={`/chats/${m.chat_id}?message=${m.reply_to}`} state={location.state}>
             {replyTo ? (
               <>
                 <strong>{senderName(replyTo, chatTitle)}</strong>
