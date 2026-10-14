@@ -1,3 +1,5 @@
+import { useEffect } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { Navigate, Route, Routes } from 'react-router-dom';
 import Layout from './components/Layout';
 import ChatsPage from './pages/ChatsPage';
@@ -6,8 +8,11 @@ import SendersPage from './pages/SendersPage';
 import SenderPage from './pages/SenderPage';
 import SyncPage from './pages/SyncPage';
 import StatusPage from './pages/StatusPage';
+import { connectArchiveEvents } from './lib/archiveEvents';
 
 export default function App() {
+  const qc = useQueryClient();
+  useEffect(() => connectArchiveEvents(qc), [qc]);
   return (
     <Routes>
       <Route element={<Layout />}>

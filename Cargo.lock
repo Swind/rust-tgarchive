@@ -2829,6 +2829,7 @@ dependencies = [
  "chrono",
  "clap",
  "dotenvy",
+ "futures-util",
  "glass_pumpkin",
  "grammers-client",
  "grammers-session",

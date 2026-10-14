@@ -37,6 +37,14 @@ impl ApiError {
             request_id,
         )
     }
+    pub(crate) fn events_unavailable(request_id: impl Into<String>) -> Self {
+        Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "events_unavailable",
+            "Live archive events require the ingestion collector in this process",
+            request_id,
+        )
+    }
     pub(crate) fn storage(request_id: impl Into<String>) -> Self {
         Self::new(
             StatusCode::SERVICE_UNAVAILABLE,

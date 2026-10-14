@@ -2,7 +2,11 @@ use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot};
 
-use super::{ArchiveWriter, IngestBatch, RepositoryError, services::IngestionService};
+use super::{
+    ArchiveWriter, IngestBatch, RepositoryError,
+    events::{ArchiveChange, ArchiveEvents},
+    services::IngestionService,
+};
 
 struct Request {
     batch: IngestBatch,
@@ -37,12 +41,30 @@ pub fn spawn(
     IngestSink,
     tokio::task::JoinHandle<Result<(), RepositoryError>>,
 ) {
+    spawn_with_events(writer, capacity, None)
+}
+
+/// Like [`spawn`], publishing an [`ArchiveChange`] after each successfully committed batch.
+pub fn spawn_with_events(
+    writer: Arc<dyn ArchiveWriter>,
+    capacity: usize,
+    events: Option<ArchiveEvents>,
+) -> (
+    IngestSink,
+    tokio::task::JoinHandle<Result<(), RepositoryError>>,
+) {
     let (sender, mut receiver) = mpsc::channel::<Request>(capacity.max(1));
     let task = tokio::spawn(async move {
         let ingestion = IngestionService::new(writer);
         while let Some(request) = receiver.recv().await {
+            let change = events
+                .as_ref()
+                .and_then(|_| ArchiveChange::from_batch(&request.batch));
             match ingestion.ingest_batch(request.batch).await {
                 Ok(()) => {
+                    if let (Some(events), Some(change)) = (&events, change) {
+                        events.publish(change);
+                    }
                     let _ = request.ack.send(Ok(()));
                 }
                 Err(error) => {

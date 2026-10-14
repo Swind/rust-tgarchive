@@ -600,6 +600,24 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorEnvelope'
+  /api/v1/events:
+    get:
+      tags:
+      - routes
+      operationId: events
+      responses:
+        '200':
+          description: 'Server-sent events: `archive_changed` with JSON `{chat_ids:number[],global:boolean}` and `resync` with `{}` (sent on connect and after lag). Invalidation hints only; refetch via the REST API.'
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '503':
+          description: No in-process collector (query-only mode)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
   /api/v1/media/downloads/status:
     get:
       tags:

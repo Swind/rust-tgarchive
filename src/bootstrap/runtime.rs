@@ -1,6 +1,7 @@
 use crate::{
     application::{
         ArchiveWriter, PageSize, RepositoryError, SyncRepository,
+        events::ArchiveEvents,
         ingestion_worker::{self, IngestSink},
         pacer::RatePacer,
         realtime::{ReconnectBackoff, supervise_realtime_with_status},
@@ -168,6 +169,7 @@ impl SyncRuntime {
 pub(super) async fn start_sync_runtime(
     store: Arc<SqliteStore>,
     adapter: Arc<TelegramAdapter>,
+    events: Option<ArchiveEvents>,
 ) -> Result<SyncRuntime, CliError> {
     let pacing = SyncPacing::from_env().map_err(CliError::InvalidInput)?;
     crate::application::SyncRepository::recover_interrupted(store.as_ref())
@@ -177,7 +179,7 @@ pub(super) async fn start_sync_runtime(
     let repository: Arc<dyn SyncRepository> = store.clone();
     let chats: Arc<dyn crate::application::ChatRepository> = store;
     let gateway: Arc<dyn crate::application::TelegramGateway> = adapter;
-    let (sink, writer_task) = ingestion_worker::spawn(writer, 32);
+    let (sink, writer_task) = ingestion_worker::spawn_with_events(writer, 32, events);
     let engine = Arc::new(
         SyncEngine::new(
             gateway,

@@ -111,7 +111,7 @@ async fn sync_with_adapter(
         store.close().await;
         return Err(error);
     }
-    let runtime = match start_sync_runtime(store.clone(), adapter).await {
+    let runtime = match start_sync_runtime(store.clone(), adapter, None).await {
         Ok(runtime) => runtime,
         Err(error) => {
             store.close().await;

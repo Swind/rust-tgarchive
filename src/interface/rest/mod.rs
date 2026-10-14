@@ -32,7 +32,7 @@ use tower_http::{
     trace::TraceLayer,
 };
 
-use crate::application::{services::Application, sync::SyncCoordinator};
+use crate::application::{events::ArchiveEvents, services::Application, sync::SyncCoordinator};
 use crate::infrastructure::persistence::sqlite::SqliteStore;
 
 pub use error::{ApiError, ErrorEnvelope};
@@ -50,6 +50,7 @@ pub struct RestState {
     pub application: Arc<Application>,
     pub sync: Option<Arc<SyncCoordinator>>,
     pub media: Option<MediaContext>,
+    pub events: Option<ArchiveEvents>,
 }
 
 #[derive(Clone)]
@@ -75,12 +76,23 @@ pub fn router_with_media(
     sync: Option<Arc<SyncCoordinator>>,
     media: Option<MediaContext>,
 ) -> Router {
+    router_with_events(application, sync, media, None)
+}
+
+pub fn router_with_events(
+    application: Arc<Application>,
+    sync: Option<Arc<SyncCoordinator>>,
+    media: Option<MediaContext>,
+    events: Option<ArchiveEvents>,
+) -> Router {
     let state = RestState {
         application,
         sync,
         media,
+        events,
     };
     Router::new()
+        .route("/api/v1/events", get(routes::events))
         .route("/api/v1/status", get(routes::status))
         .route("/api/v1/media/downloads/status", get(routes::media_progress))
         .route("/api/v1/chats", get(routes::list_chats))

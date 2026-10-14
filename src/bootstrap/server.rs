@@ -5,6 +5,7 @@ use super::{
 };
 use crate::{
     application::{
+        events::ArchiveEvents,
         services::{Application, CollectorStatusHandle, ComponentState, ComponentStatus},
         sync::CancellationToken,
     },
@@ -138,6 +139,7 @@ pub(super) async fn serve(
                 cors,
             ),
             None,
+            None,
         )
         .await;
     }
@@ -182,7 +184,9 @@ async fn serve_with_telegram(
     warn_if_index_not_ready(&store).await;
     let result = async {
         bind_account(&store, &adapter).await?;
-        let mut runtime = start_sync_runtime(store.clone(), adapter.clone()).await?;
+        let events = ArchiveEvents::default();
+        let mut runtime =
+            start_sync_runtime(store.clone(), adapter.clone(), Some(events.clone())).await?;
         runtime.start_media(adapter.clone(), store.clone(), media_dir.clone());
         let collector =
             CollectorStatusHandle::new(ComponentStatus::new(ComponentState::Starting, None));
@@ -201,7 +205,7 @@ async fn serve_with_telegram(
         let serving = serve_router(
             listener,
             rest::apply_dev_cors(
-                rest::router_with_media(
+                rest::router_with_events(
                     application,
                     Some(Arc::clone(&runtime.coordinator)),
                     Some(rest::MediaContext {
@@ -209,10 +213,12 @@ async fn serve_with_telegram(
                         media_dir: media_dir.clone(),
                         worker_enabled: true,
                     }),
+                    Some(events.clone()),
                 ),
                 cors,
             ),
             Some(&runtime),
+            Some(events),
         )
         .await;
         let stopped = runtime.shutdown().await;
@@ -229,10 +235,18 @@ async fn serve_router(
     listener: TcpListener,
     app: axum::Router,
     runtime: Option<&SyncRuntime>,
+    events: Option<ArchiveEvents>,
 ) -> Result<(), CliError> {
     let stop = CancellationToken::new();
+    let signal = shutdown_signal(stop.clone());
+    // Axum's graceful shutdown waits for open responses; end SSE streams first.
     let server = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal(stop.clone()))
+        .with_graceful_shutdown(async move {
+            signal.await;
+            if let Some(events) = events {
+                events.close();
+            }
+        })
         .into_future();
     tokio::pin!(server);
     match runtime {

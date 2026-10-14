@@ -155,3 +155,4 @@ mark { background: var(--mark); color: inherit; }
 .name-history li { margin: 2px 0; }
 .history-hint { font-style: italic; }
 .msg.system .name { color: var(--muted); }
+.new-messages { position: sticky; bottom: 8px; z-index: 3; }

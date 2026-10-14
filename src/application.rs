@@ -14,6 +14,7 @@ pub use messages::*;
 pub use ports::*;
 pub use senders::*;
 
+pub mod events;
 pub mod ingestion_worker;
 pub mod pacer;
 pub mod realtime;

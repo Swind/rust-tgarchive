@@ -6,6 +6,7 @@ import MessageItem from './MessageItem';
 import { dayKey, formatDate } from '../lib/format';
 import { groupPositions } from '../lib/bubble';
 import { mergeMessages, nextOlderCursor } from '../lib/messages';
+import { isNearBottom, hasNewTail, pickAnchor, restoreScrollTop, type Anchor } from '../lib/scroll';
 
 export type TimelineFilters = { senderId?: number; toIso?: string; includeDeleted: boolean; excludeBots?: boolean };
 
@@ -38,28 +39,72 @@ function Rows({ messages, anchorId, chatTitle }: { messages: Message[]; anchorId
   );
 }
 
-/** Scroll container that keeps position when content is prepended. */
-function useScrollKeeper(count: number, anchorId?: number) {
+/**
+ * Scroll container. Anchors the first visible message across data changes; at the bottom it follows new
+ * messages (when `follow`), otherwise it reports `hasNew` so the reader can opt in.
+ */
+function useScrollKeeper(messages: Message[], follow: boolean, anchorId?: number, layoutKey?: string) {
   const ref = useRef<HTMLDivElement>(null);
-  const prevHeight = useRef<number | null>(null);
   const initialized = useRef(false);
-  const remember = useCallback(() => {
-    prevHeight.current = ref.current?.scrollHeight ?? null;
+  const atBottom = useRef(true);
+  const anchor = useRef<Anchor | null>(null);
+  const lastId = useRef<number | undefined>(undefined);
+  const [hasNew, setHasNew] = useState(false);
+
+  const snapshot = useCallback(() => {
+    const el = ref.current;
+    if (!el) return;
+    atBottom.current = isNearBottom(el.scrollTop, el.clientHeight, el.scrollHeight);
+    const top = el.getBoundingClientRect().top;
+    anchor.current = pickAnchor(
+      [...el.querySelectorAll('[id^="m-"]')].map((n) => {
+        const r = n.getBoundingClientRect();
+        return { id: Number(n.id.slice(2)), top: r.top, bottom: r.bottom };
+      }),
+      top,
+    );
+    if (atBottom.current) setHasNew(false);
   }, []);
+
   useLayoutEffect(() => {
     const el = ref.current;
-    if (!el || count === 0) return;
+    if (!el || messages.length === 0) return;
+    const newLast = messages[messages.length - 1]!.id;
     if (!initialized.current) {
       initialized.current = true;
-      const anchor = anchorId != null ? el.querySelector(`#m-${anchorId}`) : null;
-      if (anchor) anchor.scrollIntoView({ block: 'center' });
+      const target = anchorId != null ? el.querySelector(`#m-${anchorId}`) : null;
+      if (target) target.scrollIntoView({ block: 'center' });
       else el.scrollTop = el.scrollHeight;
-    } else if (prevHeight.current != null) {
-      el.scrollTop += el.scrollHeight - prevHeight.current;
+    } else if (follow && atBottom.current) {
+      el.scrollTop = el.scrollHeight;
+    } else {
+      const saved = anchor.current;
+      const node = saved && el.querySelector(`#m-${saved.id}`);
+      if (saved && node) {
+        el.scrollTop = restoreScrollTop(el.scrollTop, saved.offset, node.getBoundingClientRect().top - el.getBoundingClientRect().top);
+      }
+      if (follow && hasNewTail(lastId.current, newLast)) setHasNew(true);
     }
-    prevHeight.current = null;
-  }, [count, anchorId]);
-  return { ref, remember };
+    lastId.current = newLast;
+    snapshot();
+  }, [messages, follow, anchorId, layoutKey, snapshot]);
+
+  const jumpToLatest = useCallback(() => {
+    const el = ref.current;
+    if (el) el.scrollTop = el.scrollHeight;
+    setHasNew(false);
+  }, []);
+  return { ref, onScroll: snapshot, hasNew, jumpToLatest };
+}
+
+function NewMessages({ onClick }: { onClick: () => void }) {
+  return (
+    <div className="new-messages" role="status">
+      <button className="more" onClick={onClick}>
+        有新訊息
+      </button>
+    </div>
+  );
 }
 
 function TopSentinel({ onVisible, disabled }: { onVisible: () => void; disabled: boolean }) {
@@ -90,24 +135,44 @@ export function ListTimeline({ chatId, filters, chatTitle }: { chatId: number; f
     getNextPageParam: (last) => nextOlderCursor(last),
   });
   const messages = useMemo(() => mergeMessages(...(q.data?.pages.map((p) => p.items) ?? [])), [q.data]);
-  const { ref, remember } = useScrollKeeper(messages.length);
+  const { ref, onScroll, hasNew, jumpToLatest } = useScrollKeeper(messages, !filters.toIso, undefined, `${q.hasNextPage}${q.isFetchingNextPage}`);
   const loadOlder = useCallback(() => {
-    if (q.hasNextPage && !q.isFetchingNextPage) {
-      remember();
-      void q.fetchNextPage();
-    }
-  }, [q, remember]);
+    if (q.hasNextPage && !q.isFetching) void q.fetchNextPage();
+  }, [q]);
 
   if (q.isPending) return <Empty>載入中…</Empty>;
-  if (q.error) return <ErrorBox error={q.error} />;
+  if (!q.data) return <ErrorBox error={q.error} />;
   return (
-    <div className="timeline" ref={ref} tabIndex={0} aria-label="訊息時間軸">
-      <TopSentinel onVisible={loadOlder} disabled={!q.hasNextPage} />
+    <div className="timeline" ref={ref} onScroll={onScroll} tabIndex={0} aria-label="訊息時間軸">
+      <TopSentinel onVisible={loadOlder} disabled={!q.hasNextPage || q.isFetching} />
       {q.isFetchingNextPage && <div className="muted center">載入較舊訊息…</div>}
       {!q.hasNextPage && messages.length > 0 && <div className="muted center">已到最早的訊息</div>}
       {messages.length === 0 ? <Empty>沒有符合的訊息</Empty> : <Rows messages={messages} chatTitle={chatTitle} />}
+      <ErrorBox error={q.error} />
+      {hasNew && <NewMessages onClick={jumpToLatest} />}
     </div>
   );
+}
+
+type Extra = { items: Message[]; more: boolean; cursor?: string | null; pages: number };
+
+/** Fetches up to `pages` consecutive pages from `cursor`, in one direction. */
+async function fetchChain(chatId: number, includeDeleted: boolean, dir: 'older' | 'newer', cursor: string | null | undefined, pages: number): Promise<Extra> {
+  const items: Message[] = [];
+  let more = true;
+  let done = 0;
+  while (more && cursor && done < pages) {
+    const page = await api.messages(chatId, {
+      [dir === 'older' ? 'before' : 'after']: cursor,
+      limit: 50,
+      include_deleted: includeDeleted || undefined,
+    });
+    items.push(...page.items);
+    more = page.has_more;
+    cursor = page.next_cursor;
+    done++;
+  }
+  return { items, more, cursor, pages: done };
 }
 
 export function ContextTimeline({
@@ -125,21 +190,49 @@ export function ContextTimeline({
     queryKey: ['context', chatId, messageId, includeDeleted],
     queryFn: () => api.context(chatId, messageId, { before: 25, after: 25, include_deleted: includeDeleted || undefined }),
   });
-  const [older, setOlder] = useState<{ items: Message[]; more: boolean; cursor?: string | null } | null>(null);
-  const [newer, setNewer] = useState<{ items: Message[]; more: boolean; cursor?: string | null } | null>(null);
+  const [older, setOlder] = useState<Extra | null>(null);
+  const [newer, setNewer] = useState<Extra | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<unknown>(null);
+  const loaded = useRef({ older: 0, newer: 0 });
+  loaded.current = { older: older?.pages ?? 0, newer: newer?.pages ?? 0 };
 
   const data = ctx.data;
   const messages = useMemo(
     () => (data ? mergeMessages(older?.items ?? [], data.before, [data.anchor], data.after, newer?.items ?? []) : []),
     [data, older, newer],
   );
-  const { ref, remember } = useScrollKeeper(messages.length, messageId);
+  const { ref, onScroll } = useScrollKeeper(messages, false, messageId);
+
+  // The context was refetched: re-read the manually loaded pages too so edits/deletes there don't go stale.
+  useEffect(() => {
+    const { older: no, newer: nn } = loaded.current;
+    if (!data || ctx.isFetching || (!no && !nn)) return;
+    let cancelled = false;
+    setBusy(true);
+    Promise.all([
+      no ? fetchChain(chatId, includeDeleted, 'older', data.before_cursor, no) : null,
+      nn ? fetchChain(chatId, includeDeleted, 'newer', data.after_cursor, nn) : null,
+    ])
+      .then(([o, n]) => {
+        if (cancelled) return;
+        setOlder(o);
+        setNewer(n);
+        setErr(null);
+        setBusy(false);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setErr(e);
+        setBusy(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [data, ctx.isFetching, ctx.dataUpdatedAt, chatId, includeDeleted]);
 
   if (ctx.isPending) return <Empty>載入中…</Empty>;
-  if (ctx.error) return <ErrorBox error={ctx.error} />;
-  if (!data) return null;
+  if (!data) return <ErrorBox error={ctx.error} />;
 
   const hasOlder = older ? older.more : data.has_more_before;
   const hasNewer = newer ? newer.more : data.has_more_after;
@@ -150,14 +243,11 @@ export function ContextTimeline({
     setBusy(true);
     setErr(null);
     try {
-      if (dir === 'older') {
-        remember();
-        const page = await api.messages(chatId, { before: olderCursor, limit: 50, include_deleted: includeDeleted || undefined });
-        setOlder({ items: [...(older?.items ?? []), ...page.items], more: page.has_more, cursor: page.next_cursor });
-      } else {
-        const page = await api.messages(chatId, { after: newerCursor, limit: 50, include_deleted: includeDeleted || undefined });
-        setNewer({ items: [...(newer?.items ?? []), ...page.items], more: page.has_more, cursor: page.next_cursor });
-      }
+      const prev = dir === 'older' ? older : newer;
+      const page = await fetchChain(chatId, includeDeleted, dir, dir === 'older' ? olderCursor : newerCursor, 1);
+      const next = { ...page, items: [...(prev?.items ?? []), ...page.items], pages: (prev?.pages ?? 0) + page.pages };
+      if (dir === 'older') setOlder(next);
+      else setNewer(next);
     } catch (e) {
       setErr(e);
     } finally {
@@ -166,7 +256,7 @@ export function ContextTimeline({
   };
 
   return (
-    <div className="timeline" ref={ref} tabIndex={0} aria-label="訊息脈絡">
+    <div className="timeline" ref={ref} onScroll={onScroll} tabIndex={0} aria-label="訊息脈絡">
       {hasOlder && olderCursor && (
         <button className="more" disabled={busy} onClick={() => void load('older')}>
           載入更早的訊息
@@ -178,7 +268,7 @@ export function ContextTimeline({
           載入較新的訊息
         </button>
       )}
-      <ErrorBox error={err} />
+      <ErrorBox error={err ?? ctx.error} />
     </div>
   );
 }

@@ -19,6 +19,7 @@ pub enum SpecError {
 #[derive(OpenApi)]
 #[openapi(
     paths(
+        routes::events,
         routes::status,
         routes::list_chats,
         routes::refresh_chats,
