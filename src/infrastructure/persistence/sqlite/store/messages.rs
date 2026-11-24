@@ -135,6 +135,7 @@ struct SearchSpec {
     fts: Option<String>,
     /// Substrings `m.text` must contain.
     like_terms: Vec<String>,
+    included_chat_ids: Option<Vec<i64>>,
     excluded_chat_ids: Vec<i64>,
     /// Relevance paging: skip this many results and order by rank (FTS) or newest first (LIKE)
     /// instead of using keyset cursors.
@@ -204,6 +205,15 @@ async fn list_messages(
         query.push(" AND m.timestamp<").push_bind(ceil_seconds(to)?);
     }
     if let Some(spec) = search {
+        if let Some(included) = &spec.included_chat_ids {
+            // SQLite's IN () is false, including for an empty search group.
+            query.push(" AND ").push(plus).push("m.chat_id IN (");
+            let mut ids = query.separated(", ");
+            for &id in included {
+                ids.push_bind(id);
+            }
+            ids.push_unseparated(")");
+        }
         if !spec.excluded_chat_ids.is_empty() {
             query.push(" AND m.chat_id NOT IN (");
             let mut ids = query.separated(", ");
@@ -362,6 +372,7 @@ impl MessageRepository for SqliteStore {
         let spec = SearchSpec {
             fts,
             like_terms,
+            included_chat_ids: query.included_chat_ids,
             excluded_chat_ids: query.excluded_chat_ids,
             offset: relevance.then_some(query.offset),
         };

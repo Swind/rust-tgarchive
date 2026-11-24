@@ -12,6 +12,7 @@ import { Label } from '@/components/ui/label';
 import { ChatFilter, CheckFilter, Choices, DateRange, SEARCH_SORTS, SearchField, SecondaryFilters } from '@/components/DiscoveryControls';
 import { api } from '../api/client';
 import { Empty, ErrorBox, useDebounced } from '../components/common';
+import { SearchGroupManager } from '@/components/SearchGroupManager';
 import SenderPicker from '../components/SenderPicker';
 import SearchResultLink, { useRestoreSearchScroll } from '../components/SearchResultLink';
 import { localDayToIso } from '../lib/format';
@@ -24,6 +25,7 @@ export default function SearchPage() {
   const [params, setParams] = useSearchParams();
   const q = (params.get('q') ?? '').trim();
   const chatId = params.get('chat') ?? '';
+  const groupId = params.get('group_id') ?? '';
   const excluded = [...new Set((params.get('exclude_chat_ids') ?? '').split(',').filter(Boolean))].sort();
   const exclusionParam = excluded.join(',');
   const senderParam = params.get('sender') ?? '';
@@ -64,6 +66,14 @@ export default function SearchPage() {
   const enabled = q.length > 0;
 
   const chats = useQuery({ queryKey: ['chats', 'title'], queryFn: () => api.chats('title') });
+  const groups = useQuery({ queryKey: ['search-groups'], queryFn: api.searchGroups, refetchOnWindowFocus: true });
+  const group = groups.data?.find((g) => String(g.id) === groupId);
+  const members = useMemo(() => (group ? new Set(group.chat_ids) : null), [group]);
+  const sources = groupId ? chats.data?.filter((c) => members?.has(c.id)) : chats.data;
+  function selectGroup(id: number | undefined) {
+    const value = id === undefined ? '' : String(id);
+    if (value !== groupId) update({ group_id: value, chat: '' });
+  }
   const titles = useMemo(() => new Map((chats.data ?? []).map((c) => [c.id, chatTitle(c)])), [chats.data]);
   function excludeChat(id: string) {
     if (!id || excluded.includes(id) || excluded.length >= 100) return;
@@ -71,13 +81,14 @@ export default function SearchPage() {
   }
 
   const results = useInfiniteQuery({
-    queryKey: ['search', q, chatId, senderId, from, to, deleted, hideBots, sort, exclusionParam],
+    queryKey: ['search', q, chatId, senderId, from, to, deleted, hideBots, sort, exclusionParam, groupId, group?.chat_ids],
     enabled,
     initialPageParam: undefined as string | undefined,
     queryFn: ({ pageParam }) =>
       api.search({
         q,
         chat_id: chatId || undefined,
+        group_id: groupId || undefined,
         exclude_chat_ids: exclusionParam || undefined,
         sender_id: senderId,
         from: localDayToIso(from, false),
@@ -90,7 +101,7 @@ export default function SearchPage() {
       }),
     getNextPageParam: nextOlderCursor,
   });
-  const items = results.data?.pages.flatMap((p) => p.items) ?? [];
+  const items = results.error ? [] : results.data?.pages.flatMap((p) => p.items) ?? [];
   useRestoreSearchScroll(!results.isPending);
   const status = useQuery({ queryKey: ['status'], queryFn: api.status, refetchInterval: 15000 });
   const index = status.data?.search_index;
@@ -98,10 +109,22 @@ export default function SearchPage() {
 
   return (
     <div className="mx-auto w-full max-w-6xl space-y-6 p-4 md:p-8">
-      <PageHeader eyebrow="封存探索" title="搜尋" description="從所有聊天室找回訊息，點選結果即可查看前後對話。" />
+      <PageHeader eyebrow="封存探索" title="搜尋" description="搜尋整個封存，或只查看自訂群組內的訊息。">
+        {groups.data && chats.data && <SearchGroupManager groups={groups.data} chats={chats.data} selectedId={group?.id} onSelect={selectGroup} />}
+      </PageHeader>
       <search aria-label="封存訊息搜尋">
         <Card className="@container gap-4 p-4 sm:p-5">
           <SearchField label="搜尋關鍵字" placeholder="輸入文字、詞彙或英文單字" value={text} onChange={setText} autoFocus />
+          <div className="flex min-w-0 flex-wrap items-center gap-2 [&>[data-slot=native-select-wrapper]]:max-w-full">
+            <Label htmlFor="search-group">搜尋範圍</Label>
+            <NativeSelect id="search-group" value={groupId} onChange={(e) => selectGroup(e.target.value ? Number(e.target.value) : undefined)}>
+              <NativeSelectOption value="">全部來源</NativeSelectOption>
+              {groupId && !group && <NativeSelectOption value={groupId}>{groups.isPending ? '載入群組中…' : `無法取得群組 #${groupId}`}</NativeSelectOption>}
+              {groups.data?.map((g) => <NativeSelectOption key={g.id} value={String(g.id)}>{g.name}（{g.chat_ids.length} 個來源）</NativeSelectOption>)}
+            </NativeSelect>
+            {group && !group.chat_ids.length && <span className="text-sm text-muted-foreground">此群組尚無來源，請先加入頻道或聊天室。</span>}
+          </div>
+          <ErrorBox error={groups.error ?? chats.error} />
           {excluded.length > 0 && (
             <div className="flex flex-wrap items-center gap-2" role="group" aria-label="已排除的來源">
               <span className="text-sm text-muted-foreground">已排除</span>
@@ -118,7 +141,10 @@ export default function SearchPage() {
           <SecondaryFilters count={[chatId, senderId != null, from, to, deleted, hideBots, sort === 'time', exclusionParam].filter(Boolean).length}>
             <div className="grid min-w-0 items-end gap-4 @sm:grid-cols-2 @4xl:grid-cols-[1fr_1fr_1.6fr]">
               <ChatFilter value={chatId} onChange={(chat) => update({ chat, exclude_chat_ids: excluded.filter((id) => id !== chat).join(',') })}>
-                {chats.data?.map((c) => <NativeSelectOption key={c.id} value={c.id}>{chatTitle(c)}</NativeSelectOption>)}
+                {chatId && members && !members.has(Number(chatId)) && <NativeSelectOption value={chatId}>
+                  {titles.get(Number(chatId)) ?? chatId}（不在此群組）
+                </NativeSelectOption>}
+                {sources?.map((c) => <NativeSelectOption key={c.id} value={c.id}>{chatTitle(c)}</NativeSelectOption>)}
               </ChatFilter>
               <SenderPicker value={senderId} onChange={(id) => update({ sender: id === undefined ? '' : String(id) })} />
               <div className="@sm:col-span-2 @4xl:col-span-1"><DateRange from={from} to={to} update={update} /></div>
@@ -127,7 +153,7 @@ export default function SearchPage() {
               <Label htmlFor="exclude-source">排除來源（可複選）</Label>
               <NativeSelect id="exclude-source" value="" disabled={excluded.length >= 100} onChange={(e) => excludeChat(e.target.value)}>
                 <NativeSelectOption value="">{excluded.length >= 100 ? '最多排除 100 個來源' : '選擇要排除的頻道或聊天室'}</NativeSelectOption>
-                {chats.data?.filter((c) => String(c.id) !== chatId && !excluded.includes(String(c.id))).map((c) =>
+                {sources?.filter((c) => String(c.id) !== chatId && !excluded.includes(String(c.id))).map((c) =>
                   <NativeSelectOption key={c.id} value={c.id}>{chatTitle(c)}</NativeSelectOption>)}
               </NativeSelect>
             </div>

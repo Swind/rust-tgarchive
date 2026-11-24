@@ -70,6 +70,13 @@ impl SqliteStore {
         Ok(Self::with_pool(open_existing_pool(database_url).await?))
     }
 
+    /// SQLite resolves URL escapes, URI parameters and symlinks before reporting the filename.
+    pub(crate) async fn database_filename(&self) -> sqlx::Result<String> {
+        sqlx::query_scalar("SELECT file FROM pragma_database_list WHERE name = 'main'")
+            .fetch_one(&self.pool)
+            .await
+    }
+
     pub async fn close(&self) {
         self.pool.close().await;
     }

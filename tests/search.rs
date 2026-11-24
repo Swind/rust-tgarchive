@@ -94,6 +94,7 @@ fn query(text: &str) -> SearchMessagesQuery {
     SearchMessagesQuery {
         text: text.into(),
         filters: filters(),
+        included_chat_ids: None,
         excluded_chat_ids: Vec::new(),
         before: None,
         after: None,
@@ -541,7 +542,7 @@ async fn relevance_pagination_has_no_duplicates_or_gaps() {
 }
 
 #[tokio::test]
-async fn chat_exclusions_apply_before_search_pagination() {
+async fn chat_membership_and_exclusions_apply_before_search_pagination() {
     let (_dir, store, _) = store().await;
     add(
         &store,
@@ -557,8 +558,14 @@ async fn chat_exclusions_apply_before_search_pagination() {
     for sort in [SearchSort::Relevance, SearchSort::Time] {
         for text in ["台北咖啡", "北"] {
             let mut q = query(text);
-            q.excluded_chat_ids = vec![-10, 30];
             q.sort = sort;
+            q.included_chat_ids = Some(vec![]);
+            assert!(store.search(q.clone()).await.unwrap().items.is_empty());
+            q.included_chat_ids = Some(vec![20, 30, 40]);
+            q.filters.chat_id = Some(chat_id(-10));
+            assert!(store.search(q.clone()).await.unwrap().items.is_empty());
+            q.filters.chat_id = None;
+            q.excluded_chat_ids = vec![30];
             q.page_size = PageSize::new(1).unwrap();
             let first = store.search(q.clone()).await.unwrap();
             assert!(first.has_more);
@@ -714,6 +721,9 @@ async fn rebuilding_state_uses_like_fallback() {
     assert_eq!(ids(&store, "台北咖啡").await, [1, 2]);
     let mut q = query("台北咖啡");
     q.excluded_chat_ids = vec![20];
+    assert_eq!(ids_of(store.search(q.clone()).await.unwrap()), [1]);
+    q.excluded_chat_ids.clear();
+    q.included_chat_ids = Some(vec![10]);
     assert_eq!(ids_of(store.search(q).await.unwrap()), [1]);
 }
 

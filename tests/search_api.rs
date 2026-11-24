@@ -4,18 +4,18 @@ use std::{process::Command, sync::Arc};
 
 use axum::{
     body::{Body, to_bytes},
-    http::{Request, StatusCode},
+    http::{Method, Request, StatusCode},
 };
 use chrono::DateTime;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tgarchive::{
     application::{
         ArchiveWriter, IngestBatch, IngestRecord, MessageSource,
         services::{Application, ComponentState, ComponentStatus},
     },
     domain::{Chat, ChatId, ChatKind, Message, MessageEvent, MessageId},
-    infrastructure::persistence::sqlite::SqliteStore,
-    interface::rest::router,
+    infrastructure::persistence::{search_groups::SearchGroupStore, sqlite::SqliteStore},
+    interface::rest::{router, router_with_groups},
 };
 use tower::ServiceExt;
 
@@ -35,11 +35,24 @@ fn encode(text: &str) -> String {
 }
 
 async fn get(app: &axum::Router, uri: &str) -> (StatusCode, Value) {
-    let response = app
-        .clone()
-        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
-        .await
-        .unwrap();
+    request(app, Method::GET, uri, None).await
+}
+
+async fn request(
+    app: &axum::Router,
+    method: Method,
+    uri: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    let builder = Request::builder().method(method).uri(uri);
+    let req = match body {
+        Some(body) => builder
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap())),
+        None => builder.body(Body::empty()),
+    }
+    .unwrap();
+    let response = app.clone().oneshot(req).await.unwrap();
     let status = response.status();
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     (
@@ -247,6 +260,154 @@ async fn rest_search_excludes_multiple_chats_before_paging() {
         let (status, body) = get(&app, &format!("{search}&exclude_chat_ids={invalid}")).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{invalid}: {body}");
         assert_eq!(body["error"]["code"], "malformed_request");
+    }
+}
+
+#[tokio::test]
+async fn rest_search_groups_crud_and_scoped_paging() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("sqlite://{}", dir.path().join("archive.db").display());
+    let store = Arc::new(SqliteStore::connect(&url).await.unwrap());
+    let channel = ChatId::from_telegram(ChatKind::Channel, 7).unwrap().get();
+    for (kind, id) in [
+        (ChatKind::Group, 5),
+        (ChatKind::Private, 6),
+        (ChatKind::Channel, 7),
+    ] {
+        seed(&store, kind, id, &["coffee 杯", "coffee 杯"]).await;
+    }
+    let application = Arc::new(Application::new(
+        store.clone(),
+        store.clone(),
+        store.clone(),
+        store,
+        None,
+        ComponentStatus::new(ComponentState::Running, None),
+    ));
+    let collection = "/api/v1/search-groups";
+    let search = "/api/v1/messages/search";
+    // A missing settings store must not widen scoped searches or disable archive reads.
+    let disabled = router(application.clone());
+    assert_eq!(
+        get(&disabled, collection).await.0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        get(&disabled, &format!("{search}?q=coffee&group_id=1"))
+            .await
+            .0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        get(&disabled, &format!("{search}?q=coffee")).await.0,
+        StatusCode::OK
+    );
+
+    let settings = SearchGroupStore::open(&dir.path().join("settings.db"))
+        .await
+        .unwrap();
+    let app = router_with_groups(application, None, None, None, Some(settings));
+    assert_eq!(get(&app, collection).await, (StatusCode::OK, json!([])));
+    let (status, group) = request(
+        &app,
+        Method::POST,
+        collection,
+        Some(json!({"name": "  工作  ", "chat_ids": [-5, channel]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{group}");
+    let id = group["id"].as_i64().unwrap();
+    assert!(id > 0);
+    assert_eq!(group["name"], "工作");
+    assert_eq!(group["chat_ids"].as_array().unwrap().len(), 2);
+    let item = format!("{collection}/{id}");
+    assert_eq!(get(&app, &item).await, (StatusCode::OK, group.clone()));
+    assert_eq!(
+        get(&app, collection).await,
+        (StatusCode::OK, json!([group]))
+    );
+
+    // Both FTS orders and the one-character LIKE fallback intersect exclusions before paging.
+    let one_char = encode("杯");
+    for (q, sort) in [
+        ("coffee", "relevance"),
+        ("coffee", "time"),
+        (one_char.as_str(), "time"),
+    ] {
+        let uri = format!("{search}?q={q}&sort={sort}&group_id={id}&exclude_chat_ids=-5&limit=1");
+        let (status, first) = get(&app, &uri).await;
+        assert_eq!(status, StatusCode::OK, "{first}");
+        assert_eq!(first["items"][0]["chat_id"], channel);
+        let next = first["next_cursor"].as_str().unwrap();
+        let (status, second) = get(&app, &format!("{uri}&before={next}")).await;
+        assert_eq!(status, StatusCode::OK, "{second}");
+        assert_eq!(second["items"][0]["chat_id"], channel);
+        assert_ne!(first["items"][0]["id"], second["items"][0]["id"]);
+        assert!(second["next_cursor"].is_null());
+    }
+
+    for bad in [
+        json!({"name": " ", "chat_ids": []}),
+        json!({"name": "字".repeat(81), "chat_ids": []}),
+        json!({"name": "test"}),
+        json!({"name": "test", "chat_ids": [0]}),
+        json!({"name": "test", "chat_ids": [-5, -5]}),
+        json!({"name": "test", "chat_ids": [6, 99]}),
+    ] {
+        let (status, error) = request(&app, Method::PUT, &item, Some(bad)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+        assert_eq!(error["error"]["code"], "malformed_request");
+    }
+    assert_eq!(
+        get(&app, &item).await.1,
+        group,
+        "failed edits must be atomic"
+    );
+    for ids in [vec![6], vec![]] {
+        let body = json!({"name":"Renamed", "chat_ids":ids});
+        let (status, changed) = request(&app, Method::PUT, &item, Some(body)).await;
+        assert_eq!(status, StatusCode::OK, "{changed}");
+        assert_eq!(changed, json!({"id":id, "name":"Renamed", "chat_ids":ids}));
+        let (status, page) = get(&app, &format!("{search}?q=coffee&group_id={id}")).await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        let hits = page["items"].as_array().unwrap();
+        assert_eq!(hits.len(), 2 * ids.len());
+        assert!(hits.iter().all(|hit| hit["chat_id"] == 6));
+    }
+    assert_eq!(
+        request(&app, Method::DELETE, &item, None).await,
+        (StatusCode::NO_CONTENT, Value::Null)
+    );
+    assert_eq!(get(&app, collection).await, (StatusCode::OK, json!([])));
+    assert_eq!(get(&app, &item).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(
+        request(&app, Method::DELETE, &item, None).await.0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        request(
+            &app,
+            Method::PUT,
+            &item,
+            Some(json!({"name":"gone", "chat_ids":[]}))
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        get(&app, &format!("{search}?q=coffee&group_id={id}"))
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    for invalid in ["0", "-1", "abc"] {
+        assert_eq!(
+            get(&app, &format!("{search}?q=coffee&group_id={invalid}"))
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
     }
 }
 

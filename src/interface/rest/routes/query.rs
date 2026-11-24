@@ -32,6 +32,9 @@ pub(in crate::interface::rest) struct MessageQuery {
 pub(in crate::interface::rest) struct SearchQuery {
     pub(super) q: String,
     pub(super) chat_id: Option<i64>,
+    /// Restrict results to this saved search group. An empty group matches nothing.
+    #[param(minimum = 1)]
+    pub(super) group_id: Option<i64>,
     /// Comma-separated signed chat IDs to exclude (at most 100); omit for no exclusions.
     pub(super) exclude_chat_ids: Option<String>,
     pub(super) sender_id: Option<i64>,
@@ -84,6 +87,7 @@ pub(in crate::interface::rest) fn build_list_query(
 
 pub(in crate::interface::rest) fn build_search_query(
     query: SearchQuery,
+    included_chat_ids: Option<Vec<i64>>,
     request_id: String,
 ) -> Result<SearchMessagesQuery, ApiError> {
     let page_size = PageSize::new(query.limit.unwrap_or(PageSize::DEFAULT.get()))
@@ -137,6 +141,7 @@ pub(in crate::interface::rest) fn build_search_query(
     let result = SearchMessagesQuery {
         text: query.q,
         filters,
+        included_chat_ids,
         excluded_chat_ids,
         before,
         after,

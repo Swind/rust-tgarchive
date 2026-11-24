@@ -2,6 +2,7 @@
 mod auth;
 mod database;
 mod runtime;
+mod search_groups;
 mod server;
 mod sync;
 

@@ -68,6 +68,7 @@ fn page_size_and_query_boundaries_are_validated() {
     let too_long = SearchMessagesQuery {
         text: "a".repeat(MAX_SEARCH_LENGTH + 1),
         filters: filters(),
+        included_chat_ids: None,
         excluded_chat_ids: Vec::new(),
         before: None,
         after: None,

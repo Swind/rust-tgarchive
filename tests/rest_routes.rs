@@ -510,6 +510,8 @@ fn openapi_json_and_yaml_export_without_application_or_database() {
         "/api/v1/chats/{chat_id}/messages",
         "/api/v1/messages",
         "/api/v1/messages/search",
+        "/api/v1/search-groups",
+        "/api/v1/search-groups/{id}",
         "/api/v1/chats/{chat_id}/messages/{message_id}",
         "/api/v1/sync",
         "/api/v1/chats/{chat_id}/sync",

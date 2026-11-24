@@ -33,7 +33,7 @@ use tower_http::{
 };
 
 use crate::application::{events::ArchiveEvents, services::Application, sync::SyncCoordinator};
-use crate::infrastructure::persistence::sqlite::SqliteStore;
+use crate::infrastructure::persistence::{search_groups::SearchGroupStore, sqlite::SqliteStore};
 
 pub use error::{ApiError, ErrorEnvelope};
 pub use openapi::{OpenApiFormat, export_openapi, openapi_document};
@@ -51,6 +51,7 @@ pub struct RestState {
     pub sync: Option<Arc<SyncCoordinator>>,
     pub media: Option<MediaContext>,
     pub events: Option<ArchiveEvents>,
+    pub groups: Option<SearchGroupStore>,
 }
 
 #[derive(Clone)]
@@ -85,11 +86,22 @@ pub fn router_with_events(
     media: Option<MediaContext>,
     events: Option<ArchiveEvents>,
 ) -> Router {
+    router_with_groups(application, sync, media, events, None)
+}
+
+pub fn router_with_groups(
+    application: Arc<Application>,
+    sync: Option<Arc<SyncCoordinator>>,
+    media: Option<MediaContext>,
+    events: Option<ArchiveEvents>,
+    groups: Option<SearchGroupStore>,
+) -> Router {
     let state = RestState {
         application,
         sync,
         media,
         events,
+        groups,
     };
     Router::new()
         .route("/api/v1/events", get(routes::events))
@@ -119,6 +131,16 @@ pub fn router_with_events(
         )
         .route("/api/v1/messages", get(routes::list_messages))
         .route("/api/v1/messages/search", get(routes::search_messages))
+        .route(
+            "/api/v1/search-groups",
+            get(routes::list_search_groups).post(routes::create_search_group),
+        )
+        .route(
+            "/api/v1/search-groups/{id}",
+            get(routes::get_search_group)
+                .put(routes::update_search_group)
+                .delete(routes::delete_search_group),
+        )
         .route(
             "/api/v1/chats/{chat_id}/messages/{message_id}",
             get(routes::get_message),

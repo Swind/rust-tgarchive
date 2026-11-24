@@ -847,6 +847,14 @@ paths:
         schema:
           type: integer
           format: int64
+      - name: group_id
+        in: query
+        description: Restrict results to this saved search group. An empty group matches nothing.
+        required: false
+        schema:
+          type: integer
+          format: int64
+          minimum: 1
       - name: exclude_chat_ids
         in: query
         description: Comma-separated signed chat IDs to exclude (at most 100); omit for no exclusions.
@@ -921,6 +929,169 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/MessagePageDto'
+        '400':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /api/v1/search-groups:
+    get:
+      tags:
+      - routes
+      operationId: list_search_groups
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SearchGroupDto'
+        '503':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+    post:
+      tags:
+      - routes
+      operationId: create_search_group
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SaveSearchGroupDto'
+        required: true
+      responses:
+        '201':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchGroupDto'
+        '400':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /api/v1/search-groups/{id}:
+    get:
+      tags:
+      - routes
+      operationId: get_search_group
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+          minimum: 1
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchGroupDto'
+        '400':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+    put:
+      tags:
+      - routes
+      operationId: update_search_group
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+          minimum: 1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SaveSearchGroupDto'
+        required: true
+      responses:
+        '200':
+          description: Name and complete membership replaced
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchGroupDto'
+        '400':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+    delete:
+      tags:
+      - routes
+      operationId: delete_search_group
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+          minimum: 1
+      responses:
+        '204':
+          description: Group deleted
         '400':
           description: ''
           content:
@@ -1615,6 +1786,41 @@ components:
           - 'null'
           format: int64
           minimum: 0
+    SaveSearchGroupDto:
+      type: object
+      required:
+      - name
+      - chat_ids
+      properties:
+        chat_ids:
+          type: array
+          items:
+            type: integer
+            format: int64
+          description: 'Complete membership: distinct nonzero signed IDs of existing archive chats.'
+          maxItems: 500
+        name:
+          type: string
+          description: Group name, 1–80 characters after trimming whitespace.
+    SearchGroupDto:
+      type: object
+      required:
+      - id
+      - name
+      - chat_ids
+      properties:
+        chat_ids:
+          type: array
+          items:
+            type: integer
+            format: int64
+          description: Signed, marked archive chat IDs. An empty group matches no messages.
+        id:
+          type: integer
+          format: int64
+          minimum: 1
+        name:
+          type: string
     SearchIndexDto:
       type: object
       required:

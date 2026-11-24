@@ -18,11 +18,13 @@ use crate::{
 mod chat;
 mod media;
 mod message;
+mod search_group;
 mod sender;
 mod status;
 
 pub use chat::*;
 pub use media::*;
 pub use message::*;
+pub use search_group::*;
 pub use sender::*;
 pub use status::*;

@@ -107,6 +107,7 @@ async fn file_database_reopens_readonly_and_preserves_ft_search() {
     let search = SearchMessagesQuery {
         text: "alpha OR beta".into(),
         filters: filters(),
+        included_chat_ids: None,
         excluded_chat_ids: Vec::new(),
         before: None,
         after: None,
@@ -121,6 +122,7 @@ async fn file_database_reopens_readonly_and_preserves_ft_search() {
     let chinese = SearchMessagesQuery {
         text: "中文測試".into(),
         filters: filters(),
+        included_chat_ids: None,
         excluded_chat_ids: Vec::new(),
         before: None,
         after: None,
@@ -132,6 +134,7 @@ async fn file_database_reopens_readonly_and_preserves_ft_search() {
     let quoted = SearchMessagesQuery {
         text: "alpha\" OR *".into(),
         filters: filters(),
+        included_chat_ids: None,
         excluded_chat_ids: Vec::new(),
         before: None,
         after: None,
@@ -384,6 +387,7 @@ async fn versions_prefer_edits_and_realtime_and_soft_delete_hides_fts() {
     let old_term = SearchMessagesQuery {
         text: "edited".into(),
         filters: filters(),
+        included_chat_ids: None,
         excluded_chat_ids: Vec::new(),
         before: None,
         after: None,
@@ -395,6 +399,7 @@ async fn versions_prefer_edits_and_realtime_and_soft_delete_hides_fts() {
     let new_term = SearchMessagesQuery {
         text: "fresh".into(),
         filters: filters(),
+        included_chat_ids: None,
         excluded_chat_ids: Vec::new(),
         before: None,
         after: None,
@@ -421,6 +426,7 @@ async fn versions_prefer_edits_and_realtime_and_soft_delete_hides_fts() {
     let search = SearchMessagesQuery {
         text: "needle".into(),
         filters: filters(),
+        included_chat_ids: None,
         excluded_chat_ids: Vec::new(),
         before: None,
         after: None,

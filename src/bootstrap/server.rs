@@ -2,6 +2,7 @@ use super::{
     auth::{bind_account, open_authorized_telegram},
     database::{readonly_application, warn_if_index_not_ready},
     runtime::{SyncRuntime, start_sync_runtime},
+    search_groups::open_search_groups,
 };
 use crate::{
     application::{
@@ -126,6 +127,7 @@ pub(super) async fn serve(
         let media_store = SqliteStore::open_existing_readonly(&config.database_url)
             .await
             .map_err(|error| CliError::Database(error.to_string()))?;
+        let groups = open_search_groups(&media_store).await;
         let media = rest::MediaContext {
             store: media_store,
             media_dir: config.media_directory().map_err(CliError::InvalidInput)?,
@@ -135,7 +137,7 @@ pub(super) async fn serve(
         return serve_router(
             listener,
             rest::apply_dev_cors(
-                rest::router_with_media(application, None, Some(media)),
+                rest::router_with_groups(application, None, Some(media), None, groups),
                 cors,
             ),
             None,
@@ -202,10 +204,11 @@ async fn serve_with_telegram(
             )
             .with_rate_limit(Arc::clone(runtime.engine.pacer())),
         );
+        let groups = open_search_groups(&store).await;
         let serving = serve_router(
             listener,
             rest::apply_dev_cors(
-                rest::router_with_events(
+                rest::router_with_groups(
                     application,
                     Some(Arc::clone(&runtime.coordinator)),
                     Some(rest::MediaContext {
@@ -214,6 +217,7 @@ async fn serve_with_telegram(
                         worker_enabled: true,
                     }),
                     Some(events.clone()),
+                    groups,
                 ),
                 cors,
             ),

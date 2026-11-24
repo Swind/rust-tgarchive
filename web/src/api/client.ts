@@ -19,6 +19,8 @@ export type SenderProfile = S['SenderProfileDto'];
 export type SenderPage = S['SenderPageDto'];
 export type SenderDetail = S['SenderDetailDto'];
 export type SenderSort = S['SenderSortDto'];
+export type SearchGroup = S['SearchGroupDto'];
+type SaveSearchGroup = S['SaveSearchGroupDto'];
 
 export class ApiError extends Error {
   constructor(
@@ -74,8 +76,13 @@ async function request<T>(method: string, path: string, query?: Query, jsonBody?
 
 const enc = encodeURIComponent;
 const chatPath = (id: number) => `/api/v1/chats/${id}`;
+const groupPath = '/api/v1/search-groups';
 
 export const api = {
+  searchGroups: () => request<SearchGroup[]>('GET', groupPath),
+  createSearchGroup: (body: SaveSearchGroup) => request<SearchGroup>('POST', groupPath, undefined, body),
+  updateSearchGroup: (id: number, body: SaveSearchGroup) => request<SearchGroup>('PUT', `${groupPath}/${id}`, undefined, body),
+  deleteSearchGroup: (id: number) => request<void>('DELETE', `${groupPath}/${id}`),
   status: () => request<Status>('GET', '/api/v1/status'),
   syncStatus: () => request<Status>('GET', '/api/v1/sync/status'),
   health: (kind: 'live' | 'ready') => request<S['HealthDto']>('GET', `/health/${kind}`),

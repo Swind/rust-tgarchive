@@ -144,6 +144,8 @@ pub enum SearchSort {
 pub struct SearchMessagesQuery {
     pub text: String,
     pub filters: MessageFilters,
+    /// Restrict search to these marked chat IDs. An empty selection matches no chats.
+    pub included_chat_ids: Option<Vec<i64>>,
     /// Marked chat IDs to omit from search results in addition to the other filters.
     pub excluded_chat_ids: Vec<i64>,
     /// Keyset cursor; only valid with [`SearchSort::Time`].

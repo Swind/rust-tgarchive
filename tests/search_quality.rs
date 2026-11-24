@@ -387,6 +387,7 @@ async fn fetch(store: &SqliteStore, q: &Q, sort: SearchSort) -> Vec<Key> {
             .search(SearchMessagesQuery {
                 text: q.text.to_owned(),
                 filters: q.filter.engine(),
+                included_chat_ids: None,
                 excluded_chat_ids: Vec::new(),
                 before: before.take(),
                 after: None,

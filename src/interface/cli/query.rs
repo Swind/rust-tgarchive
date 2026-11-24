@@ -38,6 +38,7 @@ pub(super) fn search_query(
     let query = SearchMessagesQuery {
         text,
         filters,
+        included_chat_ids: None,
         excluded_chat_ids: Vec::new(),
         before,
         after,
