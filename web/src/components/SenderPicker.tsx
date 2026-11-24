@@ -1,8 +1,12 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { api } from '../api/client';
+import { X } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Combobox, ComboboxContent, ComboboxEmpty, ComboboxInput, ComboboxItem, ComboboxList } from '@/components/ui/combobox';
+import { Label } from '@/components/ui/label';
+import { api, type SenderProfile } from '../api/client';
 import { senderLabel } from './senderFormat';
-import { useDebounced } from './common';
+import { ErrorBox, useDebounced } from './common';
 
 /** Sender filter with autocomplete from `/senders?q=`; `value` is the selected sender ID. */
 export default function SenderPicker({
@@ -14,6 +18,10 @@ export default function SenderPicker({
 }) {
   const [text, setText] = useState('');
   const [open, setOpen] = useState(false);
+  const id = useId();
+  const input = useRef<HTMLInputElement>(null);
+  const clear = useRef<HTMLButtonElement>(null);
+  const restoreFocus = useRef(false);
   const debounced = useDebounced(text.trim(), 250);
   const selected = useQuery({
     queryKey: ['sender', value],
@@ -27,50 +35,50 @@ export default function SenderPicker({
     queryFn: () => api.senderList({ q: debounced, limit: 8 }),
   });
   useEffect(() => {
-    if (value === undefined) return;
-    setText('');
-    setOpen(false);
+    if (value !== undefined) {
+      setText('');
+      setOpen(false);
+    }
+    if (restoreFocus.current) {
+      (value === undefined ? input.current : clear.current)?.focus();
+      restoreFocus.current = false;
+    }
   }, [value]);
 
-  if (value !== undefined) {
-    return (
-      <span className="badge blue sender-chip">
-        寄件人：{selected.data ? senderLabel(selected.data) : value}{' '}
-        <button type="button" aria-label="清除寄件人" onClick={() => onChange(undefined)}>✕</button>
-      </span>
-    );
+  function select(next: number | undefined) {
+    restoreFocus.current = true;
+    onChange(next);
   }
+  const matches = debounced === text.trim() ? options.data?.items : undefined;
+
   return (
-    <span className="combo">
-      <input
-        type="search"
-        role="combobox"
-        aria-label="寄件人"
-        aria-expanded={open && debounced.length > 0}
-        aria-autocomplete="list"
-        placeholder="寄件人（名稱或 @帳號）"
-        value={text}
-        onChange={(e) => {
-          setText(e.target.value);
-          setOpen(true);
-        }}
-        onFocus={() => setOpen(true)}
-        onKeyDown={(e) => e.key === 'Escape' && setOpen(false)}
-      />
-      {open && debounced.length > 0 && options.data && (
-        <ul className="combo-list" role="listbox" aria-label="寄件人建議">
-          {options.data.items.length === 0 && <li className="muted pad">沒有符合的使用者</li>}
-          {options.data.items.map((s) => (
-            <li key={s.id} role="option" aria-selected={false}>
-              <button type="button" onClick={() => onChange(s.id)}>
-                {senderLabel(s)}
-                {s.username && s.display_name ? ` @${s.username}` : ''}
-                <span className="muted small"> · {s.message_count} 則</span>
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-    </span>
+    <div className="relative grid min-w-0 gap-2">
+      {value !== undefined ? <>
+        <span className="text-sm leading-none font-medium">寄件人</span>
+        <div className="flex h-10 min-w-0 items-center justify-between gap-1 rounded-md border border-primary/30 bg-primary/5 ps-3 text-sm font-medium">
+          <span className="truncate">寄件人：{selected.data ? senderLabel(selected.data) : value}</span>
+          <Button ref={clear} type="button" variant="ghost" size="icon" aria-label="清除寄件人" onClick={() => select(undefined)}><X aria-hidden="true" /></Button>
+        </div>
+      </> : <>
+        <Label htmlFor={id}>寄件人</Label>
+        <Combobox<SenderProfile> items={matches ?? []} filter={null} inputValue={text} onInputValueChange={setText}
+          openOnInputClick={false} onOpenChange={setOpen} itemToStringLabel={senderLabel}
+          onValueChange={(sender) => { if (sender) select(sender.id); }}>
+          <ComboboxInput ref={input} id={id} showTrigger={false} className="h-10 bg-background" autoCapitalize="none"
+            autoCorrect="off" spellCheck={false} placeholder="名稱或 @帳號" />
+          <ComboboxContent>
+            {options.error ? <ErrorBox error={options.error} /> : <ComboboxEmpty>
+              {text.trim().length === 0 ? '輸入名稱或 @帳號' : matches ? '沒有符合的使用者' : '搜尋中…'}
+            </ComboboxEmpty>}
+            <ComboboxList aria-label="寄件人建議">
+              {(s: SenderProfile) => <ComboboxItem key={s.id} value={s}>
+                <span className="min-w-0 break-all">{senderLabel(s)}{s.username && s.display_name ? ` @${s.username}` : ''}</span>
+                <span className="ms-auto shrink-0 text-xs text-muted-foreground">{s.message_count} 則</span>
+              </ComboboxItem>}
+            </ComboboxList>
+          </ComboboxContent>
+        </Combobox>
+      </>}
+    </div>
   );
 }

@@ -1,24 +1,30 @@
 import { useEffect, useState } from 'react';
 import { ApiError } from '../api/client';
+import { CircleAlert } from 'lucide-react';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { Badge } from '@/components/ui/badge';
+import { Empty as EmptyState } from '@/components/ui/empty';
 
 export function ErrorBox({ error }: { error: unknown }) {
   if (!error) return null;
   const e = error instanceof ApiError ? error : null;
   return (
-    <div className="error" role="alert">
-      <strong>{e?.status === 0 ? '網路錯誤' : '發生錯誤'}</strong>：{error instanceof Error ? error.message : String(error)}
-      {e && e.status > 0 && (
-        <small>
-          {' '}
-          （{e.code}，HTTP {e.status}
-          {e.requestId ? `，request_id: ${e.requestId}` : ''}）
-        </small>
-      )}
-    </div>
+    <Alert variant="destructive" className="my-2">
+      <CircleAlert aria-hidden="true" />
+      <AlertTitle>{e?.status === 0 ? '網路錯誤' : '發生錯誤'}</AlertTitle>
+      <AlertDescription className="[overflow-wrap:anywhere]">
+        {error instanceof Error ? error.message : String(error)}
+        {e && e.status > 0 && (
+          <small>{e.code}，HTTP {e.status}{e.requestId ? `，request_id: ${e.requestId}` : ''}</small>
+        )}
+      </AlertDescription>
+    </Alert>
   );
 }
 
-export const Empty = ({ children }: { children: React.ReactNode }) => <div className="empty">{children}</div>;
+export const Empty = ({ children }: { children: React.ReactNode }) => (
+  <EmptyState className="text-muted-foreground">{children}</EmptyState>
+);
 
 export function useDebounced<T>(value: T, ms = 400): T {
   const [v, setV] = useState(value);
@@ -30,7 +36,6 @@ export function useDebounced<T>(value: T, ms = 400): T {
 }
 
 export const KIND_LABEL = { channel: '頻道', supergroup: '超級群組', group: '群組', private: '私訊' } as const;
-export const KIND_ICON = { channel: '📢', supergroup: '👥', group: '👪', private: '👤' } as const;
 
 const JOB_LABEL: Record<string, string> = {
   queued: '排隊中',
@@ -41,16 +46,16 @@ const JOB_LABEL: Record<string, string> = {
   interrupted: '已中斷',
 };
 const JOB_TONE: Record<string, string> = {
-  queued: 'blue',
-  running: 'blue',
-  succeeded: 'green',
-  interrupted: 'amber',
-  failed: 'red',
-  rate_limited: 'amber',
+  queued: 'text-primary',
+  running: 'bg-accent text-accent-foreground',
+  succeeded: 'text-emerald-700 dark:text-emerald-300',
+  interrupted: 'text-amber-800 dark:text-amber-300',
+  failed: 'text-destructive',
+  rate_limited: 'text-amber-800 dark:text-amber-300',
 };
 
 export const JobBadge = ({ state }: { state: string }) => (
-  <span className={`badge ${JOB_TONE[state] ?? 'gray'}`}>{JOB_LABEL[state] ?? state}</span>
+  <Badge variant="outline" className={JOB_TONE[state]}>{JOB_LABEL[state] ?? state}</Badge>
 );
 
 export const isActiveJob = (state: string) => state === 'queued' || state === 'running';

@@ -19,7 +19,7 @@ test.describe('senders list', () => {
     await expect(page).toHaveURL(/q=%E5%B0%8F%E6%98%8E/);
     await page.getByLabel('搜尋使用者').fill('@me_self');
     await expect(rows(page)).toHaveCount(1);
-    await expect(rows(page).first().locator('.badge.green')).toHaveText('自己');
+    await expect(rows(page).first().getByText('自己', { exact: true })).toBeVisible();
     await page.getByLabel('搜尋使用者').fill(String(XIAOMING));
     await expect(rows(page)).toHaveCount(1);
     await page.getByLabel('搜尋使用者').fill('不存在的人');
@@ -68,7 +68,7 @@ test.describe('sender page', () => {
   test('outgoing messages belong to the self account', async ({ page }) => {
     await page.goto(`/senders/${SELF}`);
     await expect(page.getByRole('heading', { name: /我自己/ })).toBeVisible();
-    await expect(page.locator('h2 .badge.green')).toHaveText('自己');
+    await expect(page.getByRole('main').locator('header').filter({ has: page.getByRole('heading', { name: /我自己/ }) }).getByText('自己', { exact: true })).toBeVisible();
     await expect(page.locator('article.msg')).toHaveCount(2);
     await expect(page.locator('article.msg').first()).toContainText('外送訊息');
   });
@@ -90,7 +90,7 @@ test.describe('sender name navigation', () => {
     await expect(page).toHaveURL(new RegExp(`/senders/${XIAOMING}$`));
 
     await page.goto('/search?q=小明的發言');
-    await page.locator('a.result .sender-link').first().click();
+    await page.getByRole('list', { name: '搜尋結果' }).getByRole('link', { name: '王小明', exact: true }).first().click();
     await expect(page).toHaveURL(new RegExp(`/senders/${XIAOMING}$`));
   });
 });
@@ -100,7 +100,7 @@ test.describe('search page sender filter', () => {
     await page.goto('/search?q=私訊');
     await expect(page.locator('a.result')).toHaveCount(8);
     await page.getByLabel('寄件人', { exact: true }).fill('Bob');
-    await page.getByRole('option').filter({ hasText: 'Bob' }).getByRole('button').click();
+    await page.getByRole('option', { name: /Bob/ }).click();
     await expect(page).toHaveURL(/sender=2002/);
     await expect(page.locator('a.result')).toHaveCount(4);
     await expect(page.getByText('寄件人：Bob')).toBeVisible();
@@ -156,7 +156,7 @@ test.describe('bots', () => {
   test('sender page and chat timeline show the badge; 隱藏 bot hides bot messages', async ({ page }) => {
     await page.goto('/senders/5005');
     await expect(page.getByRole('heading', { name: /天氣小幫手/ })).toBeVisible();
-    await expect(botBadge(page.locator('h2'))).toBeVisible();
+    await expect(botBadge(page.getByRole('main').locator('header').filter({ has: page.getByRole('heading', { name: /天氣小幫手/ }) }))).toBeVisible();
 
     await page.goto('/chats/-300002');
     const bots = page.locator('article.msg', { hasText: '天氣預報播報' });
@@ -176,7 +176,7 @@ test.describe('bots', () => {
   test('search: badge on results and 隱藏 bot toggle in the URL', async ({ page }) => {
     await page.goto('/search?q=天氣預報播報');
     await expect(page.locator('a.result')).toHaveCount(3);
-    await expect(botBadge(page.locator('a.result').first())).toBeVisible();
+    await expect(botBadge(page.getByRole('list', { name: '搜尋結果' }).getByRole('listitem').first())).toBeVisible();
     await page.getByLabel('隱藏 bot').check();
     await expect(page).toHaveURL(/hide_bots=1/);
     await expect(page.getByText('找不到符合的訊息')).toBeVisible();

@@ -15,8 +15,7 @@ export function currentTheme(): Theme {
 }
 
 export function applyStoredTheme() {
-  const stored = storedTheme();
-  if (stored) document.documentElement.dataset.theme = stored;
+  document.documentElement.dataset.theme = currentTheme();
 }
 
 export function setTheme(theme: Theme) {

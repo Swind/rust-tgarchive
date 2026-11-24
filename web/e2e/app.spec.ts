@@ -7,7 +7,7 @@ test('app loads, redirects to chats and the nav works', async ({ page }) => {
   for (const [name, url] of [['搜尋', /\/search$/], ['同步', /\/sync$/], ['狀態', /\/status$/], ['對話', /\/chats$/]] as const) {
     await nav.getByRole('link', { name }).click();
     await expect(page).toHaveURL(url);
-    await expect(nav.getByRole('link', { name })).toHaveClass(/active/);
+    await expect(nav.getByRole('link', { name })).toHaveAttribute('aria-current', 'page');
   }
   await page.goto('/nope');
   await expect(page.getByText('找不到頁面')).toBeVisible();
@@ -15,24 +15,25 @@ test('app loads, redirects to chats and the nav works', async ({ page }) => {
 
 test('collector badge shows disabled with an explanatory tooltip', async ({ page }) => {
   await page.goto('/chats');
-  const badge = page.locator('.topbar .badge', { hasText: '收集器：' });
-  await expect(badge).toContainText('disabled');
+  const badge = page.getByRole('link', { name: '收集器：已停用' });
   await expect(badge).toHaveAttribute('title', /query-only/);
 });
 
 test('theme toggle persists across reload and applies dark styles', async ({ page }) => {
   await page.goto('/chats');
   const bg = () => page.evaluate(() => getComputedStyle(document.body).backgroundColor);
-  expect(await bg()).toBe('rgb(255, 255, 255)');
+  const light = await bg();
   await page.getByRole('button', { name: '切換為深色主題' }).click();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
-  expect(await bg()).toBe('rgb(22, 24, 29)');
+  const dark = await bg();
+  expect(dark).not.toBe(light);
   await page.reload();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
-  expect(await bg()).toBe('rgb(22, 24, 29)');
+  expect(await bg()).toBe(dark);
   await page.getByRole('button', { name: '切換為淺色主題' }).click();
   await page.reload();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+  expect(await bg()).toBe(light);
 });
 
 test('status page shows collector, unresolved deletions and health', async ({ page }) => {
@@ -59,8 +60,14 @@ test('unknown chat renders the API error with its request id', async ({ page }) 
 test('tracking changes in query-only mode show a friendly error and keep state', async ({ page }) => {
   await page.goto(`/chats/${CHAT.family}`);
   await expect(page.getByRole('heading', { level: 2 })).toContainText('家庭群組');
-  page.once('dialog', (d) => void d.accept());
-  await page.getByRole('button', { name: '停止收集' }).click();
+  const stop = page.getByRole('button', { name: '停止收集', exact: true });
+  await stop.click();
+  const dialog = page.getByRole('alertdialog', { name: '停止收集此對話？' });
+  await dialog.getByRole('button', { name: '取消' }).click();
+  await expect(stop).toBeFocused();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await stop.click();
+  await dialog.getByRole('button', { name: '確認停止收集' }).click();
   await expect(page.getByRole('alert')).toContainText('storage_unavailable');
   await expect(page.getByRole('button', { name: '停止收集' })).toBeVisible();
 });

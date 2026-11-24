@@ -54,6 +54,33 @@ test.describe('chat list', () => {
     await expect(page).toHaveURL(/\/chats\/-?\d+$/);
     await expect(rows(page).nth(1)).toHaveAttribute('aria-current', 'page');
   });
+
+  test('mobile opens a conversation, exposes its tools and returns to the inbox', async ({ page }) => {
+    await page.setViewportSize({ width: 360, height: 760 });
+    await page.goto('/chats');
+    const inbox = page.getByRole('complementary', { name: '對話清單' });
+    await inbox.getByRole('link', { name: /Rust 台灣社群/ }).click();
+    await expect(page).toHaveURL(new RegExp(`/chats/${CHAT.big}$`));
+    await expect(inbox).toBeHidden();
+    const timeline = page.getByRole('region', { name: '訊息時間軸' });
+    await expect(timeline).toBeVisible();
+    const dimensions = await timeline.evaluate((el) => ({
+      timelineHeight: el.clientHeight,
+      overflow: document.querySelector('main')!.scrollWidth - document.querySelector('main')!.clientWidth,
+    }));
+    expect(dimensions.timelineHeight).toBeGreaterThan(240);
+    expect(dimensions.overflow).toBeLessThanOrEqual(1);
+    const tools = page.getByRole('button', { name: '對話工具' });
+    await tools.click();
+    await expect(page.getByLabel('寄件人')).toBeVisible();
+    await tools.click();
+    await page.getByRole('button', { name: '圖片下載' }).click();
+    await expect(page.getByLabel('自動下載封存版本')).toBeVisible();
+    await page.getByRole('link', { name: '返回對話清單' }).click();
+    await expect(page).toHaveURL(/\/chats$/);
+    await expect(inbox.getByRole('link', { name: /Rust 台灣社群/ })).toBeVisible();
+    await expect(timeline).toHaveCount(0);
+  });
 });
 
 test.describe('big chat timeline', () => {
@@ -103,7 +130,7 @@ test.describe('big chat timeline', () => {
     await expect(page).toHaveURL(/deleted=1/);
     const deleted = page.locator('article.msg.deleted');
     await expect(deleted).toHaveCount(2);
-    await expect(deleted.first().locator('.badge.red')).toContainText('已刪除');
+    await expect(deleted.first().getByText(/^已刪除/)).toBeVisible();
     await expect(page.getByText('ephemeral note')).toBeVisible();
   });
 
@@ -186,7 +213,7 @@ test.describe('page scrolling', () => {
       }
       const sizes = await page.evaluate(() => {
         const doc = document.scrollingElement!;
-        const main = document.querySelector('.main')!;
+        const main = document.querySelector('main')!;
         const timeline = document.querySelector('.timeline')!;
         return {
           doc: doc.scrollHeight - doc.clientHeight,

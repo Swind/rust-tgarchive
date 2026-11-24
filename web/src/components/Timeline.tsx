@@ -1,5 +1,7 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
+import { ArrowDown, ArrowUp } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 import { api, type Message } from '../api/client';
 import { ErrorBox, Empty } from './common';
 import MessageItem from './MessageItem';
@@ -99,10 +101,10 @@ function useScrollKeeper(messages: Message[], follow: boolean, anchorId?: number
 
 function NewMessages({ onClick }: { onClick: () => void }) {
   return (
-    <div className="new-messages" role="status">
-      <button className="more" onClick={onClick}>
-        有新訊息
-      </button>
+    <div className="pointer-events-none sticky bottom-2 z-10 flex justify-center" role="status">
+      <Button className="pointer-events-auto rounded-full shadow-md" size="sm" onClick={onClick}>
+        <ArrowDown aria-hidden="true" />有新訊息
+      </Button>
     </div>
   );
 }
@@ -143,10 +145,10 @@ export function ListTimeline({ chatId, filters, chatTitle }: { chatId: number; f
   if (q.isPending) return <Empty>載入中…</Empty>;
   if (!q.data) return <ErrorBox error={q.error} />;
   return (
-    <div className="timeline" ref={ref} onScroll={onScroll} tabIndex={0} aria-label="訊息時間軸">
+    <div className="timeline archive-canvas" ref={ref} onScroll={onScroll} tabIndex={0} role="region" aria-label="訊息時間軸">
       <TopSentinel onVisible={loadOlder} disabled={!q.hasNextPage || q.isFetching} />
-      {q.isFetchingNextPage && <div className="muted center">載入較舊訊息…</div>}
-      {!q.hasNextPage && messages.length > 0 && <div className="muted center">已到最早的訊息</div>}
+      {q.isFetchingNextPage && <p className="py-2 text-center text-xs text-muted-foreground">載入較舊訊息…</p>}
+      {!q.hasNextPage && messages.length > 0 && <p className="py-2 text-center text-xs text-muted-foreground">已到最早的訊息</p>}
       {messages.length === 0 ? <Empty>沒有符合的訊息</Empty> : <Rows messages={messages} chatTitle={chatTitle} />}
       <ErrorBox error={q.error} />
       {hasNew && <NewMessages onClick={jumpToLatest} />}
@@ -256,17 +258,17 @@ export function ContextTimeline({
   };
 
   return (
-    <div className="timeline" ref={ref} onScroll={onScroll} tabIndex={0} aria-label="訊息脈絡">
+    <div className="timeline archive-canvas" ref={ref} onScroll={onScroll} tabIndex={0} role="region" aria-label="訊息脈絡">
       {hasOlder && olderCursor && (
-        <button className="more" disabled={busy} onClick={() => void load('older')}>
-          載入更早的訊息
-        </button>
+        <Button className="mx-auto mb-2 flex rounded-full" size="sm" variant="outline" disabled={busy} onClick={() => void load('older')}>
+          <ArrowUp aria-hidden="true" />載入更早的訊息
+        </Button>
       )}
       <Rows messages={messages} anchorId={data.anchor.id} chatTitle={chatTitle} />
       {hasNewer && newerCursor && (
-        <button className="more" disabled={busy} onClick={() => void load('newer')}>
-          載入較新的訊息
-        </button>
+        <Button className="mx-auto mt-3 flex rounded-full" size="sm" variant="outline" disabled={busy} onClick={() => void load('newer')}>
+          <ArrowDown aria-hidden="true" />載入較新的訊息
+        </Button>
       )}
       <ErrorBox error={err ?? ctx.error} />
     </div>

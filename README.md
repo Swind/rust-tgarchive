@@ -195,9 +195,12 @@ curl -s "http://127.0.0.1:8080/api/v1/messages/search?q=keyword"
 
 `tgarchive serve` (including `--query-only`) serves an embedded web UI (React + Vite + TypeScript) at `/`; the API remains at `/api/v1`, `/health/*` and `/openapi.*`. After starting, open <http://127.0.0.1:8080/>: conversations (timeline, infinite scroll, context view, start / stop collecting), search, sync and status. The UI is same-origin with the API and uses no external CDN or fonts; UI responses carry `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` and a CSP that allows only `self`. It is still bound to loopback only and has **no authentication**.
 
+The desktop navigation switches to a five-destination bottom bar on small screens. Conversations use a split inbox on desktop and separate list and reader views on mobile; the same chat, sender and search URLs work at both sizes.
+
 - The build output `web/dist` is **committed** and embedded into the binary by `build.rs` via `include_bytes!`, so `cargo build` does not need Node.
 - In Telegram mode, one SSE connection per tab refreshes archive views after committed changes. The latest timeline follows new messages at the bottom; while reading older messages it keeps your position and offers a new-message button. Date and context views retain their scope. Reconnect and returning to a visible tab resync the current views; sync/media progress retain their existing polling.
 - Frontend development: run `tgarchive serve` first, then `npm --prefix web ci && npm --prefix web run dev` and open <http://127.0.0.1:5173/>. Vite proxies `/api`, `/health` and `/openapi.*` to `127.0.0.1:8080`, so CORS is not needed (alternatively use `TGARCHIVE_DEV_CORS_ORIGIN`).
+- UI components: `web/components.json` configures the shadcn/ui registry for Vite and Tailwind CSS v4. Add primitives from `web/` with `npx shadcn@latest add <component>`; keep them in `src/components/ui/`, compose archive-specific views in `src/components/`, and change light/dark design tokens in `src/styles.css`.
 - Rebuild and commit: `npm --prefix web run build` (includes typecheck). After changing `openapi.yml`, run `npm --prefix web run gen:api` to regenerate `web/src/api/schema.d.ts`.
 - Checks: `npm --prefix web run typecheck`, `lint`, `test`; when `npm` is available, `scripts/check.sh` runs them and verifies that `web/dist` matches the sources.
 - The search page supports Chinese substrings (jieba words + character bigrams), a relevance / time sort switch, snippets and the index-status banner; see "Full-text search (CJK-friendly)".

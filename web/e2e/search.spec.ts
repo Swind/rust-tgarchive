@@ -116,7 +116,7 @@ test('empty hint, chat filter and deleted messages', async ({ page }) => {
   await page.getByLabel('包含已刪除').check();
   const result = page.locator('a.result');
   await expect(result).toHaveCount(1);
-  await expect(result.locator('.badge.red')).toContainText('已刪除');
+  await expect(result.getByText('已刪除', { exact: true })).toBeVisible();
   await result.click();
   await expect(page).toHaveURL(/message=60&deleted=1/);
   await expect(page.locator('article.anchor.deleted')).toBeVisible();
@@ -158,7 +158,7 @@ test('return to search preserves filters, loaded pages and scroll after leaving 
   await page.getByRole('button', { name: '載入更多', exact: true }).click();
   await expect(results).toHaveCount(60);
   await results.nth(45).scrollIntoViewIfNeeded();
-  const top = await page.locator('.main').evaluate((el) => el.scrollTop);
+  const top = await page.getByRole('main').evaluate((el) => el.scrollTop);
   expect(top).toBeGreaterThan(0);
   const url = page.url();
   await results.nth(45).click();
@@ -173,7 +173,7 @@ test('return to search preserves filters, loaded pages and scroll after leaving 
   await expect(page.getByLabel('隱藏 bot')).toBeChecked();
   await expect(page.getByRole('button', { name: '時間', exact: true })).toHaveAttribute('aria-pressed', 'true');
   await expect(results).toHaveCount(60);
-  await expect.poll(() => page.locator('.main').evaluate((el) => el.scrollTop)).toBeCloseTo(top, 0);
+  await expect.poll(() => page.getByRole('main').evaluate((el) => el.scrollTop)).toBeCloseTo(top, 0);
 });
 
 test('browser Back restores the search result scroll position', async ({ page }) => {
@@ -181,12 +181,12 @@ test('browser Back restores the search result scroll position', async ({ page })
   const results = page.locator('a.result');
   await expect(results).toHaveCount(30);
   await results.nth(20).scrollIntoViewIfNeeded();
-  const top = await page.locator('.main').evaluate((el) => el.scrollTop);
+  const top = await page.getByRole('main').evaluate((el) => el.scrollTop);
   await results.nth(20).click();
   await expect(page.locator('article.anchor')).toBeVisible();
   await page.goBack();
   await expect(results).toHaveCount(30);
-  await expect.poll(() => page.locator('.main').evaluate((el) => el.scrollTop)).toBeCloseTo(top, 0);
+  await expect.poll(() => page.getByRole('main').evaluate((el) => el.scrollTop)).toBeCloseTo(top, 0);
 });
 
 test('return to sender search restores the sender query instead of opening global search', async ({ page }) => {
@@ -225,8 +225,15 @@ test('direct chat visits do not show an unrelated search return link', async ({ 
 for (const width of [360, 768, 1400, 1600]) {
   test(`filter bar stays tidy at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 800 });
-    await page.goto('/search');
-    const bar = page.locator('.search-filters');
+    await page.goto(width < 768 ? '/search?q=kubernetes&hide_bots=1' : '/search');
+    const bar = page.getByRole('search', { name: '封存訊息搜尋' });
+    if (width < 768) {
+      await expect(bar.getByLabel('聊天室')).toBeHidden();
+      await expect(page.locator('a.result').first()).toBeInViewport();
+      await bar.getByRole('button', { name: /篩選條件.*已套用 1 項/ }).click();
+      await expect(bar.getByLabel('隱藏 bot')).toBeChecked();
+      await expect(bar.getByLabel('聊天室')).toBeVisible();
+    }
     await expect(bar).toBeVisible();
     const fits = await bar.evaluate((el) =>
       [...el.querySelectorAll('select, input, label')].every((c) => {

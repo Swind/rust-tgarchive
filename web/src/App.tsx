@@ -1,6 +1,8 @@
 import { useEffect } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { Navigate, Route, Routes } from 'react-router-dom';
+import { Link, Navigate, Route, Routes } from 'react-router-dom';
+import { Empty } from './components/common';
+import { Button } from './components/ui/button';
 import Layout from './components/Layout';
 import ChatsPage from './pages/ChatsPage';
 import SearchPage from './pages/SearchPage';
@@ -24,7 +26,7 @@ export default function App() {
         <Route path="senders/:senderId" element={<SenderPage />} />
         <Route path="sync" element={<SyncPage />} />
         <Route path="status" element={<StatusPage />} />
-        <Route path="*" element={<div className="empty">找不到頁面</div>} />
+        <Route path="*" element={<Empty>找不到頁面<Button asChild variant="outline"><Link to="/chats">返回對話清單</Link></Button></Empty>} />
       </Route>
     </Routes>
   );

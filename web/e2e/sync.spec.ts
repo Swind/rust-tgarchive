@@ -13,7 +13,8 @@ test('lists every job with its error summary and retry-after hint', async ({ pag
   await expect(job(page, 'rate_limited')).toContainText('retry after 3600 s');
   await expect(job(page, 'rate_limited')).toContainText('約 3600 秒後可重試');
   await expect(job(page, 'interrupted')).toContainText('process stopped before job completed');
-  await expect(job(page, 'succeeded')).not.toContainText('⚠️');
+  await expect(job(page, 'failed')).toContainText('錯誤摘要');
+  await expect(job(page, 'succeeded')).not.toContainText('錯誤摘要');
 });
 
 test('retry is offered for failed/interrupted chat jobs and reports a friendly error in query-only mode', async ({ page }) => {

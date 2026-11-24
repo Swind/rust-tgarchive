@@ -1,6 +1,9 @@
 import { Link, useLocation } from 'react-router-dom';
 import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Download, ExternalLink, Paperclip, RotateCw } from 'lucide-react';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { api, type Message } from '../api/client';
 import { colorIndex, initials, type GroupPos } from '../lib/bubble';
 import { formatDateTime, formatSize, formatTime } from '../lib/format';
@@ -41,28 +44,37 @@ function MediaPreview({ chatId, messageId, ordinal }: { chatId: number; messageI
       void qc.invalidateQueries({ queryKey: ['message-media', chatId, messageId] });
     },
   });
-  const retryArchive = useMutation({
-    mutationFn: () => api.archiveMedia(String(preview!.id)),
-    onSuccess: () => void qc.invalidateQueries({ queryKey: ['message-media', chatId, messageId] }),
-  });
-  return <div className="media-preview" ref={ref}>
-    {!visible || media.isPending ? <span className="muted">圖片預覽…</span> : null}
-    {preview?.state === 'succeeded' && preview.content_url && preview.content_url !== brokenPreviewUrl && <img loading="lazy" src={preview.content_url} alt="Telegram 圖片預覽" onError={() => setBrokenPreviewUrl(preview.content_url ?? null)} />}
-    {preview?.content_url && preview.content_url === brokenPreviewUrl && <span className="muted">本地預覽檔目前無法讀取</span>}
-    {preview && ['queued', 'running'].includes(preview.state) && <span className="muted">預覽{preview.state === 'queued' ? '排隊中' : '下載中'}…</span>}
-    {preview && ['failed', 'unavailable', 'interrupted'].includes(preview.state) && <button onClick={() => retry.mutate()} disabled={retry.isPending}>預覽失敗 · 重試</button>}
-    {!preview && visible && !media.isPending && <span className="muted">預覽尚未排入</span>}
-    {media.error && <span role="status" className="error">無法讀取圖片下載狀態</span>}
-    {retry.error && <span role="status" className="error">無法重試預覽下載</span>}
-    {preview && <div className="media-actions">
-      {archive?.state === 'succeeded' && archive.content_url ? <a href={archive.content_url} target="_blank" rel="noreferrer">查看封存版本</a> : null}
-      {archive && ['queued', 'running'].includes(archive.state) ? <span className="muted">封存{archive.state === 'queued' ? '排隊中' : '下載中'}…</span> : null}
-      {archive && ['failed', 'unavailable', 'interrupted'].includes(archive.state) ? <button disabled={retryArchive.isPending} onClick={() => retryArchive.mutate()}>封存失敗 · 重試</button> : null}
-      {!archive && <button disabled={archiveRequest.isPending} onClick={() => archiveRequest.mutate()}>下載封存版本</button>}
-      {archiveRequest.error && <span role="status" className="error">無法排入封存下載</span>}
-      {retryArchive.error && <span role="status" className="error">無法重試封存下載</span>}
-    </div>}
-  </div>;
+  const canRetryPreview = preview && ['failed', 'unavailable', 'interrupted'].includes(preview.state);
+  const canRetryArchive = archive && ['failed', 'unavailable', 'interrupted'].includes(archive.state);
+  return (
+    <div className="media-preview grid min-w-0 justify-items-start gap-1.5 pt-1 text-xs text-muted-foreground" ref={ref}>
+      {(!visible || media.isPending) && <span>圖片預覽…</span>}
+      {preview?.state === 'succeeded' && preview.content_url && preview.content_url !== brokenPreviewUrl && (
+        <img loading="lazy" src={preview.content_url} width={preview.width ?? undefined} height={preview.height ?? undefined}
+          alt="Telegram 圖片預覽" onError={() => setBrokenPreviewUrl(preview.content_url ?? null)} />
+      )}
+      {preview?.content_url && preview.content_url === brokenPreviewUrl && <span>本地預覽檔目前無法讀取</span>}
+      {preview && ['queued', 'running'].includes(preview.state) && <span>預覽{preview.state === 'queued' ? '排隊中' : '下載中'}…</span>}
+      {canRetryPreview && <Button size="sm" variant="outline" disabled={retry.isPending} onClick={() => retry.mutate()}><RotateCw aria-hidden="true" />預覽失敗 · 重試</Button>}
+      {!preview && visible && media.isSuccess && <span>預覽尚未排入</span>}
+      {media.error && <span role="status" className="text-destructive">無法讀取圖片下載狀態</span>}
+      {retry.error && <span role="status" className="text-destructive">無法重試預覽下載</span>}
+      {preview && (
+        <div className="flex flex-wrap items-center gap-2">
+          {archive?.state === 'succeeded' && archive.content_url && (
+            <Button size="sm" variant="outline" asChild><a href={archive.content_url} target="_blank" rel="noreferrer"><ExternalLink aria-hidden="true" />查看封存版本</a></Button>
+          )}
+          {archive && ['queued', 'running'].includes(archive.state) && <span>封存{archive.state === 'queued' ? '排隊中' : '下載中'}…</span>}
+          {(!archive || canRetryArchive) && (
+            <Button size="sm" variant="outline" disabled={archiveRequest.isPending} onClick={() => archiveRequest.mutate()}>
+              {canRetryArchive ? <><RotateCw aria-hidden="true" />封存失敗 · 重試</> : <><Download aria-hidden="true" />下載封存版本</>}
+            </Button>
+          )}
+          {archiveRequest.error && <span role="status" className="text-destructive">{canRetryArchive ? '無法重試封存下載' : '無法排入封存下載'}</span>}
+        </div>
+      )}
+    </div>
+  );
 }
 
 export function Highlighted({ text, query }: { text: string; query?: string }) {
@@ -86,14 +98,6 @@ export function senderName(m: Message, chatTitle?: string | null): string {
 export function forwardName(f: NonNullable<Message['forward']>): string {
   if (f.from_name) return f.from_name;
   return f.from_id != null ? `使用者 ${f.from_id}` : '未知來源';
-}
-
-function Avatar({ id, name }: { id: number | null | undefined; name: string }) {
-  return (
-    <div className={`avatar c${colorIndex(id)}`} role="img" aria-label={name}>
-      {initials(name)}
-    </div>
-  );
 }
 
 const SINGLE: GroupPos = { first: true, last: true };
@@ -139,7 +143,7 @@ export default function MessageItem({
     .filter(Boolean)
     .join(' ');
   const time = (
-    <span className="meta">
+    <span className="ms-auto inline-flex items-center gap-1 whitespace-nowrap text-[0.6875rem] text-muted-foreground tabular-nums">
       {m.edited_at && (
         <span title={`編輯於 ${formatDateTime(m.edited_at)}`}>（已編輯）</span>
       )}
@@ -149,9 +153,9 @@ export default function MessageItem({
     </span>
   );
   const deleted = m.is_deleted && (
-    <span className="badge red" title={m.deleted_at ? formatDateTime(m.deleted_at) : undefined}>
+    <Badge variant="outline" className="max-w-full whitespace-normal border-destructive/35 text-destructive" title={m.deleted_at ? formatDateTime(m.deleted_at) : undefined}>
       已刪除{m.deleted_at ? ` ${formatDateTime(m.deleted_at)}` : ''}
-    </span>
+    </Badge>
   );
   const nameEl = (
     <strong className="name">
@@ -162,7 +166,7 @@ export default function MessageItem({
   if (system) {
     return (
       <article id={`m-${m.id}`} className={cls} aria-current={anchor ? 'true' : undefined}>
-        <div className="bubble pill-bubble">
+        <div className="bubble">
           <header>
             {showChat && (
               <Link className="chat-title" to={`/chats/${m.chat_id}?message=${m.id}${m.is_deleted ? '&deleted=1' : ''}`}>
@@ -171,7 +175,7 @@ export default function MessageItem({
             )}
             {nameEl}
             <BotBadge isBot={m.sender?.is_bot} />
-            <span className="placeholder muted">（系統訊息或無文字內容）</span>
+            <span className="placeholder text-muted-foreground italic">（系統訊息或無文字內容）</span>
             {deleted}
             {time}
           </header>
@@ -183,7 +187,7 @@ export default function MessageItem({
   return (
     <article id={`m-${m.id}`} className={cls} aria-current={anchor ? 'true' : undefined}>
       {!self && !senderVariant && (
-        <div className="avatar-col">{pos.last && <Avatar id={id} name={name} />}</div>
+        <div className="avatar-col" aria-hidden="true">{pos.last && <span className="avatar">{initials(name)}</span>}</div>
       )}
       <div className="bubble">
         {showHead && (
@@ -194,12 +198,13 @@ export default function MessageItem({
               </Link>
             )}
             {!self && nameEl}
-            {!self && m.sender?.username && <span className="muted small username">@{m.sender.username}</span>}
+            {self && <span className="text-xs font-semibold text-primary">自己</span>}
+            {!self && m.sender?.username && <span className="wrap-anywhere text-xs text-muted-foreground">@{m.sender.username}</span>}
             <BotBadge isBot={m.sender?.is_bot} />
           </header>
         )}
         {m.forward && (
-          <p className="forward muted small">
+          <p className="my-1 border-s-2 border-primary/40 ps-2 text-xs text-muted-foreground">
             轉發自 {forwardName(m.forward)}
             {m.forward.date && <> · {formatDateTime(m.forward.date)}</>}
           </p>
@@ -210,7 +215,7 @@ export default function MessageItem({
               <>
                 <strong>{senderName(replyTo, chatTitle)}</strong>
                 <span className="reply-text">{replyTo.text || '（無文字）'}</span>
-                <span className="visually-hidden">↩ 回覆 #{m.reply_to}</span>
+                <span className="sr-only">↩ 回覆 #{m.reply_to}</span>
               </>
             ) : (
               <>↩ 回覆 #{m.reply_to}</>
@@ -218,29 +223,26 @@ export default function MessageItem({
           </Link>
         )}
         {m.text && (
-          <p className="text">
+          <p className="text my-0.5 wrap-anywhere whitespace-pre-wrap">
             <Highlighted text={m.text} query={query} />
           </p>
         )}
         {m.attachments.length > 0 && (
-          <ul className="chips">
+          <ul className="my-1 flex flex-wrap gap-1.5" aria-label="附件">
             {m.attachments.map((a, i) => (
-              <li key={i} className="chip">
-                {[a.kind, a.file_name, a.mime_type, formatSize(a.size)].filter(Boolean).join(' · ')}
+              <li className="min-w-0 max-w-full" key={`${i}:${a.kind}:${a.telegram_file_id}`} aria-label={`附件 ${i + 1}${a.file_name ? `：${a.file_name}` : ''}`}>
+                <span className="chip inline-flex max-w-full items-center gap-1 rounded-md border bg-muted/70 px-2 py-1 text-xs">
+                  <Paperclip className="size-3 shrink-0 text-muted-foreground" aria-hidden="true" />
+                  <span className="min-w-0 wrap-anywhere">{[a.kind, a.file_name, a.mime_type, formatSize(a.size)].filter(Boolean).join(' · ')}</span>
+                </span>
+                {!m.is_deleted && (a.kind === 'photo' || (a.kind === 'document' && ['image/jpeg', 'image/png', 'image/webp'].includes(a.mime_type ?? ''))) && (
+                  <MediaPreview chatId={m.chat_id} messageId={m.id} ordinal={i} />
+                )}
               </li>
             ))}
           </ul>
         )}
-        {!m.is_deleted && m.attachments.some((a) => a.kind === 'photo' || (a.kind === 'document' && ['image/jpeg', 'image/png', 'image/webp'].includes(a.mime_type ?? ''))) && (
-          <div className="media-gallery">
-            {m.attachments.map((a, i) =>
-              a.kind === 'photo' || (a.kind === 'document' && ['image/jpeg', 'image/png', 'image/webp'].includes(a.mime_type ?? ''))
-                ? <MediaPreview key={`${i}:${a.kind}:${a.telegram_file_id}`} chatId={m.chat_id} messageId={m.id} ordinal={i} />
-                : null,
-            )}
-          </div>
-        )}
-        {m.post_author && <p className="post-author muted small">— {m.post_author}</p>}
+        {m.post_author && <p className="post-author my-1 text-xs text-muted-foreground">— {m.post_author}</p>}
         <footer>
           {deleted}
           {time}

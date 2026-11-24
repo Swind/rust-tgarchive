@@ -1,19 +1,23 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
+import { ChevronDown, Info, Search } from 'lucide-react';
+import { PageHeader } from '@/components/PageHeader';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Card } from '@/components/ui/card';
+import { NativeSelectOption } from '@/components/ui/native-select';
+import { ChatFilter, CheckFilter, Choices, DateRange, SEARCH_SORTS, SearchField, SecondaryFilters } from '@/components/DiscoveryControls';
 import { api } from '../api/client';
 import { Empty, ErrorBox, useDebounced } from '../components/common';
-import BotBadge from '../components/BotBadge';
-import { Highlighted, senderName } from '../components/MessageItem';
-import SenderLink from '../components/SenderLink';
 import SenderPicker from '../components/SenderPicker';
 import SearchResultLink, { useRestoreSearchScroll } from '../components/SearchResultLink';
-import { formatDateTime, localDayToIso } from '../lib/format';
+import { localDayToIso } from '../lib/format';
 import { nextOlderCursor } from '../lib/messages';
 import { chatTitle } from './ChatsPage';
 
 type Sort = 'relevance' | 'time';
-const SORTS: [Sort, string][] = [['relevance', '相關性'], ['time', '時間']];
 
 export default function SearchPage() {
   const [params, setParams] = useSearchParams();
@@ -85,83 +89,68 @@ export default function SearchPage() {
   const singleChar = [...q].length === 1 && /\p{Script=Han}/u.test(q);
 
   return (
-    <div className="page">
-      <h2>搜尋</h2>
-      <input
-        type="search"
-        autoFocus
-        className="wide"
-        aria-label="搜尋關鍵字"
-        placeholder="輸入關鍵字（中文可搜尋詞中的部分字）"
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-      />
-      <div className="filters search-filters">
-        <select aria-label="聊天室" value={chatId} onChange={(e) => update({ chat: e.target.value })}>
-          <option value="">所有聊天室</option>
-          {chats.data?.map((c) => (
-            <option key={c.id} value={c.id}>{chatTitle(c)}</option>
-          ))}
-        </select>
-        <div className="date-range">
-          <label>從 <input type="date" value={from} onChange={(e) => update({ from: e.target.value })} /></label>
-          <label>到 <input type="date" value={to} onChange={(e) => update({ to: e.target.value })} /></label>
-        </div>
-        <label><input type="checkbox" checked={deletedBox} onChange={(e) => {
-          setDeletedBox(e.target.checked);
-          update({ include_deleted: e.target.checked ? '1' : '' });
-        }} /> 包含已刪除</label>
-      </div>
-      <div className="filters">
-        <SenderPicker value={senderId} onChange={(id) => update({ sender: id === undefined ? '' : String(id) })} />
-        <label><input type="checkbox" checked={hideBotsBox} onChange={(e) => {
-          setHideBotsBox(e.target.checked);
-          update({ hide_bots: e.target.checked ? '1' : '' });
-        }} /> 隱藏 bot</label>
-      </div>
-      <div className="sort-toggle" role="group" aria-label="排序">
-        <span className="muted small">排序</span>
-        {SORTS.map(([value, label]) => (
-          <button key={value} type="button" className="pill" aria-pressed={sort === value} onClick={() => update({ sort: value === 'time' ? 'time' : '' })}>
-            {label}
-          </button>
-        ))}
-      </div>
+    <div className="mx-auto w-full max-w-6xl space-y-6 p-4 md:p-8">
+      <PageHeader eyebrow="封存探索" title="搜尋" description="從所有聊天室找回訊息，點選結果即可查看前後對話。" />
+      <search aria-label="封存訊息搜尋">
+        <Card className="@container gap-4 p-4 sm:p-5">
+          <SearchField label="搜尋關鍵字" placeholder="輸入文字、詞彙或英文單字" value={text} onChange={setText} autoFocus />
+          <SecondaryFilters count={[chatId, senderId != null, from, to, deleted, hideBots, sort === 'time'].filter(Boolean).length}>
+            <div className="grid min-w-0 items-end gap-4 @sm:grid-cols-2 @4xl:grid-cols-[1fr_1fr_1.6fr]">
+              <ChatFilter value={chatId} onChange={(chat) => update({ chat })}>
+                {chats.data?.map((c) => <NativeSelectOption key={c.id} value={c.id}>{chatTitle(c)}</NativeSelectOption>)}
+              </ChatFilter>
+              <SenderPicker value={senderId} onChange={(id) => update({ sender: id === undefined ? '' : String(id) })} />
+              <div className="@sm:col-span-2 @4xl:col-span-1"><DateRange from={from} to={to} update={update} /></div>
+            </div>
+            <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-1 border-t pt-3">
+              <div className="flex flex-wrap items-center gap-x-5">
+                <CheckFilter label="包含已刪除" checked={deletedBox} onChange={(checked) => {
+                  setDeletedBox(checked);
+                  update({ include_deleted: checked ? '1' : '' });
+                }} />
+                <CheckFilter label="隱藏 bot" checked={hideBotsBox} onChange={(checked) => {
+                  setHideBotsBox(checked);
+                  update({ hide_bots: checked ? '1' : '' });
+                }} />
+              </div>
+              <Choices label="排序" choices={SEARCH_SORTS} value={sort} onChange={(value) => update({ sort: value === 'time' ? 'time' : '' })} />
+            </div>
+          </SecondaryFilters>
+        </Card>
+      </search>
       {index && index.state !== 'ready' && (
-        <div className="banner" role="status">
-          搜尋索引{index.state === 'rebuilding' ? '重建中' : '尚未建立或已過期'}（{index.indexed.toLocaleString()}／{index.total.toLocaleString()}）：
-          暫時改用較慢的子字串掃描，結果依時間排序。請執行 <code>tgarchive search rebuild-index</code>。
-        </div>
+        <Alert role="status">
+          <Info aria-hidden="true" /><AlertTitle>搜尋索引{index.state === 'rebuilding' ? '重建中' : '尚未建立或已過期'}</AlertTitle>
+          <AlertDescription><p>已建立 {index.indexed.toLocaleString()}／{index.total.toLocaleString()} 筆索引。暫時改用較慢的子字串掃描，結果依時間排序。請執行 <code className="break-all">tgarchive search rebuild-index</code>。</p></AlertDescription>
+        </Alert>
       )}
       {singleChar && (
-        <div className="banner" role="status">單字查詢會逐筆掃描訊息文字（較慢），結果依時間排序。</div>
+        <Alert role="status"><Info aria-hidden="true" /><AlertDescription>單字查詢會逐筆掃描訊息文字（較慢），結果依時間排序。</AlertDescription></Alert>
       )}
-      <p className="muted small">
-        全文檢索支援中文：以結巴斷詞比對詞彙，並以相鄰字元（bigram）比對任意中文子字串，例如「北咖啡」可找到「新北咖啡店」。
-        預設依相關性排序，可切換為時間排序；英文以單字前綴比對（3 字元以上，例如 benchmark 可找到 benchmarks），不分大小寫與全形／半形。
-      </p>
-      {!enabled && <Empty>輸入關鍵字開始搜尋</Empty>}
-      <ErrorBox error={results.error} />
-      {enabled && results.isPending && !results.error && <Empty>搜尋中…</Empty>}
-      {enabled && results.data && items.length === 0 && <Empty>找不到符合的訊息</Empty>}
-      <ul className="results">
-        {items.map((m) => (
-          <li key={`${m.chat_id}-${m.id}`}>
-            <SearchResultLink to={`/chats/${m.chat_id}?message=${m.id}${deleted ? '&deleted=1' : ''}`} className={`result${m.is_deleted ? ' deleted' : ''}`}>
-              <div className="muted small">
-                <strong>{titles.get(m.chat_id) ?? m.chat_id}</strong> · <SenderLink id={m.sender?.id ?? m.sender_id} inline>{senderName(m, titles.get(m.chat_id))}</SenderLink><BotBadge isBot={m.sender?.is_bot} /> · {formatDateTime(m.timestamp)}
-                {m.is_deleted && <span className="badge red">已刪除</span>}
-              </div>
-              <div className="text"><Highlighted text={m.snippet ?? m.text ?? ''} query={q} /></div>
-            </SearchResultLink>
-          </li>
-        ))}
-      </ul>
-      {results.hasNextPage && (
-        <button disabled={results.isFetchingNextPage} onClick={() => void results.fetchNextPage()}>
-          {results.isFetchingNextPage ? '載入中…' : '載入更多'}
-        </button>
-      )}
+      <section aria-labelledby="search-results-heading" className="space-y-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <h2 id="search-results-heading" className="text-lg font-semibold">搜尋結果</h2>
+          {results.data && <Badge variant="secondary" className="tabular-nums">已載入 {items.length.toLocaleString()} 則</Badge>}
+        </div>
+        {!enabled && <Empty><Search className="mx-auto mb-3 size-6" aria-hidden="true" />輸入關鍵字開始搜尋</Empty>}
+        <ErrorBox error={results.error} />
+        {enabled && results.isPending && !results.error && <Empty>搜尋中…</Empty>}
+        {enabled && results.data && items.length === 0 && <Empty>找不到符合的訊息</Empty>}
+        {items.length > 0 && <Card className="overflow-hidden py-0">
+          <ul className="divide-y" aria-label="搜尋結果">
+            {items.map((m) => <SearchResultLink key={`${m.chat_id}-${m.id}`} message={m} chatTitle={titles.get(m.chat_id)} query={q} includeDeleted={deleted} showSender />)}
+          </ul>
+        </Card>}
+        {results.hasNextPage && (
+          <Button className="w-full" variant="outline" disabled={results.isFetchingNextPage} onClick={() => void results.fetchNextPage()}>
+            <ChevronDown aria-hidden="true" />{results.isFetchingNextPage ? '載入中…' : '載入更多'}
+          </Button>
+        )}
+      </section>
+      <details className="rounded-lg border bg-muted/30 px-4 text-sm text-muted-foreground">
+        <summary className="cursor-pointer py-3 font-medium text-foreground">搜尋語法與比對方式</summary>
+        <p className="max-w-prose pb-4 leading-relaxed">中文以結巴斷詞比對詞彙，也能比對連續字元，例如「北咖啡」可找到「新北咖啡店」。英文支援至少 3 個字元的單字前綴；例如 benchmark 可找到 benchmarks，不區分大小寫與全形／半形。預設依相關性排序，也可切換為時間排序。</p>
+      </details>
     </div>
   );
 }
