@@ -12,6 +12,8 @@ pub enum ValidationError {
     EmptySearch,
     #[error("search query exceeds 4096 bytes")]
     SearchTooLong,
+    #[error("search cannot exclude more than 100 chats")]
+    TooManyExcludedChatIds,
     #[error("context size must be between 0 and 100")]
     InvalidContextSize,
 }

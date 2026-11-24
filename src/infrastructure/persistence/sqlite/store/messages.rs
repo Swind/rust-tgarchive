@@ -130,12 +130,12 @@ async fn load_messages(
 }
 
 /// Text-search restrictions added to the message listing query.
-#[derive(Default)]
 struct SearchSpec {
     /// FTS5 `MATCH` expression (index must be ready).
     fts: Option<String>,
     /// Substrings `m.text` must contain.
     like_terms: Vec<String>,
+    excluded_chat_ids: Vec<i64>,
     /// Relevance paging: skip this many results and order by rank (FTS) or newest first (LIKE)
     /// instead of using keyset cursors.
     offset: Option<u64>,
@@ -204,6 +204,14 @@ async fn list_messages(
         query.push(" AND m.timestamp<").push_bind(ceil_seconds(to)?);
     }
     if let Some(spec) = search {
+        if !spec.excluded_chat_ids.is_empty() {
+            query.push(" AND m.chat_id NOT IN (");
+            let mut ids = query.separated(", ");
+            for &id in &spec.excluded_chat_ids {
+                ids.push_bind(id);
+            }
+            ids.push_unseparated(")");
+        }
         if let Some(expression) = &spec.fts {
             query.push(" AND messages_fts MATCH ").push_bind(expression);
         }
@@ -345,19 +353,17 @@ impl MessageRepository for SqliteStore {
         let relevance = query.sort == crate::application::SearchSort::Relevance;
         let mut tx = self.pool.begin().await?;
         let ready = read_state(&mut tx).await?.1 == crate::application::SearchIndexState::Ready;
-        let spec = if ready {
-            SearchSpec {
-                fts: plan.fts.clone(),
-                like_terms: plan.like_terms.clone(),
-                offset: relevance.then_some(query.offset),
-            }
+        let (fts, like_terms) = if ready {
+            (plan.fts, plan.like_terms)
         } else {
             // Index missing, outdated or being rebuilt: substring scan over the source text.
-            SearchSpec {
-                fts: None,
-                like_terms: plan.fallback_terms.clone(),
-                offset: relevance.then_some(query.offset),
-            }
+            (None, plan.fallback_terms)
+        };
+        let spec = SearchSpec {
+            fts,
+            like_terms,
+            excluded_chat_ids: query.excluded_chat_ids,
+            offset: relevance.then_some(query.offset),
         };
         let mut page = list_messages(
             &mut tx,

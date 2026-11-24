@@ -13,6 +13,24 @@ test('English token: results across chats, highlighted, click opens context', as
   await expect(page.locator('article.anchor')).toContainText('kubernetes');
 });
 
+test('excluding sources applies across reloads and can be undone', async ({ page }) => {
+  await page.goto('/search?q=kubernetes');
+  const results = page.locator('a.result');
+  await expect(results).toHaveCount(15);
+  await page.getByRole('button', { name: '排除來源 Daily News 每日快訊' }).first().click();
+  await expect(results).toHaveCount(3);
+  await expect(results.filter({ hasText: 'Daily News' })).toHaveCount(0);
+  await page.reload();
+  await expect(results).toHaveCount(3);
+  await page.getByLabel('排除來源（可複選）').selectOption(String(CHAT.big));
+  await expect(page.getByText('找不到符合的訊息')).toBeVisible();
+  await page.getByRole('button', { name: '取消排除 Daily News 每日快訊' }).click();
+  await expect(results).toHaveCount(12);
+  await page.getByRole('button', { name: '取消排除 Rust 台灣社群' }).click();
+  await expect(results).toHaveCount(15);
+  await expect(page).not.toHaveURL(/exclude_chat_ids/);
+});
+
 test('Chinese words and substrings are found (jieba words + character bigrams)', async ({ page }) => {
   await page.goto('/search');
   await box(page).fill('測試關鍵字');

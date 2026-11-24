@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 pub(super) const MAX_SEARCH_LENGTH: usize = 4096;
+pub const MAX_EXCLUDED_CHAT_IDS: usize = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "u16", into = "u16")]
@@ -143,6 +144,8 @@ pub enum SearchSort {
 pub struct SearchMessagesQuery {
     pub text: String,
     pub filters: MessageFilters,
+    /// Marked chat IDs to omit from search results in addition to the other filters.
+    pub excluded_chat_ids: Vec<i64>,
     /// Keyset cursor; only valid with [`SearchSort::Time`].
     pub before: Option<MessageCursor>,
     /// Keyset cursor; only valid with [`SearchSort::Time`].
@@ -156,6 +159,9 @@ pub struct SearchMessagesQuery {
 impl SearchMessagesQuery {
     pub fn validate(&self) -> Result<(), ValidationError> {
         self.filters.time_range.validate()?;
+        if self.excluded_chat_ids.len() > MAX_EXCLUDED_CHAT_IDS {
+            return Err(ValidationError::TooManyExcludedChatIds);
+        }
         if self.text.trim().is_empty() {
             return Err(ValidationError::EmptySearch);
         }

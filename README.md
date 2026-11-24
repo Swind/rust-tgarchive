@@ -204,6 +204,7 @@ The desktop navigation switches to a five-destination bottom bar on small screen
 - Rebuild and commit: `npm --prefix web run build` (includes typecheck). After changing `openapi.yml`, run `npm --prefix web run gen:api` to regenerate `web/src/api/schema.d.ts`.
 - Checks: `npm --prefix web run typecheck`, `lint`, `test`; when `npm` is available, `scripts/check.sh` runs them and verifies that `web/dist` matches the sources.
 - The search page supports Chinese substrings (jieba words + character bigrams), a relevance / time sort switch, snippets and the index-status banner; see "Full-text search (CJK-friendly)".
+- To hide a source across all pages of a global search, choose **排除此來源** on a result or add channels/chats under **排除來源**. Remove an exclusion using its chip. Exclusions travel with the search URL, not with the archive or collection settings. The REST search endpoint accepts `exclude_chat_ids` as a comma-separated list of up to 100 signed chat IDs.
 
 ## REST and OpenAPI
 

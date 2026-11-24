@@ -847,6 +847,12 @@ paths:
         schema:
           type: integer
           format: int64
+      - name: exclude_chat_ids
+        in: query
+        description: Comma-separated signed chat IDs to exclude (at most 100); omit for no exclusions.
+        required: false
+        schema:
+          type: string
       - name: sender_id
         in: query
         required: false

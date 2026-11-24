@@ -269,6 +269,7 @@ fn query(
     SearchMessagesQuery {
         text: w.text.to_owned(),
         filters: w.filter.engine(),
+        excluded_chat_ids: Vec::new(),
         before,
         after: None,
         page_size: PageSize::new(page).unwrap(),

@@ -3,6 +3,7 @@ import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { ChevronRight, MessageSquare } from 'lucide-react';
 import type { Message } from '@/api/client';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { formatDateTime } from '@/lib/format';
 import BotBadge from './BotBadge';
 import { Highlighted, senderName } from './MessageItem';
@@ -29,8 +30,8 @@ export function useRestoreSearchScroll(ready: boolean) {
   }, [ready, location.key, location.state]);
 }
 
-export default function SearchResultLink({ message: m, query, chatTitle, includeDeleted, showSender }: {
-  message: Message; query: string; chatTitle?: string; includeDeleted: boolean; showSender?: boolean;
+export default function SearchResultLink({ message: m, query, chatTitle, includeDeleted, showSender, onExclude }: {
+  message: Message; query: string; chatTitle?: string; includeDeleted: boolean; showSender?: boolean; onExclude?: () => void;
 }) {
   const location = useLocation();
   const navigate = useNavigate();
@@ -61,6 +62,7 @@ export default function SearchResultLink({ message: m, query, chatTitle, include
       {showSender && <div className="flex min-w-0 flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
         <span className="relative z-1 min-w-0 break-all"><SenderLink id={m.sender?.id ?? m.sender_id}>{senderName(m, chatTitle)}</SenderLink></span>
         <BotBadge isBot={m.sender?.is_bot} />
+        {onExclude && <Button type="button" variant="ghost" size="sm" className="relative z-1 ms-auto" aria-label={`排除來源 ${chatTitle ?? m.chat_id}`} onClick={onExclude}>排除此來源</Button>}
       </div>}
     </li>
   );

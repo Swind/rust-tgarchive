@@ -257,6 +257,7 @@ fn search_query(text: &str) -> SearchMessagesQuery {
     SearchMessagesQuery {
         text: text.into(),
         filters: list_query().filters,
+        excluded_chat_ids: Vec::new(),
         before: None,
         after: None,
         page_size: PageSize::DEFAULT,

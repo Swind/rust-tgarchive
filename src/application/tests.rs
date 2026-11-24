@@ -68,6 +68,7 @@ fn page_size_and_query_boundaries_are_validated() {
     let too_long = SearchMessagesQuery {
         text: "a".repeat(MAX_SEARCH_LENGTH + 1),
         filters: filters(),
+        excluded_chat_ids: Vec::new(),
         before: None,
         after: None,
         page_size: PageSize::DEFAULT,
@@ -80,6 +81,17 @@ fn page_size_and_query_boundaries_are_validated() {
         ..too_long
     };
     assert_eq!(punctuation.validate(), Err(ValidationError::EmptySearch));
+    let mut excluded = SearchMessagesQuery {
+        text: "coffee".into(),
+        excluded_chat_ids: (1..=100).collect(),
+        ..punctuation
+    };
+    assert_eq!(excluded.validate(), Ok(()));
+    excluded.excluded_chat_ids.push(101);
+    assert_eq!(
+        excluded.validate(),
+        Err(ValidationError::TooManyExcludedChatIds)
+    );
 }
 
 #[test]

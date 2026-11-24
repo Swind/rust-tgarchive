@@ -32,6 +32,8 @@ pub(in crate::interface::rest) struct MessageQuery {
 pub(in crate::interface::rest) struct SearchQuery {
     pub(super) q: String,
     pub(super) chat_id: Option<i64>,
+    /// Comma-separated signed chat IDs to exclude (at most 100); omit for no exclusions.
+    pub(super) exclude_chat_ids: Option<String>,
     pub(super) sender_id: Option<i64>,
     /// Exact channel post signature.
     pub(super) post_author: Option<String>,
@@ -116,9 +118,26 @@ pub(in crate::interface::rest) fn build_search_query(
             (None, None, offset)
         }
     };
+    let mut excluded_chat_ids = Vec::new();
+    if let Some(ids) = query.exclude_chat_ids {
+        for token in ids.split(',') {
+            if excluded_chat_ids.len() == crate::application::MAX_EXCLUDED_CHAT_IDS {
+                return Err(ApiError::malformed(request_id));
+            }
+            let id = token
+                .parse::<i64>()
+                .ok()
+                .and_then(|id| ChatId::from_marked(id).ok())
+                .ok_or_else(|| ApiError::malformed(request_id.clone()))?;
+            excluded_chat_ids.push(id.get());
+        }
+        excluded_chat_ids.sort_unstable();
+        excluded_chat_ids.dedup();
+    }
     let result = SearchMessagesQuery {
         text: query.q,
         filters,
+        excluded_chat_ids,
         before,
         after,
         page_size,

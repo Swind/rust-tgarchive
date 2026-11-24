@@ -109,6 +109,9 @@ impl ApiError {
                     crate::application::ValidationError::InvalidTimeRange => "invalid_time_range",
                     crate::application::ValidationError::EmptySearch => "empty_search",
                     crate::application::ValidationError::SearchTooLong => "search_too_long",
+                    crate::application::ValidationError::TooManyExcludedChatIds => {
+                        return Self::malformed(request_id);
+                    }
                     crate::application::ValidationError::InvalidContextSize => {
                         "invalid_context_size"
                     }

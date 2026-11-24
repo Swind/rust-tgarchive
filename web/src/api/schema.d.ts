@@ -1712,6 +1712,8 @@ export interface operations {
             query: {
                 q: string;
                 chat_id?: number;
+                /** @description Comma-separated signed chat IDs to exclude (at most 100); omit for no exclusions. */
+                exclude_chat_ids?: string;
                 sender_id?: number;
                 /** @description Exact channel post signature. */
                 post_author?: string;

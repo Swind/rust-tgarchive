@@ -94,6 +94,7 @@ fn query(text: &str) -> SearchMessagesQuery {
     SearchMessagesQuery {
         text: text.into(),
         filters: filters(),
+        excluded_chat_ids: Vec::new(),
         before: None,
         after: None,
         page_size: PageSize::new(100).unwrap(),
@@ -540,6 +541,43 @@ async fn relevance_pagination_has_no_duplicates_or_gaps() {
 }
 
 #[tokio::test]
+async fn chat_exclusions_apply_before_search_pagination() {
+    let (_dir, store, _) = store().await;
+    add(
+        &store,
+        vec![
+            message(-10, 1, "台北咖啡"),
+            message(20, 2, "台北咖啡"),
+            message(30, 3, "台北咖啡"),
+            message(40, 4, "台北咖啡"),
+            message(-10, 5, "台北咖啡"),
+        ],
+    )
+    .await;
+    for sort in [SearchSort::Relevance, SearchSort::Time] {
+        for text in ["台北咖啡", "北"] {
+            let mut q = query(text);
+            q.excluded_chat_ids = vec![-10, 30];
+            q.sort = sort;
+            q.page_size = PageSize::new(1).unwrap();
+            let first = store.search(q.clone()).await.unwrap();
+            assert!(first.has_more);
+            assert_eq!(first.items.len(), 1);
+            match sort {
+                SearchSort::Relevance => q.offset = first.next_offset.unwrap(),
+                SearchSort::Time => q.before = Some(first.next_cursor.unwrap()),
+            }
+            let second = store.search(q).await.unwrap();
+            assert!(!second.has_more);
+            assert_eq!(second.items.len(), 1);
+            let mut seen = [first.items[0].id.get(), second.items[0].id.get()];
+            seen.sort_unstable();
+            assert_eq!(seen, [2, 4], "{sort:?} {text}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn filters_work_for_both_sorts_and_like_paths() {
     let (_dir, store, _) = store().await;
     let mut a = message(10, 1, "台北咖啡");
@@ -661,7 +699,11 @@ async fn not_ready_index_falls_back_to_like_and_rebuild_restores_search() {
 #[tokio::test]
 async fn rebuilding_state_uses_like_fallback() {
     let (_dir, store, url) = store().await;
-    add(&store, vec![message(10, 1, "台北咖啡")]).await;
+    add(
+        &store,
+        vec![message(10, 1, "台北咖啡"), message(20, 2, "台北咖啡")],
+    )
+    .await;
     let pool = raw(&url).await;
     sqlx::query("UPDATE app_metadata SET value='rebuilding' WHERE key='search_index_state'")
         .execute(&pool)
@@ -669,7 +711,10 @@ async fn rebuilding_state_uses_like_fallback() {
         .unwrap();
     let status = store.search_index_status().await.unwrap();
     assert_eq!(status.state, SearchIndexState::Rebuilding);
-    assert_eq!(ids(&store, "台北咖啡").await, [1]);
+    assert_eq!(ids(&store, "台北咖啡").await, [1, 2]);
+    let mut q = query("台北咖啡");
+    q.excluded_chat_ids = vec![20];
+    assert_eq!(ids_of(store.search(q).await.unwrap()), [1]);
 }
 
 #[tokio::test]

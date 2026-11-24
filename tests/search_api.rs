@@ -48,11 +48,11 @@ async fn get(app: &axum::Router, uri: &str) -> (StatusCode, Value) {
     )
 }
 
-async fn seed(store: &SqliteStore, texts: &[&str]) {
-    let chat_id = ChatId::from_telegram(ChatKind::Group, 5).unwrap();
+async fn seed(store: &SqliteStore, kind: ChatKind, raw_id: i64, texts: &[&str]) {
+    let chat_id = ChatId::from_telegram(kind, raw_id).unwrap();
     let chat = Chat {
         id: chat_id,
-        kind: ChatKind::Group,
+        kind,
         title: Some("測試群組".into()),
         username: None,
         tracked: false,
@@ -99,7 +99,7 @@ async fn rest_search_sorts_snippets_cursors_and_status() {
         .map(|n| format!("第{n}則 今天去台北喝咖啡，{}", "很好喝".repeat(n % 4)))
         .collect();
     let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
-    seed(&store, &refs).await;
+    seed(&store, ChatKind::Group, 5, &refs).await;
     let app = router(Arc::new(Application::new(
         store.clone(),
         store.clone(),
@@ -196,6 +196,58 @@ async fn rest_search_sorts_snippets_cursors_and_status() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(page["items"].as_array().unwrap().len(), 9);
     assert!(page["items"][0]["snippet"].as_str().unwrap().contains('北'));
+}
+
+#[tokio::test]
+async fn rest_search_excludes_multiple_chats_before_paging() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("sqlite://{}", dir.path().join("archive.db").display());
+    let store = Arc::new(SqliteStore::connect(&url).await.unwrap());
+    for (kind, id) in [
+        (ChatKind::Group, 5),
+        (ChatKind::Private, 6),
+        (ChatKind::Group, 7),
+    ] {
+        seed(&store, kind, id, &["coffee", "coffee"]).await;
+    }
+    let app = router(Arc::new(Application::new(
+        store.clone(),
+        store.clone(),
+        store.clone(),
+        store,
+        None,
+        ComponentStatus::new(ComponentState::Running, None),
+    )));
+    let search = "/api/v1/messages/search?q=coffee";
+    for sort in ["time", "relevance"] {
+        let uri = format!("{search}&sort={sort}&limit=1&exclude_chat_ids=6,-5,6");
+        let (status, page) = get(&app, &uri).await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        assert_eq!(page["items"][0]["chat_id"], -7);
+        let cursor = page["next_cursor"].as_str().unwrap();
+        let (status, next) = get(&app, &format!("{uri}&before={cursor}")).await;
+        assert_eq!(status, StatusCode::OK, "{next}");
+        assert_eq!(next["items"][0]["chat_id"], -7);
+        assert_ne!(next["items"][0]["id"], page["items"][0]["id"]);
+        assert!(next["next_cursor"].is_null());
+    }
+
+    let max = ["6"; 100].join(",");
+    let (status, _) = get(&app, &format!("{search}&exclude_chat_ids={max}")).await;
+    assert_eq!(status, StatusCode::OK);
+    for invalid in [
+        "",
+        "6,",
+        "6,,-5",
+        "bad",
+        "0",
+        "9223372036854775808",
+        &format!("{max},6"),
+    ] {
+        let (status, body) = get(&app, &format!("{search}&exclude_chat_ids={invalid}")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{invalid}: {body}");
+        assert_eq!(body["error"]["code"], "malformed_request");
+    }
 }
 
 fn run(url: &str, args: &[&str]) -> std::process::Output {

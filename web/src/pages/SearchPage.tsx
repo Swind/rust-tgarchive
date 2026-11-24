@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
-import { ChevronDown, Info, Search } from 'lucide-react';
+import { ChevronDown, Info, Search, X } from 'lucide-react';
 import { PageHeader } from '@/components/PageHeader';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
-import { NativeSelectOption } from '@/components/ui/native-select';
+import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
+import { Label } from '@/components/ui/label';
 import { ChatFilter, CheckFilter, Choices, DateRange, SEARCH_SORTS, SearchField, SecondaryFilters } from '@/components/DiscoveryControls';
 import { api } from '../api/client';
 import { Empty, ErrorBox, useDebounced } from '../components/common';
@@ -23,6 +24,8 @@ export default function SearchPage() {
   const [params, setParams] = useSearchParams();
   const q = (params.get('q') ?? '').trim();
   const chatId = params.get('chat') ?? '';
+  const excluded = [...new Set((params.get('exclude_chat_ids') ?? '').split(',').filter(Boolean))].sort();
+  const exclusionParam = excluded.join(',');
   const senderParam = params.get('sender') ?? '';
   const senderId = /^-?\d+$/.test(senderParam) ? Number(senderParam) : undefined;
   const from = params.get('from') ?? '';
@@ -62,15 +65,20 @@ export default function SearchPage() {
 
   const chats = useQuery({ queryKey: ['chats', 'title'], queryFn: () => api.chats('title') });
   const titles = useMemo(() => new Map((chats.data ?? []).map((c) => [c.id, chatTitle(c)])), [chats.data]);
+  function excludeChat(id: string) {
+    if (!id || excluded.includes(id) || excluded.length >= 100) return;
+    update({ exclude_chat_ids: [...excluded, id].sort().join(',') });
+  }
 
   const results = useInfiniteQuery({
-    queryKey: ['search', q, chatId, senderId, from, to, deleted, hideBots, sort],
+    queryKey: ['search', q, chatId, senderId, from, to, deleted, hideBots, sort, exclusionParam],
     enabled,
     initialPageParam: undefined as string | undefined,
     queryFn: ({ pageParam }) =>
       api.search({
         q,
         chat_id: chatId || undefined,
+        exclude_chat_ids: exclusionParam || undefined,
         sender_id: senderId,
         from: localDayToIso(from, false),
         to: localDayToIso(to, true),
@@ -94,13 +102,34 @@ export default function SearchPage() {
       <search aria-label="封存訊息搜尋">
         <Card className="@container gap-4 p-4 sm:p-5">
           <SearchField label="搜尋關鍵字" placeholder="輸入文字、詞彙或英文單字" value={text} onChange={setText} autoFocus />
-          <SecondaryFilters count={[chatId, senderId != null, from, to, deleted, hideBots, sort === 'time'].filter(Boolean).length}>
+          {excluded.length > 0 && (
+            <div className="flex flex-wrap items-center gap-2" role="group" aria-label="已排除的來源">
+              <span className="text-sm text-muted-foreground">已排除</span>
+              {excluded.map((id) => {
+                const title = titles.get(Number(id)) ?? id;
+                return <Button key={id} type="button" size="sm" variant="secondary" aria-label={`取消排除 ${title}`}
+                  onClick={() => update({ exclude_chat_ids: excluded.filter((v) => v !== id).join(',') })}>
+                  <span className="max-w-48 truncate">{title}</span><X aria-hidden="true" />
+                </Button>;
+              })}
+              {excluded.length > 1 && <Button type="button" size="sm" variant="ghost" onClick={() => update({ exclude_chat_ids: '' })}>清除全部排除</Button>}
+            </div>
+          )}
+          <SecondaryFilters count={[chatId, senderId != null, from, to, deleted, hideBots, sort === 'time', exclusionParam].filter(Boolean).length}>
             <div className="grid min-w-0 items-end gap-4 @sm:grid-cols-2 @4xl:grid-cols-[1fr_1fr_1.6fr]">
-              <ChatFilter value={chatId} onChange={(chat) => update({ chat })}>
+              <ChatFilter value={chatId} onChange={(chat) => update({ chat, exclude_chat_ids: excluded.filter((id) => id !== chat).join(',') })}>
                 {chats.data?.map((c) => <NativeSelectOption key={c.id} value={c.id}>{chatTitle(c)}</NativeSelectOption>)}
               </ChatFilter>
               <SenderPicker value={senderId} onChange={(id) => update({ sender: id === undefined ? '' : String(id) })} />
               <div className="@sm:col-span-2 @4xl:col-span-1"><DateRange from={from} to={to} update={update} /></div>
+            </div>
+            <div className="grid min-w-0 gap-2 [&>[data-slot=native-select-wrapper]]:max-w-full">
+              <Label htmlFor="exclude-source">排除來源（可複選）</Label>
+              <NativeSelect id="exclude-source" value="" disabled={excluded.length >= 100} onChange={(e) => excludeChat(e.target.value)}>
+                <NativeSelectOption value="">{excluded.length >= 100 ? '最多排除 100 個來源' : '選擇要排除的頻道或聊天室'}</NativeSelectOption>
+                {chats.data?.filter((c) => String(c.id) !== chatId && !excluded.includes(String(c.id))).map((c) =>
+                  <NativeSelectOption key={c.id} value={c.id}>{chatTitle(c)}</NativeSelectOption>)}
+              </NativeSelect>
             </div>
             <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-1 border-t pt-3">
               <div className="flex flex-wrap items-center gap-x-5">
@@ -138,7 +167,8 @@ export default function SearchPage() {
         {enabled && results.data && items.length === 0 && <Empty>找不到符合的訊息</Empty>}
         {items.length > 0 && <Card className="overflow-hidden py-0">
           <ul className="divide-y" aria-label="搜尋結果">
-            {items.map((m) => <SearchResultLink key={`${m.chat_id}-${m.id}`} message={m} chatTitle={titles.get(m.chat_id)} query={q} includeDeleted={deleted} showSender />)}
+            {items.map((m) => <SearchResultLink key={`${m.chat_id}-${m.id}`} message={m} chatTitle={titles.get(m.chat_id)} query={q} includeDeleted={deleted} showSender
+              onExclude={!chatId && excluded.length < 100 ? () => excludeChat(String(m.chat_id)) : undefined} />)}
           </ul>
         </Card>}
         {results.hasNextPage && (
