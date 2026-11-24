@@ -1,5 +1,18 @@
 # syntax=docker/dockerfile:1
-FROM rust:1.98.1-bookworm AS builder
+FROM --platform=$BUILDPLATFORM rust:1.98.1-bookworm AS builder
+ARG TARGETARCH
+ARG BUILDARCH
+RUN set -eu; \
+    case "$TARGETARCH" in \
+      amd64) arch=x86_64 ;; arm64) arch=aarch64 ;; *) exit 1 ;; \
+    esac; \
+    echo "$arch-unknown-linux-gnu" > /rust-target; \
+    if [ "$TARGETARCH" != "$BUILDARCH" ]; then \
+      apt-get update; \
+      apt-get install -y --no-install-recommends "gcc-$arch-linux-gnu" "libc6-dev-$TARGETARCH-cross"; \
+      rm -rf /var/lib/apt/lists/*; \
+    fi; \
+    rustup target add "$(cat /rust-target)"
 WORKDIR /src
 # rust-toolchain.toml is deliberately not copied: the image already ships the pinned toolchain.
 COPY Cargo.toml Cargo.lock build.rs ./
@@ -9,8 +22,14 @@ COPY web/dist ./web/dist
 COPY src ./src
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked --bin tgarchive \
-    && install -D -s target/release/tgarchive /out/tgarchive \
+    set -eu; target=$(cat /rust-target); \
+    if [ "$TARGETARCH" != "$BUILDARCH" ]; then \
+      prefix="${target%-unknown-linux-gnu}-linux-gnu"; \
+      export "CARGO_TARGET_$(echo "$target" | tr 'a-z-' 'A-Z_')_LINKER=$prefix-gcc" \
+             "CC_$(echo "$target" | tr '-' '_')=$prefix-gcc"; \
+    fi; \
+    CARGO_PROFILE_RELEASE_STRIP=symbols cargo build --target "$target" --release --locked --bin tgarchive \
+    && install -D "target/$target/release/tgarchive" /out/tgarchive \
     && mkdir /out/data
 
 FROM gcr.io/distroless/cc-debian12:nonroot
