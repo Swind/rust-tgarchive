@@ -41,14 +41,14 @@
     box-shadow: 0 1px 2px rgb(0 0 0 / 4%);
   }
 
-  .msg.c0 { --sender-hue: #ab4545; }
-  .msg.c1 { --sender-hue: #b5662d; }
-  .msg.c2 { --sender-hue: #a38b38; }
-  .msg.c3 { --sender-hue: #408863; }
-  .msg.c4 { --sender-hue: #258d97; }
-  .msg.c5 { --sender-hue: #4e75b8; }
-  .msg.c6 { --sender-hue: #815cb4; }
-  .msg.c7 { --sender-hue: #ac5a86; }
+  .msg.c0 { --sender-hue: #444; }
+  .msg.c1 { --sender-hue: #555; }
+  .msg.c2 { --sender-hue: #666; }
+  .msg.c3 { --sender-hue: #777; }
+  .msg.c4 { --sender-hue: #888; }
+  .msg.c5 { --sender-hue: #999; }
+  .msg.c6 { --sender-hue: #aaa; }
+  .msg.c7 { --sender-hue: #bbb; }
 
   .msg {
     --avatar-size: clamp(1.75rem, 3vw, 2.25rem);

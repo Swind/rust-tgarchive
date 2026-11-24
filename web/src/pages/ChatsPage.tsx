@@ -18,12 +18,6 @@ import '../chat.css';
 export const chatTitle = (c: Chat) => c.title || (c.username ? `@${c.username}` : String(c.id));
 
 const glyphs = { channel: Radio, supergroup: Hash, group: Users, private: MessageCircle } as const;
-const kindColors = {
-  channel: 'bg-amber-500/12 text-amber-800 dark:text-amber-300',
-  supergroup: 'bg-primary/10 text-primary',
-  group: 'bg-violet-500/12 text-violet-700 dark:text-violet-300',
-  private: 'bg-sky-500/12 text-sky-700 dark:text-sky-300',
-} as const;
 
 function ArchiveOverview({ chats }: { chats?: Chat[] }) {
   return (
@@ -149,7 +143,7 @@ export default function ChatsPage() {
                 <li key={c.id}>
                   <Link to={`/chats/${c.id}`} aria-current={c.id === id ? 'page' : undefined}
                     className="flex min-w-0 items-center gap-3 rounded-lg border border-transparent px-2.5 py-3 hover:bg-muted/70 focus-visible:outline-2 focus-visible:outline-ring aria-[current=page]:border-primary/20 aria-[current=page]:bg-primary/8">
-                    <span className={`flex size-10 shrink-0 items-center justify-center rounded-xl ${kindColors[c.kind]}`} aria-hidden="true">
+                    <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-muted text-foreground" aria-hidden="true">
                       <Glyph className="size-4.5" aria-hidden="true" />
                     </span>
                     <span className="min-w-0 flex-1">

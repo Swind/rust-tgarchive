@@ -27,7 +27,7 @@ function CollectorBadge() {
   return (
     <Badge variant="outline" asChild>
       <Link to="/status" title={title} className="min-h-8 gap-2 px-3">
-        <span aria-hidden="true" className={`size-2 rounded-full ${error || state === 'failed' ? 'bg-destructive' : state === 'running' ? 'bg-emerald-600' : state === 'disabled' || !state ? 'bg-muted-foreground' : 'bg-amber-500'}`} />
+        <span aria-hidden="true" className={`size-2 rounded-full border border-current ${state === 'disabled' && !error ? '' : 'bg-current'}`} />
         收集器：{error ? '無法取得' : state ? (collectorStates[state] ?? state) : '載入中'}
       </Link>
     </Badge>

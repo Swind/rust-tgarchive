@@ -48,10 +48,10 @@ const JOB_LABEL: Record<string, string> = {
 const JOB_TONE: Record<string, string> = {
   queued: 'text-primary',
   running: 'bg-accent text-accent-foreground',
-  succeeded: 'text-emerald-700 dark:text-emerald-300',
-  interrupted: 'text-amber-800 dark:text-amber-300',
-  failed: 'text-destructive',
-  rate_limited: 'text-amber-800 dark:text-amber-300',
+  succeeded: 'font-semibold',
+  interrupted: 'border-dashed',
+  failed: 'border-foreground font-bold',
+  rate_limited: 'border-dashed',
 };
 
 export const JobBadge = ({ state }: { state: string }) => (
