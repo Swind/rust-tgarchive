@@ -725,6 +725,8 @@ export interface components {
              * @description Telegram forum topic ID, or null for non-forum messages and unclassified history.
              */
             topic_id?: number | null;
+            /** @description Archived title of this topic in the same chat, including inactive topics; null when unknown. */
+            topic_title?: string | null;
         };
         MessagePageDto: {
             has_more: boolean;
@@ -1169,6 +1171,8 @@ export interface operations {
         parameters: {
             query?: {
                 chat_id?: number;
+                /** @description Restrict results to this forum topic. Requires a chat ID in the path or query. */
+                topic_id?: number;
                 sender_id?: number;
                 /** @description Exact channel post signature. */
                 post_author?: string;
@@ -1854,6 +1858,8 @@ export interface operations {
         parameters: {
             query?: {
                 chat_id?: number;
+                /** @description Restrict results to this forum topic. Requires a chat ID in the path or query. */
+                topic_id?: number;
                 sender_id?: number;
                 /** @description Exact channel post signature. */
                 post_author?: string;
@@ -1912,6 +1918,8 @@ export interface operations {
             query: {
                 q: string;
                 chat_id?: number;
+                /** @description Restrict results to this forum topic. Requires an explicit `chat_id`. */
+                topic_id?: number;
                 /** @description Restrict results to this saved search group. An empty group matches nothing. */
                 group_id?: number;
                 /** @description Comma-separated signed chat IDs to exclude (at most 100); omit for no exclusions. */

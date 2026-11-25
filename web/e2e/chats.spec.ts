@@ -73,6 +73,7 @@ test.describe('chat list', () => {
     const tools = page.getByRole('button', { name: '對話工具' });
     await tools.click();
     await expect(page.getByLabel('寄件人')).toBeVisible();
+    await expect(page.getByLabel('話題', { exact: true })).toBeVisible();
     await tools.click();
     await page.getByRole('button', { name: '圖片下載' }).click();
     await expect(page.getByLabel('自動下載封存版本')).toBeVisible();
@@ -194,6 +195,52 @@ test.describe('big chat timeline', () => {
     const names = await articles(page).locator('header strong').allTextContents();
     expect(names.length).toBeGreaterThan(0);
     expect(new Set(names)).toEqual(new Set(['Bob']));
+  });
+
+  test('topic badges and the topic dropdown filter the whole timeline', async ({ page }) => {
+    await page.goto(url);
+    const topics = page.getByLabel('話題', { exact: true });
+    const badge = page.locator('#m-250').getByRole('link', { name: '依話題篩選：群友聊天' });
+    await expect(badge).toHaveText('群友聊天');
+    await expect(page.locator('#m-260')).toBeVisible();
+    await expect(page.locator('#m-260').getByRole('link', { name: /^依話題篩選/ })).toHaveCount(0);
+
+    await badge.click();
+    await expect(page).toHaveURL(`${url}?topic_id=22`);
+    await expect(topics).toHaveValue('22');
+    await expect(articles(page)).toHaveCount(2);
+    await expect(articles(page).first()).toHaveAttribute('id', 'm-50');
+    await expect(articles(page).last()).toHaveAttribute('id', 'm-250');
+
+    await topics.selectOption({ label: '所有話題' });
+    await expect(page).toHaveURL(url);
+    await expect(page.locator('#m-260')).toBeVisible();
+    await topics.selectOption({ label: '每日班表' });
+    await expect(page).toHaveURL(`${url}?topic_id=35`);
+    await page.reload();
+    await expect(topics).toHaveValue('35');
+    await expect(articles(page)).toHaveCount(1);
+    await expect(articles(page).first()).toHaveAttribute('id', 'm-150');
+  });
+
+  test('topic filters leave anchor context intact until the reader opens a timeline', async ({ page }) => {
+    const context = `${url}?message=250&topic_id=35`;
+    await page.goto(context);
+    const anchor = page.locator('#m-250');
+    await expect(anchor).toHaveAttribute('aria-current', 'true');
+    await expect(page.locator('#m-260')).toHaveCount(1);
+
+    await anchor.getByRole('link', { name: '依話題篩選：群友聊天' }).click();
+    await expect(page).toHaveURL(`${url}?topic_id=22`);
+    await expect(articles(page)).toHaveCount(2);
+
+    await page.goBack();
+    await expect(page).toHaveURL(context);
+    await expect(anchor).toHaveAttribute('aria-current', 'true');
+    await page.getByRole('button', { name: '離開脈絡檢視 ✕' }).click();
+    await expect(page).toHaveURL(`${url}?topic_id=35`);
+    await expect(articles(page)).toHaveCount(1);
+    await expect(articles(page).first()).toHaveAttribute('id', 'm-150');
   });
 
   test('jump to date shows messages up to that day', async ({ page }) => {

@@ -10,7 +10,7 @@ import { groupPositions } from '../lib/bubble';
 import { mergeMessages, nextOlderCursor } from '../lib/messages';
 import { isNearBottom, hasNewTail, pickAnchor, restoreScrollTop, type Anchor } from '../lib/scroll';
 
-export type TimelineFilters = { senderId?: number; toIso?: string; includeDeleted: boolean; excludeBots?: boolean };
+export type TimelineFilters = { senderId?: number; topicId?: number; toIso?: string; includeDeleted: boolean; excludeBots?: boolean };
 
 function Rows({ messages, anchorId, chatTitle }: { messages: Message[]; anchorId?: number; chatTitle?: string | null }) {
   const pos = useMemo(() => groupPositions(messages), [messages]);
@@ -130,6 +130,7 @@ export function ListTimeline({ chatId, filters, chatTitle }: { chatId: number; f
         before: pageParam,
         limit: 50,
         sender_id: filters.senderId,
+        topic_id: filters.topicId,
         to: filters.toIso,
         include_deleted: filters.includeDeleted || undefined,
         exclude_bots: filters.excludeBots || undefined,

@@ -83,6 +83,7 @@ async fn add(store: &SqliteStore, messages: Vec<Message>) {
 fn filters() -> MessageFilters {
     MessageFilters {
         chat_id: None,
+        topic_id: None,
         sender_id: None,
         post_author: None,
         time_range: TimeRange::new(None, None).unwrap(),

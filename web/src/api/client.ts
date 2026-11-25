@@ -34,6 +34,7 @@ export class ApiError extends Error {
 }
 
 type Query = Record<string, string | number | boolean | null | undefined>;
+type TopicQuery = Query & { topic_id?: number };
 
 export function buildQuery(query?: Query): string {
   const params = new URLSearchParams();
@@ -114,8 +115,8 @@ export const api = {
   sender: (id: number, includeDeleted?: boolean) =>
     request<SenderDetail>('GET', `/api/v1/senders/${id}`, { include_deleted: includeDeleted || undefined }),
   allMessages: (query: Query) => request<MessagePage>('GET', '/api/v1/messages', query),
-  messages: (id: number, query: Query) => request<MessagePage>('GET', `${chatPath(id)}/messages`, query),
+  messages: (id: number, query: TopicQuery) => request<MessagePage>('GET', `${chatPath(id)}/messages`, query),
   context: (id: number, mid: number, query: Query) =>
     request<MessageContext>('GET', `${chatPath(id)}/messages/${mid}/context`, query),
-  search: (query: Query) => request<MessagePage>('GET', '/api/v1/messages/search', query),
+  search: (query: TopicQuery) => request<MessagePage>('GET', '/api/v1/messages/search', query),
 };

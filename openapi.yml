@@ -197,6 +197,15 @@ paths:
         schema:
           type: integer
           format: int64
+      - name: topic_id
+        in: query
+        description: Restrict results to this forum topic. Requires a chat ID in the path or query.
+        required: false
+        schema:
+          type: integer
+          format: int64
+          maximum: 2147483647
+          minimum: 1
       - name: sender_id
         in: query
         required: false
@@ -845,6 +854,15 @@ paths:
         schema:
           type: integer
           format: int64
+      - name: topic_id
+        in: query
+        description: Restrict results to this forum topic. Requires a chat ID in the path or query.
+        required: false
+        schema:
+          type: integer
+          format: int64
+          maximum: 2147483647
+          minimum: 1
       - name: sender_id
         in: query
         required: false
@@ -940,6 +958,15 @@ paths:
         schema:
           type: integer
           format: int64
+      - name: topic_id
+        in: query
+        description: Restrict results to this forum topic. Requires an explicit `chat_id`.
+        required: false
+        schema:
+          type: integer
+          format: int64
+          maximum: 2147483647
+          minimum: 1
       - name: group_id
         in: query
         description: Restrict results to this saved search group. An empty group matches nothing.
@@ -1841,6 +1868,11 @@ components:
           - 'null'
           format: int64
           description: Telegram forum topic ID, or null for non-forum messages and unclassified history.
+        topic_title:
+          type:
+          - string
+          - 'null'
+          description: Archived title of this topic in the same chat, including inactive topics; null when unknown.
     MessagePageDto:
       type: object
       required:

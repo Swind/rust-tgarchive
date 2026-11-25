@@ -6,6 +6,8 @@ pub struct MessageDto {
     pub chat_id: i64,
     /// Telegram forum topic ID, or null for non-forum messages and unclassified history.
     pub topic_id: Option<i64>,
+    /// Archived title of this topic in the same chat, including inactive topics; null when unknown.
+    pub topic_title: Option<String>,
     pub sender_id: Option<i64>,
     /// Resolved sender; null for messages without a sender.
     pub sender: Option<SenderDto>,
@@ -75,6 +77,7 @@ impl From<MessageView> for MessageDto {
     fn from(view: MessageView) -> Self {
         let MessageView {
             message,
+            topic_title,
             sender,
             deleted_at,
             snippet,
@@ -87,6 +90,7 @@ impl From<MessageView> for MessageDto {
             id: message.id.get(),
             chat_id: message.chat_id.get(),
             topic_id: message.topic_id.map(|id| id.get()),
+            topic_title,
             sender_id: message.sender_id.map(SenderId::get),
             timestamp: message.timestamp,
             edited_at: message.edited_at,

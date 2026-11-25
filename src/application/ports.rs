@@ -72,6 +72,7 @@ pub trait MessageRepository: Send + Sync {
         };
         let filters = MessageFilters {
             chat_id: Some(query.chat_id),
+            topic_id: None,
             sender_id: None,
             post_author: None,
             time_range: TimeRange {

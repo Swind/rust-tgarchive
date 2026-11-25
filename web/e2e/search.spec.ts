@@ -31,6 +31,65 @@ test('excluding sources applies across reloads and can be undone', async ({ page
   await expect(page).not.toHaveURL(/exclude_chat_ids/);
 });
 
+test('topic labels narrow search within the result chat and preserve the return URL', async ({ page, request }) => {
+  const group = await request.post('/api/v1/search-groups', {
+    data: { name: '話題篩選測試', chat_ids: [CHAT.big, CHAT.news] },
+  });
+  await expect(group).toBeOK();
+  const { id } = await group.json();
+  try {
+    await page.goto(`/search?q=kubernetes&sort=time&group_id=${id}`);
+    const list = page.getByRole('list', { name: '搜尋結果' });
+    const results = list.locator('a.result');
+    const topicLinks = list.getByRole('link', { name: /群友聊天/ });
+    const topic = page.getByLabel('話題', { exact: true });
+    await expect(results).toHaveCount(15);
+    await expect(list.locator('a[href*="topic_id="]')).toHaveCount(3);
+    await expect(topicLinks).toHaveCount(2);
+    await expect(list.getByRole('link', { name: /每日班表/ })).toHaveCount(1);
+    await expect(results.locator('a[href*="topic_id="]')).toHaveCount(0);
+    await expect(topic).toHaveCount(0);
+
+    await page.getByRole('button', { name: '排除來源 Daily News 每日快訊' }).first().click();
+    await expect(results).toHaveCount(3);
+    await topicLinks.first().click();
+    await expect(topic).toHaveValue('22');
+    await expect(results).toHaveCount(2);
+    const topicUrl = page.url();
+    expect(Object.fromEntries(new URL(topicUrl).searchParams)).toEqual({
+      q: 'kubernetes', sort: 'time', group_id: String(id), exclude_chat_ids: String(CHAT.news),
+      chat: String(CHAT.big), topic_id: '22',
+    });
+
+    await page.reload();
+    await expect(topic).toHaveValue('22');
+    await expect(results).toHaveCount(2);
+    await results.first().click();
+    await expect(page).toHaveURL(new RegExp(`/chats/${CHAT.big}\\?message=250$`));
+    await expect(page.locator('article.anchor')).toContainText('kubernetes');
+    await page.getByRole('link', { name: '← 返回搜尋結果' }).click();
+    await expect(page).toHaveURL(topicUrl);
+    await expect(topic).toHaveValue('22');
+    await expect(results).toHaveCount(2);
+
+    await topic.selectOption({ label: '每日班表' });
+    await expect(page).toHaveURL(/topic_id=35/);
+    await expect(results).toHaveCount(1);
+    await expect(results.first()).toHaveAttribute('href', `/chats/${CHAT.big}?message=150`);
+    await topic.selectOption({ label: '所有話題' });
+    await expect(page).not.toHaveURL(/topic_id=/);
+    await expect(results).toHaveCount(3);
+
+    await topic.selectOption('22');
+    await page.getByLabel('聊天室', { exact: true }).selectOption(String(CHAT.news));
+    await expect(page).not.toHaveURL(/topic_id=/);
+    await expect(topic).toHaveCount(0);
+    await expect(results).toHaveCount(12);
+  } finally {
+    await request.delete(`/api/v1/search-groups/${id}`);
+  }
+});
+
 test('Chinese words and substrings are found (jieba words + character bigrams)', async ({ page }) => {
   await page.goto('/search');
   await box(page).fill('測試關鍵字');

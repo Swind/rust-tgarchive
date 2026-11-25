@@ -19,6 +19,7 @@ import { ContextTimeline, ListTimeline } from './Timeline';
 import { formatDateTime, formatRelative, localDayToIso } from '../lib/format';
 import MediaProgress from './MediaProgress';
 import { searchReturnFrom } from './SearchResultLink';
+import { parseTopicId, topicLabel } from '../lib/topics';
 
 function Actions({ chat }: { chat: Chat }) {
   const qc = useQueryClient();
@@ -227,10 +228,14 @@ export default function ChatPane({ chatId }: { chatId: number }) {
   const [toolsOpen, setToolsOpen] = useState(false);
   const chat = useQuery({ queryKey: ['chat', chatId], queryFn: () => api.chat(chatId) });
   const senders = useQuery({ queryKey: ['senders', chatId], queryFn: () => api.senders(chatId) });
+  const topics = useQuery({
+    queryKey: ['topics', chatId], queryFn: () => api.topics(chatId), enabled: chat.data?.kind === 'supergroup',
+  });
 
   const messageParam = params.get('message');
   const messageId = messageParam && /^\d+$/.test(messageParam) ? Number(messageParam) : undefined;
   const sender = params.get('sender');
+  const topicId = parseTopicId(params.get('topic_id'));
   const date = params.get('date') ?? '';
   const includeDeleted = params.get('deleted') === '1';
   const hideBots = params.get('hide_bots') === '1';
@@ -247,8 +252,10 @@ export default function ChatPane({ chatId }: { chatId: number }) {
   if (chat.error) return <div className="p-4"><ErrorBox error={chat.error} /></div>;
   const c = chat.data;
   const s = c.stats;
+  const topicOptions = topics.data ?? [];
   const filters = {
     senderId: sender && /^-?\d+$/.test(sender) ? Number(sender) : undefined,
+    topicId,
     toIso: localDayToIso(date, true),
     includeDeleted,
     excludeBots: hideBots,
@@ -296,7 +303,7 @@ export default function ChatPane({ chatId }: { chatId: number }) {
               </details>
             )}
           </div>
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t bg-muted/25 px-4 py-2 lg:col-span-2 lg:px-6">
+          <search aria-label="訊息篩選" className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t bg-muted/25 px-4 py-2 lg:col-span-2 lg:px-6">
             <NativeSelect size="sm" className="max-w-48 text-xs" aria-label="寄件人" value={sender ?? ''} onChange={(e) => update('sender', e.target.value || null)}>
               <option value="">所有寄件人</option>
               {senders.data?.map((x) => (
@@ -305,6 +312,19 @@ export default function ChatPane({ chatId }: { chatId: number }) {
                 </option>
               ))}
             </NativeSelect>
+            {(topicOptions.length > 0 || topicId !== undefined) && (
+              <div className="flex items-center gap-2">
+                <Label htmlFor={`${toolsId}-topic`} className="text-xs">話題</Label>
+                <NativeSelect id={`${toolsId}-topic`} name="topic_id" size="sm" className="max-w-48 text-xs"
+                  value={topicId ?? ''} onChange={(e) => update('topic_id', e.target.value || null)}>
+                  <option value="">所有話題</option>
+                  {topicId !== undefined && !topicOptions.some((topic) => topic.id === topicId) && (
+                    <option value={topicId}>{topicLabel(undefined, topicId)}</option>
+                  )}
+                  {topicOptions.map((topic) => <option key={topic.id} value={topic.id}>{topicLabel(topic.title, topic.id)}</option>)}
+                </NativeSelect>
+              </div>
+            )}
             <Label htmlFor={`${toolsId}-date`} className="text-xs">
               跳至日期 <Input className="h-8 w-auto min-w-0 text-xs" type="date" id={`${toolsId}-date`} value={date} onChange={(e) => update('date', e.target.value || null)} />
             </Label>
@@ -315,12 +335,14 @@ export default function ChatPane({ chatId }: { chatId: number }) {
               <Checkbox id={`${toolsId}-bots`} checked={hideBots} onCheckedChange={(v) => update('hide_bots', v === true ? '1' : null)} /> 隱藏 bot
             </Label>
             <ErrorBox error={senders.error} />
-          </div>
+            <ErrorBox error={topics.error} />
+          </search>
         </div>
         {s?.last_error && <p className="mx-4 my-2 flex items-start gap-2 wrap-anywhere text-xs text-destructive lg:col-span-2 lg:mx-6"><CircleAlert aria-hidden="true" className="size-4 shrink-0" />上次同步失敗：{s.last_error}</p>}
         {messageId !== undefined && (
           <div className="flex flex-wrap items-center justify-between gap-2 border-t bg-primary/5 px-4 py-1 text-xs lg:col-span-2 lg:px-6">
             <span className="font-medium text-primary">訊息脈絡 <span className="font-mono">#{messageId}</span></span>
+            {topicId !== undefined && <span className="me-auto text-muted-foreground">話題篩選僅套用於時間軸</span>}
             <Button variant="ghost" size="sm" onClick={() => update('message', null)}>離開脈絡檢視 ✕</Button>
           </div>
         )}
@@ -329,7 +351,7 @@ export default function ChatPane({ chatId }: { chatId: number }) {
         {messageId !== undefined ? (
           <ContextTimeline key={`${messageId}-${includeDeleted}`} chatId={chatId} messageId={messageId} includeDeleted={includeDeleted} chatTitle={c.title} />
         ) : (
-          <ListTimeline key={`${sender}-${date}-${includeDeleted}-${hideBots}`} chatId={chatId} filters={filters} chatTitle={c.title} />
+          <ListTimeline key={`${sender}-${topicId}-${date}-${includeDeleted}-${hideBots}`} chatId={chatId} filters={filters} chatTitle={c.title} />
         )}
       </div>
       <MediaTools chatId={chatId} />

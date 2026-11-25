@@ -1,6 +1,6 @@
 //! Search through the REST router and the CLI against real SQLite archives.
 
-use std::{process::Command, sync::Arc};
+use std::{collections::BTreeSet, process::Command, sync::Arc};
 
 use axum::{
     body::{Body, to_bytes},
@@ -10,10 +10,10 @@ use chrono::DateTime;
 use serde_json::{Value, json};
 use tgarchive::{
     application::{
-        ArchiveWriter, IngestBatch, IngestRecord, MessageSource,
+        ArchiveWriter, ChatRepository, IngestBatch, IngestRecord, MessageSource,
         services::{Application, ComponentState, ComponentStatus},
     },
-    domain::{Chat, ChatId, ChatKind, Message, MessageEvent, MessageId},
+    domain::{Chat, ChatId, ChatKind, ForumTopic, Message, MessageEvent, MessageId},
     infrastructure::persistence::{search_groups::SearchGroupStore, sqlite::SqliteStore},
     interface::rest::{router, router_with_groups},
 };
@@ -62,6 +62,15 @@ async fn request(
 }
 
 async fn seed(store: &SqliteStore, kind: ChatKind, raw_id: i64, texts: &[&str]) {
+    seed_with_topics(store, kind, raw_id, texts.iter().map(|&text| (text, None))).await;
+}
+
+async fn seed_with_topics<'a>(
+    store: &SqliteStore,
+    kind: ChatKind,
+    raw_id: i64,
+    texts: impl Iterator<Item = (&'a str, Option<MessageId>)>,
+) -> ChatId {
     let chat_id = ChatId::from_telegram(kind, raw_id).unwrap();
     let chat = Chat {
         id: chat_id,
@@ -71,13 +80,12 @@ async fn seed(store: &SqliteStore, kind: ChatKind, raw_id: i64, texts: &[&str]) 
         tracked: false,
     };
     let records = texts
-        .iter()
         .enumerate()
-        .map(|(index, text)| {
+        .map(|(index, (text, topic_id))| {
             let time = DateTime::from_timestamp(BASE + index as i64, 0).unwrap();
             IngestRecord {
                 event: MessageEvent::Created(Message {
-                    topic_id: None,
+                    topic_id,
                     post_author: None,
                     forward: None,
                     id: MessageId::new(index as i64 + 1).unwrap(),
@@ -86,7 +94,7 @@ async fn seed(store: &SqliteStore, kind: ChatKind, raw_id: i64, texts: &[&str]) 
                     timestamp: time,
                     edited_at: None,
                     collected_at: time,
-                    text: Some((*text).to_owned()),
+                    text: Some(text.to_owned()),
                     reply_to: None,
                     attachments: vec![],
                 }),
@@ -102,6 +110,7 @@ async fn seed(store: &SqliteStore, kind: ChatKind, raw_id: i64, texts: &[&str]) 
         })
         .await
         .unwrap();
+    chat_id
 }
 
 #[tokio::test]
@@ -409,6 +418,137 @@ async fn rest_search_groups_crud_and_scoped_paging() {
                 .0,
             StatusCode::BAD_REQUEST
         );
+    }
+}
+
+#[tokio::test]
+async fn rest_search_topics_intersect_chat_scope_and_other_filters_before_paging() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("sqlite://{}", dir.path().join("archive.db").display());
+    let store = Arc::new(SqliteStore::connect(&url).await.unwrap());
+    let topic = MessageId::new(7).unwrap();
+    let other_topic = MessageId::new(8).unwrap();
+    let a = seed_with_topics(
+        &store,
+        ChatKind::Supergroup,
+        11,
+        [Some(topic), Some(other_topic), Some(topic), None]
+            .into_iter()
+            .map(|id| ("coffee 杯", id)),
+    )
+    .await;
+    let b = seed_with_topics(
+        &store,
+        ChatKind::Supergroup,
+        12,
+        [("coffee 杯", Some(topic))].into_iter(),
+    )
+    .await;
+    for (chat, title) in [(a, "News"), (b, "Events")] {
+        store
+            .save_topics(
+                chat,
+                vec![ForumTopic {
+                    id: topic,
+                    title: title.into(),
+                }],
+            )
+            .await
+            .unwrap();
+    }
+    assert!(store.search_index_ready().await.unwrap());
+    let application = Arc::new(Application::new(
+        store.clone(),
+        store.clone(),
+        store.clone(),
+        store,
+        None,
+        ComponentStatus::new(ComponentState::Running, None),
+    ));
+    let settings = SearchGroupStore::open(&dir.path().join("settings.db"))
+        .await
+        .unwrap();
+    let app = router_with_groups(application, None, None, None, Some(settings));
+    let search = "/api/v1/messages/search";
+    let collection = "/api/v1/search-groups";
+    let (status, group) = request(
+        &app,
+        Method::POST,
+        collection,
+        Some(json!({"name": "Forums", "chat_ids": [a.get(), b.get()]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{group}");
+    let group_id = group["id"].as_i64().unwrap();
+
+    let (status, page) = get(&app, &format!("{search}?q=coffee")).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    let shared_topic = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|hit| hit["topic_id"] == 7)
+        .map(|hit| {
+            (
+                hit["chat_id"].as_i64().unwrap(),
+                hit["topic_title"].as_str().unwrap(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        shared_topic,
+        BTreeSet::from([(a.get(), "News"), (b.get(), "Events")])
+    );
+
+    let scoped = format!("chat_id={}&topic_id=7&group_id={group_id}", a.get());
+    let one_char = encode("杯");
+    for (q, sort) in [
+        ("coffee", "relevance"),
+        ("coffee", "time"),
+        (one_char.as_str(), "time"),
+    ] {
+        let query = format!("{search}?q={q}&sort={sort}&{scoped}&limit=1");
+        let (status, first) = get(&app, &query).await;
+        assert_eq!(status, StatusCode::OK, "{first}");
+        let next = first["next_cursor"].as_str().unwrap();
+        let (status, second) = get(&app, &format!("{query}&before={next}")).await;
+        assert_eq!(status, StatusCode::OK, "{second}");
+        let mut ids = [&first, &second].map(|page| {
+            let hits = page["items"].as_array().unwrap();
+            assert_eq!(hits.len(), 1);
+            assert_eq!(hits[0]["chat_id"], a.get());
+            assert_eq!(hits[0]["topic_id"], 7);
+            assert_eq!(hits[0]["topic_title"], "News");
+            hits[0]["id"].as_i64().unwrap()
+        });
+        ids.sort_unstable();
+        assert_eq!(ids, [1, 3]);
+        assert_eq!(second["next_cursor"], Value::Null);
+    }
+
+    let query = format!("{search}?q=coffee&{scoped}");
+    let (status, page) = get(&app, &format!("{query}&exclude_chat_ids={}", a.get())).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["items"], json!([]));
+    let (status, group) = request(
+        &app,
+        Method::PUT,
+        &format!("{collection}/{group_id}"),
+        Some(json!({"name": "Other forum", "chat_ids": [b.get()]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{group}");
+    let (status, page) = get(&app, &query).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["items"], json!([]));
+
+    let no_chat = format!("{search}?q=coffee&topic_id=7&group_id={group_id}");
+    let (status, error) = get(&app, &no_chat).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(error["error"]["code"], "topic_requires_chat");
+    for invalid in ["0", "-1", "2147483648", "abc"] {
+        let query = format!("{search}?q=coffee&chat_id={}&topic_id={invalid}", a.get());
+        assert_eq!(get(&app, &query).await.0, StatusCode::BAD_REQUEST);
     }
 }
 

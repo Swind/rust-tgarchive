@@ -9,6 +9,7 @@ use std::sync::Arc;
 fn filters() -> MessageFilters {
     MessageFilters {
         chat_id: None,
+        topic_id: None,
         sender_id: None,
         post_author: None,
         time_range: TimeRange::new(None, None).unwrap(),
@@ -46,6 +47,7 @@ fn page_size_and_query_boundaries_are_validated() {
     );
     let invalid_filters = MessageFilters {
         chat_id: None,
+        topic_id: None,
         sender_id: None,
         post_author: None,
         time_range: TimeRange {

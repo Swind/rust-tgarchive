@@ -17,6 +17,7 @@ import SenderPicker from '../components/SenderPicker';
 import SearchResultLink, { useRestoreSearchScroll } from '../components/SearchResultLink';
 import { localDayToIso } from '../lib/format';
 import { nextOlderCursor } from '../lib/messages';
+import { parseTopicId, topicLabel } from '../lib/topics';
 import { chatTitle } from './ChatsPage';
 
 type Sort = 'relevance' | 'time';
@@ -25,6 +26,7 @@ export default function SearchPage() {
   const [params, setParams] = useSearchParams();
   const q = (params.get('q') ?? '').trim();
   const chatId = params.get('chat') ?? '';
+  const topicId = chatId ? parseTopicId(params.get('topic_id')) : undefined;
   const groupId = params.get('group_id') ?? '';
   const excluded = [...new Set((params.get('exclude_chat_ids') ?? '').split(',').filter(Boolean))].sort();
   const exclusionParam = excluded.join(',');
@@ -66,28 +68,41 @@ export default function SearchPage() {
   const enabled = q.length > 0;
 
   const chats = useQuery({ queryKey: ['chats', 'title'], queryFn: () => api.chats('title') });
+  const numericChatId = Number(chatId);
+  const topics = useQuery({
+    queryKey: ['topics', numericChatId],
+    queryFn: () => api.topics(numericChatId),
+    enabled: /^-?\d+$/.test(chatId) && Number.isSafeInteger(numericChatId),
+  });
   const groups = useQuery({ queryKey: ['search-groups'], queryFn: api.searchGroups, refetchOnWindowFocus: true });
   const group = groups.data?.find((g) => String(g.id) === groupId);
   const members = useMemo(() => (group ? new Set(group.chat_ids) : null), [group]);
   const sources = groupId ? chats.data?.filter((c) => members?.has(c.id)) : chats.data;
   function selectGroup(id: number | undefined) {
     const value = id === undefined ? '' : String(id);
-    if (value !== groupId) update({ group_id: value, chat: '' });
+    if (value !== groupId) update({ group_id: value, chat: '', topic_id: '' });
   }
   const titles = useMemo(() => new Map((chats.data ?? []).map((c) => [c.id, chatTitle(c)])), [chats.data]);
   function excludeChat(id: string) {
     if (!id || excluded.includes(id) || excluded.length >= 100) return;
     update({ exclude_chat_ids: [...excluded, id].sort().join(',') });
   }
+  function topicSearchTo(chat: number, topic: number) {
+    const next = new URLSearchParams(params);
+    next.set('chat', String(chat));
+    next.set('topic_id', String(topic));
+    return `?${next}`;
+  }
 
   const results = useInfiniteQuery({
-    queryKey: ['search', q, chatId, senderId, from, to, deleted, hideBots, sort, exclusionParam, groupId, group?.chat_ids],
+    queryKey: ['search', q, chatId, topicId, senderId, from, to, deleted, hideBots, sort, exclusionParam, groupId, group?.chat_ids],
     enabled,
     initialPageParam: undefined as string | undefined,
     queryFn: ({ pageParam }) =>
       api.search({
         q,
         chat_id: chatId || undefined,
+        topic_id: topicId,
         group_id: groupId || undefined,
         exclude_chat_ids: exclusionParam || undefined,
         sender_id: senderId,
@@ -102,6 +117,7 @@ export default function SearchPage() {
     getNextPageParam: nextOlderCursor,
   });
   const items = results.error ? [] : results.data?.pages.flatMap((p) => p.items) ?? [];
+  const selectedTopic = topics.data?.find((topic) => topic.id === topicId);
   useRestoreSearchScroll(!results.isPending);
   const status = useQuery({ queryKey: ['status'], queryFn: api.status, refetchInterval: 15000 });
   const index = status.data?.search_index;
@@ -122,9 +138,19 @@ export default function SearchPage() {
               {groupId && !group && <NativeSelectOption value={groupId}>{groups.isPending ? '載入群組中…' : `無法取得群組 #${groupId}`}</NativeSelectOption>}
               {groups.data?.map((g) => <NativeSelectOption key={g.id} value={String(g.id)}>{g.name}（{g.chat_ids.length} 個來源）</NativeSelectOption>)}
             </NativeSelect>
+            {(topics.data?.length || topicId !== undefined) ? <div className="flex min-w-0 items-center gap-2 [&>[data-slot=native-select-wrapper]]:min-w-0">
+              <Label htmlFor="search-topic" className="shrink-0">話題</Label>
+              <NativeSelect id="search-topic" className="truncate text-base pointer-coarse:min-h-12 md:text-sm" value={topicId ?? ''} onChange={(e) => update({ topic_id: e.target.value })}>
+                <NativeSelectOption value="">所有話題</NativeSelectOption>
+                {topicId !== undefined && !selectedTopic && <NativeSelectOption value={topicId}>
+                  {topicLabel(items.find((m) => m.topic_id === topicId)?.topic_title, topicId)}
+                </NativeSelectOption>}
+                {topics.data?.map((topic) => <NativeSelectOption key={topic.id} value={topic.id}>{topicLabel(topic.title, topic.id)}</NativeSelectOption>)}
+              </NativeSelect>
+            </div> : null}
             {group && !group.chat_ids.length && <span className="text-sm text-muted-foreground">此群組尚無來源，請先加入頻道或聊天室。</span>}
           </div>
-          <ErrorBox error={groups.error ?? chats.error} />
+          <ErrorBox error={groups.error ?? chats.error ?? topics.error} />
           {excluded.length > 0 && (
             <div className="flex flex-wrap items-center gap-2" role="group" aria-label="已排除的來源">
               <span className="text-sm text-muted-foreground">已排除</span>
@@ -138,9 +164,9 @@ export default function SearchPage() {
               {excluded.length > 1 && <Button type="button" size="sm" variant="ghost" onClick={() => update({ exclude_chat_ids: '' })}>清除全部排除</Button>}
             </div>
           )}
-          <SecondaryFilters count={[chatId, senderId != null, from, to, deleted, hideBots, sort === 'time', exclusionParam].filter(Boolean).length}>
+          <SecondaryFilters count={[chatId, topicId, senderId != null, from, to, deleted, hideBots, sort === 'time', exclusionParam].filter(Boolean).length}>
             <div className="grid min-w-0 items-end gap-4 @sm:grid-cols-2 @4xl:grid-cols-[1fr_1fr_1.6fr]">
-              <ChatFilter value={chatId} onChange={(chat) => update({ chat, exclude_chat_ids: excluded.filter((id) => id !== chat).join(',') })}>
+              <ChatFilter value={chatId} onChange={(chat) => update({ chat, topic_id: '', exclude_chat_ids: excluded.filter((id) => id !== chat).join(',') })}>
                 {chatId && members && !members.has(Number(chatId)) && <NativeSelectOption value={chatId}>
                   {titles.get(Number(chatId)) ?? chatId}（不在此群組）
                 </NativeSelectOption>}
@@ -194,6 +220,7 @@ export default function SearchPage() {
         {items.length > 0 && <Card className="overflow-hidden py-0">
           <ul className="divide-y" aria-label="搜尋結果">
             {items.map((m) => <SearchResultLink key={`${m.chat_id}-${m.id}`} message={m} chatTitle={titles.get(m.chat_id)} query={q} includeDeleted={deleted} showSender
+              topicTo={m.topic_id == null ? undefined : topicSearchTo(m.chat_id, m.topic_id)}
               onExclude={!chatId && excluded.length < 100 ? () => excludeChat(String(m.chat_id)) : undefined} />)}
           </ul>
         </Card>}

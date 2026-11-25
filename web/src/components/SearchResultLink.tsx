@@ -1,10 +1,11 @@
 import { useLayoutEffect, useRef, type MouseEvent } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { ChevronRight, MessageSquare } from 'lucide-react';
+import { ChevronRight, Hash, MessageSquare } from 'lucide-react';
 import type { Message } from '@/api/client';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { formatDateTime } from '@/lib/format';
+import { topicLabel } from '@/lib/topics';
 import BotBadge from './BotBadge';
 import { Highlighted, senderName } from './MessageItem';
 import SenderLink from './SenderLink';
@@ -30,12 +31,14 @@ export function useRestoreSearchScroll(ready: boolean) {
   }, [ready, location.key, location.state]);
 }
 
-export default function SearchResultLink({ message: m, query, chatTitle, includeDeleted, showSender, onExclude }: {
-  message: Message; query: string; chatTitle?: string; includeDeleted: boolean; showSender?: boolean; onExclude?: () => void;
+export default function SearchResultLink({ message: m, query, chatTitle, includeDeleted, showSender, onExclude, topicTo }: {
+  message: Message; query: string; chatTitle?: string; includeDeleted: boolean; showSender?: boolean; onExclude?: () => void; topicTo?: string;
 }) {
   const location = useLocation();
   const navigate = useNavigate();
   const to = `/chats/${m.chat_id}?message=${m.id}${includeDeleted ? '&deleted=1' : ''}`;
+  const topic = m.topic_id == null ? null : topicLabel(m.topic_title, m.topic_id);
+  const topicContent = topic && <>{m.topic_title && <Hash aria-hidden="true" className="shrink-0" />}<span className="truncate">{topic}</span></>;
   function openContext(event: MouseEvent<HTMLAnchorElement>) {
     // Keep native open-in-new-tab/window behaviour for modified clicks.
     if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
@@ -59,10 +62,15 @@ export default function SearchResultLink({ message: m, query, chatTitle, include
           <Highlighted text={m.snippet ?? m.text ?? ''} query={query} />
         </p>
       </Link>
-      {showSender && <div className="flex min-w-0 flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
-        <span className="relative z-1 min-w-0 break-all"><SenderLink id={m.sender?.id ?? m.sender_id}>{senderName(m, chatTitle)}</SenderLink></span>
-        <BotBadge isBot={m.sender?.is_bot} />
-        {onExclude && <Button type="button" variant="ghost" size="sm" className="relative z-1 ms-auto" aria-label={`排除來源 ${chatTitle ?? m.chat_id}`} onClick={onExclude}>排除此來源</Button>}
+      {(showSender || topic) && <div className="flex min-w-0 flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+        {topic && <Badge asChild={!!topicTo} variant="outline" className="max-w-full min-w-0">
+          {topicTo ? <Link to={topicTo} className="relative z-1 min-h-6 pointer-coarse:min-h-10" aria-label={`${topic}（${chatTitle ?? m.chat_id}）`}>{topicContent}</Link> : topicContent}
+        </Badge>}
+        {showSender && <>
+          <span className="relative z-1 min-w-0 break-all"><SenderLink id={m.sender?.id ?? m.sender_id}>{senderName(m, chatTitle)}</SenderLink></span>
+          <BotBadge isBot={m.sender?.is_bot} />
+          {onExclude && <Button type="button" variant="ghost" size="sm" className="relative z-1 ms-auto" aria-label={`排除來源 ${chatTitle ?? m.chat_id}`} onClick={onExclude}>排除此來源</Button>}
+        </>}
       </div>}
     </li>
   );

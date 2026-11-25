@@ -72,6 +72,7 @@ fn ingest(messages: Vec<Message>) -> IngestBatch {
 fn filters() -> MessageFilters {
     MessageFilters {
         chat_id: None,
+        topic_id: None,
         sender_id: None,
         post_author: None,
         time_range: TimeRange::new(None, None).unwrap(),
@@ -454,6 +455,7 @@ async fn fractional_time_filters_and_cursors_match_second_precision_storage() {
     let from_half = ListMessagesQuery {
         filters: MessageFilters {
             chat_id: None,
+            topic_id: None,
             sender_id: None,
             post_author: None,
             time_range: TimeRange::new(Some(half), None).unwrap(),
@@ -477,6 +479,7 @@ async fn fractional_time_filters_and_cursors_match_second_precision_storage() {
     let to_half = ListMessagesQuery {
         filters: MessageFilters {
             chat_id: None,
+            topic_id: None,
             sender_id: None,
             post_author: None,
             time_range: TimeRange::new(None, Some(half)).unwrap(),
@@ -985,7 +988,7 @@ async fn forum_topic_upgrade_repairs_archived_groups_on_first_nonempty_snapshot(
         sqlx::query("INSERT INTO chats(id,kind,created_at,updated_at,tracked) VALUES (?,'supergroup',1,1,1)")
             .bind(id.get()).execute(&pool).await.unwrap();
     }
-    sqlx::query("INSERT INTO messages(chat_id,message_id,timestamp,collected_at,created_at,updated_at,version_at,source_priority) VALUES (?,10,1,1,1,1,1,0)")
+    sqlx::query("INSERT INTO messages(chat_id,message_id,timestamp,collected_at,created_at,updated_at,text,version_at,source_priority) VALUES (?,10,1,1,1,1,'歷史',1,0)")
         .bind(chat_id.get()).execute(&pool).await.unwrap();
     pool.close().await;
     let readonly = SqliteStore::open_existing_readonly(&url).await.unwrap();
@@ -995,6 +998,47 @@ async fn forum_topic_upgrade_repairs_archived_groups_on_first_nonempty_snapshot(
         .unwrap()
         .unwrap();
     assert_eq!(row.topic_id, None);
+    assert_eq!(row.topic_title, None);
+    let mut listing = list(None, None, 10);
+    listing.filters.chat_id = Some(chat_id);
+    let page = MessageRepository::list(&readonly, listing.clone())
+        .await
+        .unwrap();
+    assert_eq!(page.items, vec![row]);
+    listing.filters.topic_id = Some(MessageId::new(1).unwrap());
+    assert!(
+        MessageRepository::list(&readonly, listing)
+            .await
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    let mut search = SearchMessagesQuery {
+        text: "歷".into(),
+        filters: MessageFilters {
+            chat_id: Some(chat_id),
+            topic_id: Some(MessageId::new(1).unwrap()),
+            ..filters()
+        },
+        included_chat_ids: None,
+        excluded_chat_ids: Vec::new(),
+        before: None,
+        after: None,
+        page_size: PageSize::DEFAULT,
+        sort: tgarchive::application::SearchSort::Time,
+        offset: 0,
+    };
+    assert!(
+        MessageRepository::search(&readonly, search.clone())
+            .await
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    search.filters.topic_id = None;
+    let page = MessageRepository::search(&readonly, search).await.unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].topic_title, None);
     readonly.close().await;
 
     let store = SqliteStore::open_existing(&url).await.unwrap();

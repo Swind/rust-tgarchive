@@ -6,6 +6,7 @@ for (const scheme of ['light', 'dark'] as const) {
     await page.goto(`/chats/${CHAT.big}`);
     await expect(page.locator('#m-260')).toBeVisible();
     await expect(page.locator('.chat-list a')).toHaveCount(7);
+    await expect(page.getByLabel('話題', { exact: true })).toBeVisible();
     await expect(page).toHaveScreenshot(`chats-${scheme}.png`);
   });
 }

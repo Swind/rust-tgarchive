@@ -91,6 +91,8 @@ pub enum PageDirection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageFilters {
     pub chat_id: Option<ChatId>,
+    /// Exact forum topic within `chat_id`.
+    pub topic_id: Option<MessageId>,
     pub sender_id: Option<SenderId>,
     /// Exact channel post signature.
     pub post_author: Option<String>,
@@ -103,6 +105,15 @@ pub struct MessageFilters {
     pub exclude_bots: bool,
 }
 
+impl MessageFilters {
+    fn validate(&self) -> Result<(), ValidationError> {
+        if self.topic_id.is_some() && self.chat_id.is_none() {
+            return Err(ValidationError::TopicRequiresChat);
+        }
+        self.time_range.validate()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListMessagesQuery {
     pub filters: MessageFilters,
@@ -113,7 +124,7 @@ pub struct ListMessagesQuery {
 
 impl ListMessagesQuery {
     pub fn validate(&self) -> Result<(), ValidationError> {
-        self.filters.time_range.validate()?;
+        self.filters.validate()?;
         if self.before.is_some() && self.after.is_some() {
             return Err(ValidationError::ConflictingCursors);
         }
@@ -160,7 +171,7 @@ pub struct SearchMessagesQuery {
 
 impl SearchMessagesQuery {
     pub fn validate(&self) -> Result<(), ValidationError> {
-        self.filters.time_range.validate()?;
+        self.filters.validate()?;
         if self.excluded_chat_ids.len() > MAX_EXCLUDED_CHAT_IDS {
             return Err(ValidationError::TooManyExcludedChatIds);
         }
@@ -197,11 +208,13 @@ pub struct SenderInfo {
     pub is_self: bool,
 }
 
-/// A stored message plus read-side details (resolved sender, deletion time).
+/// A stored message plus read-side details (resolved sender, topic title, deletion time).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MessageView {
     #[serde(flatten)]
     pub message: Message,
+    /// Archived forum topic title, including inactive topics.
+    pub topic_title: Option<String>,
     pub sender: Option<SenderInfo>,
     pub deleted_at: Option<DateTime<Utc>>,
     /// Short excerpt around the first search match; only set by search.
@@ -227,6 +240,7 @@ impl From<Message> for MessageView {
     fn from(message: Message) -> Self {
         Self {
             message,
+            topic_title: None,
             sender: None,
             deleted_at: None,
             snippet: None,

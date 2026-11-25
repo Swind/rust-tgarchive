@@ -1,13 +1,14 @@
 import { Link, useLocation } from 'react-router-dom';
 import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Download, ExternalLink, Paperclip, RotateCw } from 'lucide-react';
+import { Download, ExternalLink, Hash, Paperclip, RotateCw } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { api, type Message } from '../api/client';
 import { colorIndex, initials, type GroupPos } from '../lib/bubble';
 import { formatDateTime, formatSize, formatTime } from '../lib/format';
 import { highlight } from '../lib/highlight';
+import { topicLabel } from '../lib/topics';
 import BotBadge from './BotBadge';
 import SenderLink from './SenderLink';
 
@@ -162,6 +163,21 @@ export default function MessageItem({
       <SenderLink id={id}>{name}</SenderLink>
     </strong>
   );
+  let topicBadge;
+  if (!senderVariant && m.topic_id != null) {
+    const label = topicLabel(m.topic_title, m.topic_id);
+    const search = new URLSearchParams(location.search);
+    search.set('topic_id', String(m.topic_id));
+    search.delete('message');
+    topicBadge = (
+      <Badge asChild variant="outline" className="max-w-full whitespace-normal">
+        <Link to={{ search: search.toString() }} state={location.state} aria-label={`依話題篩選：${label}`}>
+          <Hash aria-hidden="true" className="shrink-0" />
+          <span className="min-w-0 wrap-anywhere">{label}</span>
+        </Link>
+      </Badge>
+    );
+  }
 
   if (system) {
     return (
@@ -176,6 +192,7 @@ export default function MessageItem({
             {nameEl}
             <BotBadge isBot={m.sender?.is_bot} />
             <span className="placeholder text-muted-foreground italic">（系統訊息或無文字內容）</span>
+            {topicBadge}
             {deleted}
             {time}
           </header>
@@ -244,6 +261,7 @@ export default function MessageItem({
         )}
         {m.post_author && <p className="post-author my-1 text-xs text-muted-foreground">— {m.post_author}</p>}
         <footer>
+          {topicBadge}
           {deleted}
           {time}
         </footer>

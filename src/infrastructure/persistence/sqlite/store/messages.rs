@@ -37,9 +37,16 @@ fn message_select(legacy: LegacyColumns) -> String {
         "m.post_author, m.fwd_from_id, m.fwd_from_name, m.fwd_date"
     };
     let bot = if legacy.bot { "NULL" } else { "s.is_bot" };
-    let topic = if legacy.topics { "NULL" } else { "m.topic_id" };
+    let (topic, topics_join) = if legacy.topics {
+        ("NULL AS topic_id, NULL AS topic_title", "")
+    } else {
+        (
+            "m.topic_id, t.title AS topic_title",
+            " LEFT JOIN forum_topics t ON t.chat_id=m.chat_id AND t.topic_id=m.topic_id",
+        )
+    };
     format!(
-        "{MESSAGE_SELECT_HEAD}{topic} AS topic_id, {metadata}{MESSAGE_SELECT_MID}{bot}{MESSAGE_SELECT_TAIL}"
+        "{MESSAGE_SELECT_HEAD}{topic}, {metadata}{MESSAGE_SELECT_MID}{bot}{MESSAGE_SELECT_TAIL}{topics_join}"
     )
 }
 
@@ -116,6 +123,7 @@ fn row_view(row: &SqliteRow, attachments: Vec<Attachment>) -> Result<MessageView
     });
     Ok(MessageView {
         message,
+        topic_title: row.try_get("topic_title").map_err(storage_error)?,
         sender,
         deleted_at: deleted_at.map(timestamp).transpose()?,
         snippet: None,
@@ -190,6 +198,13 @@ async fn list_messages(
         query
             .push(format!(" AND {plus}m.chat_id="))
             .push_bind(chat_id.get());
+    }
+    if let Some(topic_id) = filters.topic_id {
+        if legacy.topics {
+            query.push(" AND 0");
+        } else {
+            query.push(" AND m.topic_id=").push_bind(topic_id.get());
+        }
     }
     if let Some(sender_id) = filters.sender_id {
         query

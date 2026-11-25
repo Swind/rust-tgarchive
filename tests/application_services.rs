@@ -242,6 +242,7 @@ fn list_query() -> ListMessagesQuery {
     ListMessagesQuery {
         filters: tgarchive::application::MessageFilters {
             chat_id: None,
+            topic_id: None,
             sender_id: None,
             post_author: None,
             time_range: TimeRange::new(None, None).unwrap(),

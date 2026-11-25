@@ -8,6 +8,8 @@ pub enum ValidationError {
     ConflictingCursors,
     #[error("time range must have from < to")]
     InvalidTimeRange,
+    #[error("a topic filter requires a chat ID")]
+    TopicRequiresChat,
     #[error("search query cannot be empty")]
     EmptySearch,
     #[error("search query exceeds 4096 bytes")]

@@ -63,6 +63,7 @@ pub(super) fn convert_filters(
 > {
     let filters = MessageFilters {
         chat_id: args.chat_id.map(ChatId::from_marked).transpose()?,
+        topic_id: None,
         sender_id: args.sender_id.map(SenderId::from_marked).transpose()?,
         post_author: args.post_author,
         time_range: TimeRange::new(args.from, args.to)?,

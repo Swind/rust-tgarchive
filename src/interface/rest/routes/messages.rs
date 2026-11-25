@@ -64,7 +64,9 @@ pub(in crate::interface::rest) async fn search_messages(
     ApiQuery(query): ApiQuery<SearchQuery>,
     Extension(id): Extension<RequestId>,
 ) -> Result<Json<MessagePageDto>, ApiError> {
-    let included_chat_ids = match query.group_id {
+    let group_id = query.group_id;
+    let mut query = build_search_query(query, id.0.clone())?;
+    query.included_chat_ids = match group_id {
         Some(group_id) => Some(
             super::groups::load_group(&state, group_id, &id)
                 .await?
@@ -72,7 +74,6 @@ pub(in crate::interface::rest) async fn search_messages(
         ),
         None => None,
     };
-    let query = build_search_query(query, included_chat_ids, id.0.clone())?;
     let page = state
         .application
         .search_messages(query)

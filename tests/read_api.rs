@@ -184,7 +184,7 @@ async fn seed_with_deletions(f: &Fixture) -> ChatId {
 }
 
 #[tokio::test]
-async fn excluding_a_topic_keeps_its_archived_message_and_topic_id_readable() {
+async fn archived_topics_keep_titles_and_filter_the_timeline_before_paging() {
     use tgarchive::{application::ChatRepository, domain::ForumTopic};
 
     let f = fixture().await;
@@ -208,11 +208,19 @@ async fn excluding_a_topic_keeps_its_archived_message_and_topic_id_readable() {
         )
         .await
         .unwrap();
-    let mut message = msg(id, 15, BASE, None);
-    message.topic_id = Some(topic_id);
+    let in_topic = |message_id, topic| {
+        let mut message = msg(id, message_id, BASE + message_id, None);
+        message.topic_id = Some(topic);
+        created(message)
+    };
     f.store
         .write_batch(IngestBatch {
-            records: vec![created(message)],
+            records: vec![
+                in_topic(15, topic_id),
+                in_topic(16, MessageId::new(13).unwrap()),
+                in_topic(17, topic_id),
+                created(msg(id, 18, BASE + 18, None)),
+            ],
             ..Default::default()
         })
         .await
@@ -222,11 +230,48 @@ async fn excluding_a_topic_keeps_its_archived_message_and_topic_id_readable() {
         .await
         .unwrap()
         .unwrap();
+    f.store.save_topics(id, vec![]).await.unwrap();
+    assert!(f.store.list_topics(id).await.unwrap().is_empty());
 
-    let (status, archived) = get(&f.app, &format!("/api/v1/chats/{}/messages/15", id.get())).await;
+    let messages = format!("/api/v1/chats/{}/messages", id.get());
+    let (status, archived) = get(&f.app, &format!("{messages}/15")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(archived["topic_id"], 12);
+    assert_eq!(archived["topic_title"], "News");
     assert_eq!(archived["text"], "body 15");
+
+    let (status, context) = get(&f.app, &format!("{messages}/15/context")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(context["anchor"]["topic_title"], "News");
+    assert_eq!(context["after"][0]["topic_id"], 13);
+    assert_eq!(context["after"][0].get("topic_title"), Some(&Value::Null));
+    assert_eq!(context["after"][1]["topic_title"], "News");
+    assert_eq!(context["after"][2]["topic_id"], Value::Null);
+    assert_eq!(context["after"][2].get("topic_title"), Some(&Value::Null));
+
+    let query = format!("{messages}?topic_id=12&limit=1");
+    let (status, page) = get(&f.app, &query).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ids(&page["items"]), [17]);
+    assert_eq!(page["items"][0]["topic_title"], "News");
+    let next = page["next_cursor"].as_str().unwrap();
+    let (status, page) = get(&f.app, &format!("{query}&before={next}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ids(&page["items"]), [15]);
+    assert_eq!(page["next_cursor"], Value::Null);
+
+    for invalid in ["0", "-1", "2147483648", "abc"] {
+        assert_eq!(
+            get(&f.app, &format!("{messages}?topic_id={invalid}"))
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    assert_eq!(
+        get(&f.app, "/api/v1/messages?topic_id=12").await.0,
+        StatusCode::BAD_REQUEST
+    );
 }
 
 #[tokio::test]

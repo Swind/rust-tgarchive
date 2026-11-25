@@ -212,6 +212,7 @@ async fn track_and_untrack_are_idempotent_keep_messages_and_survive_refresh() {
         .list_messages(ListMessagesQuery {
             filters: MessageFilters {
                 chat_id: Some(private()),
+                topic_id: None,
                 sender_id: None,
                 post_author: None,
                 time_range: TimeRange::new(None, None).unwrap(),

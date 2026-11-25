@@ -124,6 +124,11 @@ fn big_chat_messages() -> Vec<Message> {
             _ => {}
         }
         let mut m = msg(BIG, id, Some(s), at, Some(&text));
+        m.topic_id = match id {
+            50 | 250 => Some(mid(22)),
+            150 => Some(mid(35)),
+            _ => None,
+        };
         match id {
             100 => m.edited_at = Some(at + Duration::minutes(3)),
             101 | 205 => m.reply_to = Some(mid(100)),

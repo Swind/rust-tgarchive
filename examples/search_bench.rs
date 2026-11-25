@@ -89,6 +89,7 @@ impl Filter {
         let time = |s: Option<i64>| s.map(|s| DateTime::from_timestamp(s, 0).unwrap());
         MessageFilters {
             chat_id: self.chat.map(|c| ChatId::from_marked(c).unwrap()),
+            topic_id: None,
             sender_id: self.sender.map(|s| SenderId::from_marked(s).unwrap()),
             post_author: None,
             time_range: TimeRange::new(time(self.from), time(self.to)).unwrap(),

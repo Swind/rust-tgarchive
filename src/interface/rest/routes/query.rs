@@ -3,7 +3,7 @@ use crate::{
     application::{
         ListMessagesQuery, MessageFilters, PageSize, SearchMessagesQuery, SearchSort, TimeRange,
     },
-    domain::{ChatId, SenderId},
+    domain::{ChatId, MessageId, SenderId},
 };
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -13,6 +13,9 @@ use utoipa::IntoParams;
 #[into_params(parameter_in = Query)]
 pub(in crate::interface::rest) struct MessageQuery {
     pub(super) chat_id: Option<i64>,
+    /// Restrict results to this forum topic. Requires a chat ID in the path or query.
+    #[param(minimum = 1, maximum = 2147483647)]
+    pub(super) topic_id: Option<i64>,
     pub(super) sender_id: Option<i64>,
     /// Exact channel post signature.
     pub(super) post_author: Option<String>,
@@ -32,6 +35,9 @@ pub(in crate::interface::rest) struct MessageQuery {
 pub(in crate::interface::rest) struct SearchQuery {
     pub(super) q: String,
     pub(super) chat_id: Option<i64>,
+    /// Restrict results to this forum topic. Requires an explicit `chat_id`.
+    #[param(minimum = 1, maximum = 2147483647)]
+    pub(super) topic_id: Option<i64>,
     /// Restrict results to this saved search group. An empty group matches nothing.
     #[param(minimum = 1)]
     pub(super) group_id: Option<i64>,
@@ -70,6 +76,7 @@ pub(in crate::interface::rest) fn build_list_query(
         query.include_deleted,
         request_id.clone(),
     )?;
+    filters.topic_id = parse_topic_id(query.topic_id, &request_id)?;
     filters.exclude_bots = query.exclude_bots.unwrap_or(false);
     let before = decode_cursor(query.before, request_id.clone())?;
     let after = decode_cursor(query.after, request_id.clone())?;
@@ -87,7 +94,6 @@ pub(in crate::interface::rest) fn build_list_query(
 
 pub(in crate::interface::rest) fn build_search_query(
     query: SearchQuery,
-    included_chat_ids: Option<Vec<i64>>,
     request_id: String,
 ) -> Result<SearchMessagesQuery, ApiError> {
     let page_size = PageSize::new(query.limit.unwrap_or(PageSize::DEFAULT.get()))
@@ -101,6 +107,7 @@ pub(in crate::interface::rest) fn build_search_query(
         query.include_deleted,
         request_id.clone(),
     )?;
+    filters.topic_id = parse_topic_id(query.topic_id, &request_id)?;
     filters.exclude_bots = query.exclude_bots.unwrap_or(false);
     let sort = SearchSort::from(query.sort.unwrap_or(SearchSortDto::Relevance));
     let (before, after, offset) = match sort {
@@ -141,7 +148,7 @@ pub(in crate::interface::rest) fn build_search_query(
     let result = SearchMessagesQuery {
         text: query.q,
         filters,
-        included_chat_ids,
+        included_chat_ids: None,
         excluded_chat_ids,
         before,
         after,
@@ -176,12 +183,20 @@ pub(in crate::interface::rest) fn filters(
         .map_err(|error| ApiError::from_application(error.into(), request_id))?;
     Ok(MessageFilters {
         chat_id,
+        topic_id: None,
         sender_id,
         post_author: post_author.filter(|author| !author.is_empty()),
         time_range,
         include_deleted: include_deleted.unwrap_or(false),
         exclude_bots: false,
     })
+}
+
+fn parse_topic_id(value: Option<i64>, request_id: &str) -> Result<Option<MessageId>, ApiError> {
+    value
+        .map(MessageId::new)
+        .transpose()
+        .map_err(|_| ApiError::malformed(request_id))
 }
 
 pub(in crate::interface::rest) fn decode_cursor(

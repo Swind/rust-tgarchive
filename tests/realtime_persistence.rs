@@ -229,6 +229,7 @@ async fn replaying_the_same_realtime_batch_after_a_crash_leaves_one_row() {
         .list(tgarchive::application::ListMessagesQuery {
             filters: tgarchive::application::MessageFilters {
                 chat_id: Some(chat_id),
+                topic_id: None,
                 sender_id: None,
                 post_author: None,
                 time_range: tgarchive::application::TimeRange::new(None, None).unwrap(),
