@@ -67,12 +67,17 @@ impl MediaWorker {
                 tracing::error!(%error, "cannot reconcile completed media files");
                 return;
             }
+            let mut slot = 0;
             loop {
                 if cancel.is_cancelled() {
                     break;
                 }
-                let job = match store.claim_media().await {
-                    Ok(Some(job)) => job,
+                // Reserve every fifth claim for the oldest eligible job, even under steady traffic.
+                let job = match store.claim_media(slot < 4).await {
+                    Ok(Some(job)) => {
+                        slot = (slot + 1) % 5;
+                        job
+                    }
                     Ok(None) => {
                         tokio::select! { _ = tokio::time::sleep(Duration::from_secs(2)) => {}, _ = cancel.cancelled() => break }
                         continue;

@@ -162,7 +162,7 @@ async fn preview_reads_are_local_archive_is_idempotent_and_content_stays_inside_
     tokio::fs::write(dir.path().join("outside.png"), b"secret")
         .await
         .unwrap();
-    let job = store.claim_media().await.unwrap().unwrap();
+    let job = store.claim_media(false).await.unwrap().unwrap();
     store
         .finish_media(job.id, "ok.png", "image/png", 3, Some(1), Some(1))
         .await
@@ -184,7 +184,7 @@ async fn preview_reads_are_local_archive_is_idempotent_and_content_stays_inside_
     assert_eq!(status, StatusCode::OK);
     assert_eq!(bytes.as_ref(), b"png");
 
-    let escaping = store.claim_media().await.unwrap().unwrap();
+    let escaping = store.claim_media(false).await.unwrap().unwrap();
     store
         .finish_media(escaping.id, "../outside.png", "image/png", 6, None, None)
         .await
@@ -298,7 +298,7 @@ async fn media_progress_is_readable_without_worker_and_counts_only_current_sourc
     assert_eq!(rows[0]["queued"], 1);
     assert_eq!(rows[0]["total"], 1);
     assert_eq!(rows[0]["title"], "media");
-    let job = store.claim_media().await.unwrap().unwrap();
+    let job = store.claim_media(false).await.unwrap().unwrap();
     let (_, rows, _) = call(&app, "GET", path, None).await;
     assert_eq!(rows[0]["running"], 1);
     store

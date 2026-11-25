@@ -77,6 +77,55 @@ async fn ingest(store: &SqliteStore, chat_id: ChatId, messages: Vec<Message>) {
 }
 
 #[tokio::test]
+async fn recent_previews_overtake_backfill_but_oldest_claims_still_make_progress() {
+    let (_dir, store, chat) = setup().await;
+    store.set_tracked(chat, true).await.unwrap();
+    store
+        .set_media_policy(chat.get(), MediaPolicy { auto_archive: true })
+        .await
+        .unwrap();
+    let now = Utc::now();
+    let photo = |id, age| {
+        let mut msg = message(
+            chat,
+            id,
+            vec![image(AttachmentKind::Photo, "p", "image/jpeg")],
+        );
+        msg.timestamp = now - chrono::Duration::seconds(age);
+        msg.collected_at = now;
+        msg
+    };
+    // The newest image has the lowest ID in the recent batch. Use message time, not job order.
+    ingest(
+        &store,
+        chat,
+        vec![photo(1, 172_800), photo(2, 10), photo(3, 60)],
+    )
+    .await;
+    ingest(&store, chat, vec![photo(4, 172_900)]).await;
+
+    let claim = |prefer_recent| {
+        let store = &store;
+        async move {
+            let job = store.claim_media(prefer_recent).await.unwrap().unwrap();
+            (job.message_id, job.variant, job.id)
+        }
+    };
+    let (id, variant, job_id) = claim(true).await;
+    assert_eq!((id, variant.as_str()), (2, "preview"));
+    store
+        .fail_media(job_id, "failed", "temporary", Some(now.timestamp() + 3600))
+        .await
+        .unwrap();
+    let (id, variant, _) = claim(false).await;
+    assert_eq!((id, variant.as_str()), (1, "preview"));
+    let (id, variant, _) = claim(true).await;
+    assert_eq!((id, variant.as_str()), (3, "preview"));
+    let (id, variant, _) = claim(true).await;
+    assert_eq!((id, variant.as_str()), (1, "archive"));
+}
+
+#[tokio::test]
 async fn tracked_ingest_queues_supported_previews_and_policy_archive_idempotently() {
     let (_dir, store, chat) = setup().await;
     ChatRepository::set_tracked(&store, chat, true)
@@ -290,17 +339,17 @@ async fn manual_backfill_works_with_auto_archive_off_and_null_retry_is_not_claim
     let rows = store.enqueue_media(chat.get(), "archive").await.unwrap();
     let archive = rows.iter().find(|m| m.variant == "archive").unwrap();
     assert_eq!(archive.trigger, "manual");
-    let claimed = store.claim_media().await.unwrap().unwrap();
+    let claimed = store.claim_media(true).await.unwrap().unwrap();
     store
         .fail_media(claimed.id, "failed", "temporary", None)
         .await
         .unwrap();
-    let claimed = store.claim_media().await.unwrap().unwrap();
+    let claimed = store.claim_media(true).await.unwrap().unwrap();
     store
         .fail_media(claimed.id, "failed", "temporary", None)
         .await
         .unwrap();
-    assert!(store.claim_media().await.unwrap().is_none());
+    assert!(store.claim_media(true).await.unwrap().is_none());
 }
 
 #[tokio::test]
@@ -319,7 +368,7 @@ async fn finish_rechecks_tracking_and_current_identity() {
         )],
     )
     .await;
-    let job = store.claim_media().await.unwrap().unwrap();
+    let job = store.claim_media(false).await.unwrap().unwrap();
     ChatRepository::set_tracked(&store, chat, false)
         .await
         .unwrap();
@@ -382,7 +431,7 @@ async fn missing_completed_media_can_be_requeued_without_resurrecting_stale_iden
         )],
     )
     .await;
-    let job = store.claim_media().await.unwrap().unwrap();
+    let job = store.claim_media(false).await.unwrap().unwrap();
     store
         .finish_media(
             job.id,

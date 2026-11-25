@@ -111,7 +111,7 @@ async fn startup_reconciliation_preserves_valid_files_and_requeues_missing_or_co
         jobs.push(store.message_media(chat.get(), id).await.unwrap().remove(0));
     }
     for (index, job) in jobs.iter().enumerate() {
-        let claimed = store.claim_media().await.unwrap().unwrap();
+        let claimed = store.claim_media(false).await.unwrap().unwrap();
         assert_eq!(claimed.id, job.id);
         let name = format!("{}.{}.png", job.id, job.variant);
         let bytes: &[u8] = if index == 1 {
@@ -145,7 +145,7 @@ async fn startup_reconciliation_preserves_valid_files_and_requeues_missing_or_co
 async fn stopped_jobs_recover_and_flood_waits_are_durable_and_bounded() {
     let (_dir, store, chat) = fixture().await;
     ingest_images(&store, chat, 1).await;
-    let job = store.claim_media().await.unwrap().unwrap();
+    let job = store.claim_media(false).await.unwrap().unwrap();
     let cancel = CancellationToken::new();
     let pacer = RatePacer::disabled();
     report_failure(&store, &pacer, &cancel, &job, WorkerError::Stopped).await;
@@ -159,7 +159,7 @@ async fn stopped_jobs_recover_and_flood_waits_are_durable_and_bounded() {
         "queued"
     );
 
-    let claimed = store.claim_media().await.unwrap().unwrap();
+    let claimed = store.claim_media(false).await.unwrap().unwrap();
     let now = chrono::Utc::now().timestamp();
     let flood = WorkerError::Telegram(grammers_client::InvocationError::Rpc(
         grammers_client::sender::RpcError {

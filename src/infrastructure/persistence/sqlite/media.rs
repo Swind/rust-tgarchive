@@ -177,9 +177,30 @@ impl SqliteStore {
         rows.iter().map(from_row).collect()
     }
 
-    pub async fn claim_media(&self) -> Result<Option<MediaDownload>, RepositoryError> {
-        let row = sqlx::query(&format!("UPDATE media_downloads SET state='running',attempts=attempts+1,last_error=NULL WHERE id=(SELECT id FROM media_downloads WHERE state='queued' OR (state='failed' AND next_attempt_at IS NOT NULL AND next_attempt_at<=unixepoch()) ORDER BY id LIMIT 1) AND (state='queued' OR (state='failed' AND next_attempt_at IS NOT NULL AND next_attempt_at<=unixepoch())) RETURNING {COLUMNS}"))
-            .fetch_optional(&self.pool).await?;
+    pub async fn claim_media(
+        &self,
+        prefer_recent_preview: bool,
+    ) -> Result<Option<MediaDownload>, RepositoryError> {
+        const READY: &str = "(state='queued' OR (state='failed' AND next_attempt_at<=unixepoch()))";
+        // Start from the timestamp index, not the potentially large backfill queue.
+        let row = sqlx::query(&format!(
+            "UPDATE media_downloads
+             SET state='running', attempts=attempts+1, last_error=NULL
+             WHERE id=COALESCE(
+                 CASE WHEN ?1 THEN (
+                     SELECT d.id FROM messages m CROSS JOIN media_downloads d
+                     WHERE m.is_deleted=0 AND m.timestamp>=unixepoch()-86400
+                       AND d.chat_id=m.chat_id AND d.message_id=m.message_id
+                       AND d.variant='preview' AND {READY}
+                     ORDER BY m.timestamp DESC, m.chat_id DESC, m.message_id DESC, d.id LIMIT 1
+                 ) END,
+                 (SELECT id FROM media_downloads WHERE {READY} ORDER BY id LIMIT 1)
+             )
+             RETURNING {COLUMNS}"
+        ))
+        .bind(prefer_recent_preview)
+        .fetch_optional(&self.pool)
+        .await?;
         row.as_ref().map(from_row).transpose()
     }
 
