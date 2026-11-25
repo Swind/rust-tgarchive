@@ -47,7 +47,7 @@ pub async fn execute_prepared(
             if let Some(sender) = sender {
                 query.filters.sender_id = Some(resolve_sender(app, &sender).await?);
             }
-            render_message_page(output, app.search_messages(query).await?)
+            render_message_page(output, app.search_messages(*query).await?)
         }
         PreparedCommand::SearchStatus => {
             let status = app.sync_status().await?.search_index;

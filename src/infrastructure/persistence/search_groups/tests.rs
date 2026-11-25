@@ -14,7 +14,7 @@ async fn groups_survive_reopen_and_deleted_ids_are_never_reused() {
     store.pool.close().await;
 
     let store = SearchGroupStore::open(&path).await.unwrap();
-    assert_eq!(store.list().await.unwrap(), [created.clone()]);
+    assert_eq!(store.list().await.unwrap(), std::slice::from_ref(&created));
     let empty = store.update(created.id, "Empty", vec![]).await.unwrap();
     assert_eq!(empty.id, created.id);
     assert!(store.get(created.id).await.unwrap().chat_ids.is_empty());

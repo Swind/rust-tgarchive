@@ -54,7 +54,7 @@ pub enum PreparedCommand {
     /// The optional text is a `--sender` reference resolved against the archive when run.
     MessagesList(ListMessagesQuery, Option<String>),
     MessageGet(ChatId, MessageId, bool),
-    MessagesSearch(SearchMessagesQuery, Option<String>),
+    MessagesSearch(Box<SearchMessagesQuery>, Option<String>),
     SendersSearch(SenderQuery),
     SenderGet(String, bool),
     Status,
@@ -171,7 +171,7 @@ pub(super) fn prepare_query(command: Command) -> Result<PreparedCommand, CliErro
             } => {
                 let sender = filters.sender.take();
                 Ok(PreparedCommand::MessagesSearch(
-                    search_query(query, sort, filters)?,
+                    Box::new(search_query(query, sort, filters)?),
                     sender,
                 ))
             }
