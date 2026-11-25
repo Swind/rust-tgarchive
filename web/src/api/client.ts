@@ -100,6 +100,7 @@ export const api = {
   media: (id: number) => request<MediaDownload>('GET', `/api/v1/media/${enc(id)}`),
   mediaProgress: () => request<MediaProgress[]>('GET', '/api/v1/media/downloads/status'),
   archiveMedia: (id: string) => request<MediaDownload>('POST', `/api/v1/media/${enc(id)}/archive`),
+  prioritizeMedia: (id: string) => request<MediaDownload>('POST', `/api/v1/media/${enc(id)}/prioritize`),
   retryMedia: (id: string) => request<MediaDownload>('POST', `/api/v1/media/${enc(id)}/retry`),
   backfillMedia: (chatId: number) => request<MediaDownload[]>('POST', `${chatPath(chatId)}/media/downloads`),
   refreshChats: () => request<Chat[]>('POST', '/api/v1/chats/refresh'),

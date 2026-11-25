@@ -39,6 +39,7 @@ pub enum SpecError {
         routes::media_content,
         routes::archive_media,
         routes::retry_media,
+        routes::prioritize_media,
         routes::track_chat,
         routes::untrack_chat,
         routes::list_chat_messages,

@@ -17,6 +17,7 @@ pub struct MediaDownload {
     pub variant: String,
     pub trigger: String,
     pub state: String,
+    pub prioritized: bool,
     pub relative_path: Option<String>,
     pub content_type: Option<String>,
     pub byte_size: Option<i64>,
@@ -48,31 +49,48 @@ pub struct MediaPolicy {
     pub auto_archive: bool,
 }
 
-fn from_row(row: &sqlx::sqlite::SqliteRow) -> Result<MediaDownload, RepositoryError> {
-    Ok(MediaDownload {
-        id: row.try_get("id").map_err(storage_error)?,
-        chat_id: row.try_get("chat_id").map_err(storage_error)?,
-        message_id: row.try_get("message_id").map_err(storage_error)?,
-        ordinal: row.try_get("ordinal").map_err(storage_error)?,
-        telegram_media_id: row.try_get("telegram_media_id").map_err(storage_error)?,
-        media_kind: row.try_get("media_kind").map_err(storage_error)?,
-        variant: row.try_get("variant").map_err(storage_error)?,
-        trigger: row.try_get("trigger").map_err(storage_error)?,
-        state: row.try_get("state").map_err(storage_error)?,
-        relative_path: row.try_get("relative_path").map_err(storage_error)?,
-        content_type: row.try_get("content_type").map_err(storage_error)?,
-        byte_size: row.try_get("byte_size").map_err(storage_error)?,
-        width: row.try_get("width").map_err(storage_error)?,
-        height: row.try_get("height").map_err(storage_error)?,
-        attempts: row.try_get("attempts").map_err(storage_error)?,
-        next_attempt_at: row.try_get("next_attempt_at").map_err(storage_error)?,
-        last_error: row.try_get("last_error").map_err(storage_error)?,
-    })
-}
-
-const COLUMNS: &str = "id, chat_id, message_id, ordinal, telegram_media_id, media_kind, variant, trigger, state, relative_path, content_type, byte_size, width, height, attempts, next_attempt_at, last_error";
+const CURRENT_TRACKED: &str = "EXISTS (
+    SELECT 1 FROM messages m
+    JOIN chats c ON c.id=m.chat_id
+    JOIN attachments a ON a.message_row_id=m.row_id AND a.ordinal=d.ordinal
+    WHERE m.chat_id=d.chat_id AND m.message_id=d.message_id AND m.is_deleted=0
+      AND c.tracked=1 AND a.kind=d.media_kind AND a.telegram_file_id=d.telegram_media_id
+)";
+// Keep the pending predicate and readiness key in sync with the partial index.
+const PRIORITY_PENDING: &str =
+    "(state='queued' OR (state='failed' AND next_attempt_at IS NOT NULL))";
+const PRIORITY_READY_AT: &str = "CASE WHEN state='queued' THEN 0 ELSE next_attempt_at END";
 
 impl SqliteStore {
+    fn media_from_row(
+        &self,
+        row: &sqlx::sqlite::SqliteRow,
+    ) -> Result<MediaDownload, RepositoryError> {
+        Ok(MediaDownload {
+            id: row.try_get("id").map_err(storage_error)?,
+            chat_id: row.try_get("chat_id").map_err(storage_error)?,
+            message_id: row.try_get("message_id").map_err(storage_error)?,
+            ordinal: row.try_get("ordinal").map_err(storage_error)?,
+            telegram_media_id: row.try_get("telegram_media_id").map_err(storage_error)?,
+            media_kind: row.try_get("media_kind").map_err(storage_error)?,
+            variant: row.try_get("variant").map_err(storage_error)?,
+            trigger: row.try_get("trigger").map_err(storage_error)?,
+            state: row.try_get("state").map_err(storage_error)?,
+            prioritized: !self.pre_0011_media_priority
+                && row
+                    .try_get::<bool, _>("prioritized")
+                    .map_err(storage_error)?,
+            relative_path: row.try_get("relative_path").map_err(storage_error)?,
+            content_type: row.try_get("content_type").map_err(storage_error)?,
+            byte_size: row.try_get("byte_size").map_err(storage_error)?,
+            width: row.try_get("width").map_err(storage_error)?,
+            height: row.try_get("height").map_err(storage_error)?,
+            attempts: row.try_get("attempts").map_err(storage_error)?,
+            next_attempt_at: row.try_get("next_attempt_at").map_err(storage_error)?,
+            last_error: row.try_get("last_error").map_err(storage_error)?,
+        })
+    }
+
     /// Counts current attachment jobs; replacement/deletion history is excluded.
     pub async fn media_progress(&self) -> Result<Vec<MediaProgress>, RepositoryError> {
         if self.pre_0009_media {
@@ -120,18 +138,20 @@ impl SqliteStore {
         if self.pre_0009_media {
             return Ok(Vec::new());
         }
-        let rows = sqlx::query(&format!("SELECT d.{0} FROM media_downloads d JOIN messages m ON m.chat_id=d.chat_id AND m.message_id=d.message_id JOIN attachments a ON a.message_row_id=m.row_id AND a.ordinal=d.ordinal WHERE d.chat_id=? AND d.message_id=? AND m.is_deleted=0 AND a.telegram_file_id=d.telegram_media_id AND a.kind=d.media_kind ORDER BY d.ordinal, d.variant", COLUMNS.replace(", ", ", d.")))
+        let rows = sqlx::query("SELECT d.* FROM media_downloads d JOIN messages m ON m.chat_id=d.chat_id AND m.message_id=d.message_id JOIN attachments a ON a.message_row_id=m.row_id AND a.ordinal=d.ordinal WHERE d.chat_id=? AND d.message_id=? AND m.is_deleted=0 AND a.telegram_file_id=d.telegram_media_id AND a.kind=d.media_kind ORDER BY d.ordinal, d.variant")
             .bind(chat_id).bind(message_id).fetch_all(&self.pool).await?;
-        rows.iter().map(from_row).collect()
+        rows.iter().map(|row| self.media_from_row(row)).collect()
     }
 
     pub async fn get_media(&self, id: i64) -> Result<Option<MediaDownload>, RepositoryError> {
         if self.pre_0009_media {
             return Ok(None);
         }
-        let rows = sqlx::query(&format!("SELECT d.{0} FROM media_downloads d JOIN messages m ON m.chat_id=d.chat_id AND m.message_id=d.message_id JOIN attachments a ON a.message_row_id=m.row_id AND a.ordinal=d.ordinal WHERE d.id=? AND m.is_deleted=0 AND a.telegram_file_id=d.telegram_media_id AND a.kind=d.media_kind", COLUMNS.replace(", ", ", d.")))
+        let rows = sqlx::query("SELECT d.* FROM media_downloads d JOIN messages m ON m.chat_id=d.chat_id AND m.message_id=d.message_id JOIN attachments a ON a.message_row_id=m.row_id AND a.ordinal=d.ordinal WHERE d.id=? AND m.is_deleted=0 AND a.telegram_file_id=d.telegram_media_id AND a.kind=d.media_kind")
             .bind(id).fetch_optional(&self.pool).await?;
-        rows.as_ref().map(from_row).transpose()
+        rows.as_ref()
+            .map(|row| self.media_from_row(row))
+            .transpose()
     }
 
     pub async fn request_archive(
@@ -146,10 +166,10 @@ impl SqliteStore {
         };
         sqlx::query("INSERT INTO media_downloads(chat_id,message_id,ordinal,telegram_media_id,media_kind,variant,trigger,state) SELECT d.chat_id,d.message_id,d.ordinal,d.telegram_media_id,d.media_kind,'archive','manual','queued' FROM media_downloads d JOIN messages m ON m.chat_id=d.chat_id AND m.message_id=d.message_id JOIN attachments a ON a.message_row_id=m.row_id AND a.ordinal=d.ordinal WHERE d.id=? AND m.is_deleted=0 AND a.telegram_file_id=d.telegram_media_id AND a.kind=d.media_kind ON CONFLICT(chat_id,message_id,ordinal,media_kind,telegram_media_id,variant) DO UPDATE SET trigger='manual', state=CASE WHEN media_downloads.state IN ('failed','interrupted','unavailable') THEN 'queued' ELSE media_downloads.state END, attempts=CASE WHEN media_downloads.state IN ('failed','interrupted','unavailable') THEN 0 ELSE media_downloads.attempts END, next_attempt_at=NULL")
             .bind(preview_id).execute(&mut *tx).await?;
-        let row = sqlx::query(&format!("SELECT {COLUMNS} FROM media_downloads WHERE chat_id=? AND message_id=? AND ordinal=? AND media_kind=? AND telegram_media_id=? AND variant='archive'"))
+        let row = sqlx::query("SELECT * FROM media_downloads WHERE chat_id=? AND message_id=? AND ordinal=? AND media_kind=? AND telegram_media_id=? AND variant='archive'")
             .bind(chat).bind(message).bind(ordinal).bind(kind).bind(media_id).fetch_optional(&mut *tx).await?;
         tx.commit().await?;
-        row.as_ref().map(from_row).transpose()
+        row.as_ref().map(|row| self.media_from_row(row)).transpose()
     }
 
     pub async fn enqueue_media(
@@ -172,9 +192,9 @@ impl SqliteStore {
         &self,
         chat_id: i64,
     ) -> Result<Vec<MediaDownload>, RepositoryError> {
-        let rows = sqlx::query(&format!("SELECT d.{0} FROM media_downloads d JOIN messages m ON m.chat_id=d.chat_id AND m.message_id=d.message_id JOIN attachments a ON a.message_row_id=m.row_id AND a.ordinal=d.ordinal WHERE d.chat_id=? AND m.is_deleted=0 AND a.kind=d.media_kind AND a.telegram_file_id=d.telegram_media_id ORDER BY d.message_id,d.ordinal,d.variant", COLUMNS.replace(", ", ", d.")))
+        let rows = sqlx::query("SELECT d.* FROM media_downloads d JOIN messages m ON m.chat_id=d.chat_id AND m.message_id=d.message_id JOIN attachments a ON a.message_row_id=m.row_id AND a.ordinal=d.ordinal WHERE d.chat_id=? AND m.is_deleted=0 AND a.kind=d.media_kind AND a.telegram_file_id=d.telegram_media_id ORDER BY d.message_id,d.ordinal,d.variant")
             .bind(chat_id).fetch_all(&self.pool).await?;
-        rows.iter().map(from_row).collect()
+        rows.iter().map(|row| self.media_from_row(row)).collect()
     }
 
     pub async fn claim_media(
@@ -182,11 +202,16 @@ impl SqliteStore {
         prefer_recent_preview: bool,
     ) -> Result<Option<MediaDownload>, RepositoryError> {
         const READY: &str = "(state='queued' OR (state='failed' AND next_attempt_at<=unixepoch()))";
-        // Start from the timestamp index, not the potentially large backfill queue.
+        // Prefer the sparse manual queue, then start the recent lookup from the timestamp index.
         let row = sqlx::query(&format!(
-            "UPDATE media_downloads
-             SET state='running', attempts=attempts+1, last_error=NULL
+            "UPDATE media_downloads AS d
+             SET state='running', attempts=attempts+1, last_error=NULL,
+                 prioritized=CASE WHEN prioritized=1 THEN {CURRENT_TRACKED} ELSE 0 END
              WHERE id=COALESCE(
+                 (SELECT d.id FROM media_downloads d
+                  WHERE d.prioritized=1 AND {PRIORITY_PENDING}
+                    AND ({PRIORITY_READY_AT})<=unixepoch() AND {CURRENT_TRACKED}
+                  ORDER BY {PRIORITY_READY_AT}, d.id LIMIT 1),
                  CASE WHEN ?1 THEN (
                      SELECT d.id FROM messages m CROSS JOIN media_downloads d
                      WHERE m.is_deleted=0 AND m.timestamp>=unixepoch()-86400
@@ -196,12 +221,12 @@ impl SqliteStore {
                  ) END,
                  (SELECT id FROM media_downloads WHERE {READY} ORDER BY id LIMIT 1)
              )
-             RETURNING {COLUMNS}"
+             RETURNING *"
         ))
         .bind(prefer_recent_preview)
         .fetch_optional(&self.pool)
         .await?;
-        row.as_ref().map(from_row).transpose()
+        row.as_ref().map(|row| self.media_from_row(row)).transpose()
     }
 
     pub async fn media_is_current(&self, job: &MediaDownload) -> Result<bool, RepositoryError> {
@@ -225,7 +250,7 @@ impl SqliteStore {
         width: Option<i32>,
         height: Option<i32>,
     ) -> Result<(), RepositoryError> {
-        let result = sqlx::query("UPDATE media_downloads SET state='succeeded',relative_path=?,content_type=?,byte_size=?,width=?,height=?,next_attempt_at=NULL,last_error=NULL WHERE id=? AND state='running' AND EXISTS (SELECT 1 FROM messages m JOIN attachments a ON a.message_row_id=m.row_id WHERE m.chat_id=media_downloads.chat_id AND m.message_id=media_downloads.message_id AND m.is_deleted=0 AND a.ordinal=media_downloads.ordinal AND a.kind=media_downloads.media_kind AND a.telegram_file_id=media_downloads.telegram_media_id) AND EXISTS (SELECT 1 FROM chats c LEFT JOIN media_policies p ON p.chat_id=c.id WHERE c.id=media_downloads.chat_id AND ((c.tracked AND (media_downloads.variant='preview' OR media_downloads.trigger='manual' OR COALESCE(p.auto_archive,0)=1)) OR (media_downloads.variant='archive' AND media_downloads.trigger='manual'))) ")
+        let result = sqlx::query("UPDATE media_downloads SET state='succeeded',prioritized=0,relative_path=?,content_type=?,byte_size=?,width=?,height=?,next_attempt_at=NULL,last_error=NULL WHERE id=? AND state='running' AND EXISTS (SELECT 1 FROM messages m JOIN attachments a ON a.message_row_id=m.row_id WHERE m.chat_id=media_downloads.chat_id AND m.message_id=media_downloads.message_id AND m.is_deleted=0 AND a.ordinal=media_downloads.ordinal AND a.kind=media_downloads.media_kind AND a.telegram_file_id=media_downloads.telegram_media_id) AND EXISTS (SELECT 1 FROM chats c LEFT JOIN media_policies p ON p.chat_id=c.id WHERE c.id=media_downloads.chat_id AND ((c.tracked AND (media_downloads.variant='preview' OR media_downloads.trigger='manual' OR COALESCE(p.auto_archive,0)=1)) OR (media_downloads.variant='archive' AND media_downloads.trigger='manual'))) ")
             .bind(path).bind(mime).bind(bytes).bind(width).bind(height).bind(id).execute(&self.pool).await?;
         if result.rows_affected() == 0 {
             return Err(invalid_data(
@@ -248,9 +273,25 @@ impl SqliteStore {
         ) {
             return Err(invalid_data("invalid media failure state"));
         }
-        sqlx::query("UPDATE media_downloads SET state=?,last_error=?,next_attempt_at=? WHERE id=? AND state!='succeeded'")
+        sqlx::query("UPDATE media_downloads SET state=?,prioritized=0,last_error=?,next_attempt_at=? WHERE id=? AND state!='succeeded'")
             .bind(state).bind(error).bind(retry_at).bind(id).execute(&self.pool).await?;
         Ok(())
+    }
+
+    pub async fn prioritize_preview(
+        &self,
+        id: i64,
+    ) -> Result<Option<MediaDownload>, RepositoryError> {
+        let row = sqlx::query(&format!(
+            "UPDATE media_downloads AS d
+             SET prioritized=CASE WHEN {PRIORITY_PENDING} THEN 1 ELSE prioritized END
+             WHERE d.id=? AND d.variant='preview' AND {CURRENT_TRACKED}
+             RETURNING *"
+        ))
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.as_ref().map(|row| self.media_from_row(row)).transpose()
     }
 
     pub async fn retry_media(&self, id: i64) -> Result<Option<MediaDownload>, RepositoryError> {
@@ -275,9 +316,9 @@ impl SqliteStore {
     }
 
     pub async fn list_completed_media(&self) -> Result<Vec<MediaDownload>, RepositoryError> {
-        let rows = sqlx::query(&format!("SELECT d.{0} FROM media_downloads d JOIN messages m ON m.chat_id=d.chat_id AND m.message_id=d.message_id JOIN attachments a ON a.message_row_id=m.row_id AND a.ordinal=d.ordinal WHERE d.state='succeeded' AND m.is_deleted=0 AND a.kind=d.media_kind AND a.telegram_file_id=d.telegram_media_id ORDER BY d.id", COLUMNS.replace(", ", ", d.")))
+        let rows = sqlx::query("SELECT d.* FROM media_downloads d JOIN messages m ON m.chat_id=d.chat_id AND m.message_id=d.message_id JOIN attachments a ON a.message_row_id=m.row_id AND a.ordinal=d.ordinal WHERE d.state='succeeded' AND m.is_deleted=0 AND a.kind=d.media_kind AND a.telegram_file_id=d.telegram_media_id ORDER BY d.id")
             .fetch_all(&self.pool).await?;
-        rows.iter().map(from_row).collect()
+        rows.iter().map(|row| self.media_from_row(row)).collect()
     }
 
     /// Requeues a completed file only if its source identity is still current.

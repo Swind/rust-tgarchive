@@ -231,6 +231,64 @@ async fn preview_reads_are_local_archive_is_idempotent_and_content_stays_inside_
 }
 
 #[tokio::test]
+async fn prioritizing_only_marks_the_current_preview_without_restarting_a_transfer() {
+    let (_dir, store, chat, app) = setup(true).await;
+    let preview = store.message_media(chat.get(), 8).await.unwrap().remove(0);
+    let archive = store.request_archive(preview.id).await.unwrap().unwrap();
+    let (status, _, _) = call(
+        &app,
+        "POST",
+        &format!("/api/v1/media/{}/prioritize", archive.id),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let path = format!("/api/v1/media/{}/prioritize", preview.id);
+    store
+        .fail_media(preview.id, "failed", "terminal", None)
+        .await
+        .unwrap();
+    let (status, failed, _) = call(&app, "POST", &path, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(failed["state"], "failed");
+    assert_eq!(failed["prioritized"], false);
+    let retry_path = format!("/api/v1/media/{}/retry", preview.id);
+    let (status, queued, _) = call(&app, "POST", &retry_path, None).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(queued["state"], "queued");
+    assert_eq!(queued["prioritized"], false);
+
+    let (status, queued, _) = call(&app, "POST", &path, None).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(queued["id"], preview.id);
+    assert_eq!(queued["state"], "queued");
+    assert_eq!(queued["prioritized"], true);
+    let (_, repeated, _) = call(&app, "POST", &path, None).await;
+    assert_eq!(queued, repeated);
+
+    let claimed = store.claim_media(false).await.unwrap().unwrap();
+    assert_eq!(claimed.id, preview.id);
+    let (status, running, _) = call(&app, "POST", &path, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(running["state"], "running");
+    assert_eq!(store.get_media(preview.id).await.unwrap(), Some(claimed));
+
+    store
+        .finish_media(preview.id, "preview.png", "image/png", 1, None, None)
+        .await
+        .unwrap();
+    let (status, completed, _) = call(&app, "POST", &path, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(completed["state"], "succeeded");
+    assert_eq!(completed["prioritized"], false);
+
+    store.set_tracked(chat, false).await.unwrap();
+    let (status, _, _) = call(&app, "POST", &path, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn download_mutations_report_missing_worker_and_bad_json_keeps_error_envelope() {
     let (_dir, store, chat, app) = setup(false).await;
     let (status, _, _) = call(
@@ -266,6 +324,18 @@ async fn download_mutations_report_missing_worker_and_bad_json_keeps_error_envel
     )
     .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    let (status, error, _) = call(
+        &app,
+        "POST",
+        &format!(
+            "/api/v1/media/{}/prioritize",
+            media[0]["id"].as_i64().unwrap()
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(error["error"]["code"], "media_unavailable");
 
     let response = app
         .clone()

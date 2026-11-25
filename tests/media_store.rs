@@ -126,6 +126,142 @@ async fn recent_previews_overtake_backfill_but_oldest_claims_still_make_progress
 }
 
 #[tokio::test]
+async fn manual_preview_priority_survives_reopen_and_precedes_both_regular_slots() {
+    let (dir, store, chat) = setup().await;
+    store.set_tracked(chat, true).await.unwrap();
+    let messages = (1..=5)
+        .map(|id| {
+            let mut photo = message(
+                chat,
+                id,
+                vec![image(AttachmentKind::Photo, "p", "image/jpeg")],
+            );
+            if id == 3 {
+                photo.timestamp = Utc::now();
+            }
+            photo
+        })
+        .collect();
+    ingest(&store, chat, messages).await;
+
+    let delayed = store.claim_media(false).await.unwrap().unwrap();
+    assert_eq!(delayed.message_id, 1);
+    let retry_at = Utc::now().timestamp() + 3600;
+    store
+        .fail_media(delayed.id, "failed", "rate limited", Some(retry_at))
+        .await
+        .unwrap();
+    let upgraded = store.prioritize_preview(delayed.id).await.unwrap().unwrap();
+    assert!(upgraded.prioritized);
+    assert_eq!(upgraded.state, "failed");
+    assert_eq!(upgraded.next_attempt_at, Some(retry_at));
+    assert_eq!(upgraded.attempts, delayed.attempts);
+    assert_eq!(upgraded.last_error.as_deref(), Some("rate limited"));
+
+    for message_id in [4, 5] {
+        let queued = store
+            .message_media(chat.get(), message_id)
+            .await
+            .unwrap()
+            .remove(0);
+        let priority = store.prioritize_preview(queued.id).await.unwrap().unwrap();
+        assert!(priority.prioritized);
+        assert_eq!(priority.state, "queued");
+    }
+    store.close().await;
+    let url = format!("sqlite://{}", dir.path().join("media.db").display());
+    let store = SqliteStore::open_existing(&url).await.unwrap();
+
+    for (prefer_recent, message_id, prioritized) in [
+        (true, 4, true),
+        (false, 5, true),
+        (true, 3, false),
+        (false, 2, false),
+    ] {
+        let job = store.claim_media(prefer_recent).await.unwrap().unwrap();
+        assert_eq!((job.message_id, job.prioritized), (message_id, prioritized));
+        match message_id {
+            4 => store
+                .finish_media(job.id, "4.preview.jpg", "image/jpeg", 1, None, None)
+                .await
+                .unwrap(),
+            5 => store
+                .fail_media(job.id, "failed", "rate limited", Some(retry_at))
+                .await
+                .unwrap(),
+            _ => continue,
+        }
+        assert!(!store.get_media(job.id).await.unwrap().unwrap().prioritized);
+    }
+    assert!(store.claim_media(false).await.unwrap().is_none());
+    let delayed = store.get_media(delayed.id).await.unwrap().unwrap();
+    assert!(delayed.prioritized);
+    assert_eq!(delayed.next_attempt_at, Some(retry_at));
+}
+
+#[tokio::test]
+async fn read_only_media_projects_no_priority_before_migration_0011() {
+    let dir = tempfile::tempdir().unwrap();
+    let migrations = tempfile::tempdir().unwrap();
+    for file in std::fs::read_dir("migrations").unwrap() {
+        let file = file.unwrap();
+        let name = file.file_name();
+        let version: u32 = name
+            .to_str()
+            .unwrap()
+            .split('_')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        if version <= 10 {
+            std::fs::copy(file.path(), migrations.path().join(name)).unwrap();
+        }
+    }
+    let url = format!("sqlite://{}", dir.path().join("media.db").display());
+    let options = url
+        .parse::<sqlx::sqlite::SqliteConnectOptions>()
+        .unwrap()
+        .create_if_missing(true);
+    let pool = sqlx::SqlitePool::connect_with(options).await.unwrap();
+    sqlx::migrate::Migrator::new(migrations.path())
+        .await
+        .unwrap()
+        .run(&pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        "INSERT INTO chats(id,kind,created_at,updated_at,tracked) VALUES (24,'group',1,1,1);
+         INSERT INTO messages(row_id,chat_id,message_id,timestamp,collected_at,created_at,updated_at,version_at,source_priority)
+            VALUES (1,24,8,1,1,1,1,1,0);
+         INSERT INTO attachments(message_row_id,ordinal,kind,telegram_file_id) VALUES (1,0,'photo','p');
+         INSERT INTO media_downloads(id,chat_id,message_id,ordinal,telegram_media_id,media_kind,variant,trigger)
+            VALUES (5,24,8,0,'p','photo','preview','auto');",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+
+    let reader = SqliteStore::open_existing_readonly(&url).await.unwrap();
+    let preview = reader.get_media(5).await.unwrap().unwrap();
+    assert!(!preview.prioritized);
+    assert_eq!(reader.message_media(24, 8).await.unwrap(), vec![preview]);
+    reader.close().await;
+
+    let writer = SqliteStore::open_existing(&url).await.unwrap();
+    assert!(!writer.get_media(5).await.unwrap().unwrap().prioritized);
+    assert!(
+        writer
+            .prioritize_preview(5)
+            .await
+            .unwrap()
+            .unwrap()
+            .prioritized
+    );
+}
+
+#[tokio::test]
 async fn tracked_ingest_queues_supported_previews_and_policy_archive_idempotently() {
     let (_dir, store, chat) = setup().await;
     ChatRepository::set_tracked(&store, chat, true)
@@ -314,6 +450,7 @@ async fn replaced_attachment_keeps_old_file_identity_and_rejects_stale_archive_r
         .unwrap();
     assert!(!store.media_is_current(&old).await.unwrap());
     assert!(store.request_archive(old.id).await.unwrap().is_none());
+    assert!(store.prioritize_preview(old.id).await.unwrap().is_none());
     let current = store.message_media(chat.get(), 1).await.unwrap();
     assert_eq!(current.len(), 1);
     assert_eq!(current[0].telegram_media_id, "new-id");

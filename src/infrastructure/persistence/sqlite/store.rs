@@ -36,6 +36,8 @@ pub struct SqliteStore {
     /// Read-only database opened without migrating: lacks media tables from migration 0009.
     pub(super) pre_0009_media: bool,
     pre_0010_topics: bool,
+    /// Read-only database opened without migration 0011: pending priority reads as false.
+    pub(super) pre_0011_media_priority: bool,
 }
 
 /// Which migrations a read-only, unmigrated database is missing.
@@ -55,6 +57,7 @@ impl SqliteStore {
             pre_0008: false,
             pre_0009_media: false,
             pre_0010_topics: false,
+            pre_0011_media_priority: false,
         }
     }
 
@@ -142,12 +145,14 @@ impl SqliteStore {
         .fetch_one(&store.pool)
         .await?;
         store.pre_0008 = bot == 0;
-        let media: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='media_downloads'",
+        let (has_media, has_priority): (bool, bool) = sqlx::query_as(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='media_downloads'),
+                    EXISTS(SELECT 1 FROM pragma_table_info('media_downloads') WHERE name='prioritized')",
         )
         .fetch_one(&store.pool)
         .await?;
-        store.pre_0009_media = media == 0;
+        store.pre_0009_media = !has_media;
+        store.pre_0011_media_priority = !has_priority;
         store.pre_0010_topics = !sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS(SELECT 1 FROM pragma_table_info('messages') WHERE name='topic_id')",
         )

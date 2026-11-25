@@ -19,6 +19,8 @@ pub struct MediaDownloadDto {
     pub ordinal: i64,
     pub variant: String,
     pub state: String,
+    /// Manual priority applies until the prioritized attempt succeeds or fails.
+    pub prioritized: bool,
     pub width: Option<i32>,
     pub height: Option<i32>,
     pub byte_size: Option<i64>,
@@ -36,6 +38,7 @@ impl From<MediaDownload> for MediaDownloadDto {
             ordinal: value.ordinal,
             variant: value.variant,
             state: value.state,
+            prioritized: value.prioritized,
             width: value.width,
             height: value.height,
             byte_size: value.byte_size,

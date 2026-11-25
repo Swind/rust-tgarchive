@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Download, ExternalLink, Hash, Paperclip, RotateCw } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { api, type Message } from '../api/client';
+import { api, type MediaDownload, type Message } from '../api/client';
 import { colorIndex, initials, type GroupPos } from '../lib/bubble';
 import { formatDateTime, formatSize, formatTime } from '../lib/format';
 import { highlight } from '../lib/highlight';
@@ -26,23 +26,37 @@ function MediaPreview({ chatId, messageId, ordinal }: { chatId: number; messageI
     observer.observe(node);
     return () => observer.disconnect();
   }, []);
+  const mediaKey = ['message-media', chatId, messageId] as const;
   const media = useQuery({
-    queryKey: ['message-media', chatId, messageId],
+    queryKey: mediaKey,
     queryFn: () => api.messageMedia(chatId, messageId),
     enabled: visible,
     refetchInterval: (query) => query.state.data?.some((item) => ['queued', 'running'].includes(item.state) || (item.state === 'failed' && item.next_attempt_at != null)) ? 1500 : false,
   });
   const preview = media.data?.find((item) => item.ordinal === ordinal && item.variant === 'preview');
   const archive = media.data?.find((item) => item.ordinal === ordinal && item.variant === 'archive');
+  const status = useQuery({
+    queryKey: ['status'], queryFn: api.status, enabled: preview?.state === 'queued', staleTime: 5000,
+  });
+  const canPrioritize = preview?.state === 'queued' && !preview.prioritized
+    && status.isSuccess && status.data.collector.state !== 'disabled';
+  const prioritize = useMutation({
+    mutationFn: (id: number) => api.prioritizeMedia(String(id)),
+    onSuccess: async (updated) => {
+      await qc.cancelQueries({ queryKey: mediaKey });
+      qc.setQueryData<MediaDownload[]>(mediaKey, (items) =>
+        items?.map((item) => item.id === updated.id ? updated : item));
+    },
+  });
   const archiveRequest = useMutation({
     mutationFn: () => api.archiveMedia(String(preview!.id)),
-    onSuccess: () => void qc.invalidateQueries({ queryKey: ['message-media', chatId, messageId] }),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: mediaKey }),
   });
   const retry = useMutation({
     mutationFn: () => api.retryMedia(String(preview!.id)),
     onSuccess: () => {
       setBrokenPreviewUrl(null);
-      void qc.invalidateQueries({ queryKey: ['message-media', chatId, messageId] });
+      void qc.invalidateQueries({ queryKey: mediaKey });
     },
   });
   const canRetryPreview = preview && ['failed', 'unavailable', 'interrupted'].includes(preview.state);
@@ -56,6 +70,13 @@ function MediaPreview({ chatId, messageId, ordinal }: { chatId: number; messageI
       )}
       {preview?.content_url && preview.content_url === brokenPreviewUrl && <span>本地預覽檔目前無法讀取</span>}
       {preview && ['queued', 'running'].includes(preview.state) && <span>預覽{preview.state === 'queued' ? '排隊中' : '下載中'}…</span>}
+      {canPrioritize && (
+        <Button type="button" size="sm" variant="outline" disabled={prioritize.isPending} onClick={() => prioritize.mutate(preview.id)}>
+          {prioritize.isPending ? '正在設定優先下載…' : '優先下載預覽'}
+        </Button>
+      )}
+      {preview?.state === 'queued' && preview.prioritized && <span role="status">已優先排入預覽下載</span>}
+      {prioritize.error && <span role="status" className="text-destructive">無法優先下載預覽：{prioritize.error.message}</span>}
       {canRetryPreview && <Button size="sm" variant="outline" disabled={retry.isPending} onClick={() => retry.mutate()}><RotateCw aria-hidden="true" />預覽失敗 · 重試</Button>}
       {!preview && visible && media.isSuccess && <span>預覽尚未排入</span>}
       {media.error && <span role="status" className="text-destructive">無法讀取圖片下載狀態</span>}

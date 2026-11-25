@@ -119,6 +119,7 @@ pub fn router_with_groups(
         .route("/api/v1/media/{media_id}/content", get(routes::media_content))
         .route("/api/v1/media/{media_id}/archive", axum::routing::post(routes::archive_media))
         .route("/api/v1/media/{media_id}/retry", axum::routing::post(routes::retry_media))
+        .route("/api/v1/media/{media_id}/prioritize", axum::routing::post(routes::prioritize_media))
         .route(
             "/api/v1/chats/{chat_id}/tracking",
             axum::routing::put(routes::track_chat).delete(routes::untrack_chat),

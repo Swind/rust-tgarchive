@@ -817,6 +817,49 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorEnvelope'
+  /api/v1/media/{media_id}/prioritize:
+    post:
+      tags:
+      - routes
+      operationId: prioritize_media
+      parameters:
+      - name: media_id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MediaDownloadDto'
+        '202':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MediaDownloadDto'
+        '400':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
   /api/v1/media/{media_id}/retry:
     post:
       tags:
@@ -1655,6 +1698,7 @@ components:
       - ordinal
       - variant
       - state
+      - prioritized
       properties:
         byte_size:
           type:
@@ -1685,6 +1729,9 @@ components:
         ordinal:
           type: integer
           format: int64
+        prioritized:
+          type: boolean
+          description: Manual priority applies until the prioritized attempt succeeds or fails.
         state:
           type: string
         variant:

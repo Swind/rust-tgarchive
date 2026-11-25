@@ -72,10 +72,12 @@ impl MediaWorker {
                 if cancel.is_cancelled() {
                     break;
                 }
-                // Reserve every fifth claim for the oldest eligible job, even under steady traffic.
+                // Reserve every fifth regular claim for the oldest eligible job.
                 let job = match store.claim_media(slot < 4).await {
                     Ok(Some(job)) => {
-                        slot = (slot + 1) % 5;
+                        if !job.prioritized {
+                            slot = (slot + 1) % 5;
+                        }
                         job
                     }
                     Ok(None) => {

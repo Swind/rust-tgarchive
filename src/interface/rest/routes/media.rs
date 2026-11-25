@@ -176,6 +176,32 @@ pub(in crate::interface::rest) async fn retry_media(
     Ok((StatusCode::ACCEPTED, Json(record.into())))
 }
 
+#[utoipa::path(post, path = "/api/v1/media/{media_id}/prioritize", params(("media_id" = i64, Path)), responses((status=202, body=MediaDownloadDto), (status=200, body=MediaDownloadDto), (status=400, body=super::ErrorEnvelope), (status=404, body=super::ErrorEnvelope), (status=503, body=super::ErrorEnvelope)))]
+pub(in crate::interface::rest) async fn prioritize_media(
+    State(state): State<RestState>,
+    ApiPath((raw_id,)): ApiPath<(i64,)>,
+    Extension(id): Extension<RequestId>,
+) -> Result<(StatusCode, Json<MediaDownloadDto>), ApiError> {
+    let media = media_context(&state, &id.0)?;
+    if !media.worker_enabled {
+        return Err(ApiError::media_unavailable(id.0));
+    }
+    let record = media_result(
+        media
+            .store
+            .prioritize_preview(media_id(raw_id, &id.0)?)
+            .await,
+        &id.0,
+    )?
+    .ok_or_else(|| ApiError::not_found(id.0.clone()))?;
+    let status = if record.prioritized && matches!(record.state.as_str(), "queued" | "failed") {
+        StatusCode::ACCEPTED
+    } else {
+        StatusCode::OK
+    };
+    Ok((status, Json(record.into())))
+}
+
 #[utoipa::path(get, path = "/api/v1/media/{media_id}/content", params(("media_id" = i64, Path)), responses((status=200, description="Verified local image bytes"), (status=404, body=super::ErrorEnvelope)))]
 pub(in crate::interface::rest) async fn media_content(
     State(state): State<RestState>,
