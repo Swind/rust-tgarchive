@@ -22,7 +22,8 @@ use tgarchive::{
         services::{Application, CollectorStatusHandle, ComponentState, ComponentStatus},
         sync::{SyncCoordinator, SyncEngine},
     },
-    domain::{Chat, ChatId, ChatKind, MessageId},
+    domain::{Chat, ChatId, ChatKind, ForumTopic, MessageId},
+    infrastructure::persistence::sqlite::SqliteStore,
     interface::rest::{
         OpenApiFormat, export_openapi, router, router_with_sync, validate_loopback_bind,
     },
@@ -507,6 +508,8 @@ fn openapi_json_and_yaml_export_without_application_or_database() {
         "/api/v1/chats",
         "/api/v1/chats/refresh",
         "/api/v1/chats/{chat_id}",
+        "/api/v1/chats/{chat_id}/topics",
+        "/api/v1/chats/{chat_id}/topics/{topic_id}",
         "/api/v1/chats/{chat_id}/messages",
         "/api/v1/messages",
         "/api/v1/messages/search",
@@ -685,6 +688,148 @@ async fn call(service: &axum::Router, method: &str, uri: &str) -> (StatusCode, V
         .await
         .unwrap();
     (response.status(), json_body(response).await)
+}
+
+async fn put_topic(service: &axum::Router, path: &str, body: Value) -> (StatusCode, Value) {
+    let response = service
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(path)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    if status == StatusCode::NO_CONTENT {
+        assert!(
+            to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        return (status, Value::Null);
+    }
+    (status, json_body(response).await)
+}
+
+#[tokio::test]
+async fn topic_settings_are_chat_scoped_and_query_only_reads_cannot_change_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("sqlite://{}", dir.path().join("topics.db").display());
+    let store = Arc::new(SqliteStore::connect(&url).await.unwrap());
+    let id = ChatId::from_telegram(ChatKind::Supergroup, 71).unwrap();
+    let other = ChatId::from_telegram(ChatKind::Supergroup, 72).unwrap();
+    for chat in [id, other] {
+        store
+            .save_refresh(vec![Chat {
+                id: chat,
+                kind: ChatKind::Supergroup,
+                title: None,
+                username: None,
+                tracked: false,
+            }])
+            .await
+            .unwrap();
+        store.set_tracked(chat, true).await.unwrap();
+    }
+    store
+        .save_topics(
+            id,
+            vec![ForumTopic {
+                id: MessageId::new(5).unwrap(),
+                title: "Ideas".into(),
+            }],
+        )
+        .await
+        .unwrap();
+
+    let build = |store: Arc<SqliteStore>, gateway: Option<Arc<dyn TelegramGateway>>| {
+        router(Arc::new(Application::new(
+            store.clone(),
+            store.clone(),
+            store.clone(),
+            store,
+            gateway,
+            ComponentStatus::disabled(),
+        )))
+    };
+    let gateway = Arc::new(FakePorts {
+        failure: None,
+        jobs: Mutex::default(),
+        gateway_gate: None,
+    });
+    let live = build(store.clone(), Some(gateway));
+    let readonly = build(
+        Arc::new(SqliteStore::open_existing_readonly(&url).await.unwrap()),
+        None,
+    );
+    let path = format!("/api/v1/chats/{}/topics", id.get());
+    let topic = format!("{path}/5");
+    let setting = |collected| json!({"collected": collected});
+    let listing = |collected| json!([{"id":5, "title":"Ideas", "collected":collected}]);
+    assert_eq!(
+        call(&live, "GET", &path).await,
+        (StatusCode::OK, listing(true))
+    );
+    assert_eq!(
+        put_topic(&live, &topic, setting(false)).await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        call(&readonly, "GET", &path).await,
+        (StatusCode::OK, listing(false))
+    );
+    let (status, error) = put_topic(&readonly, &topic, setting(true)).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(error["error"]["code"], "telegram_unavailable");
+    assert_eq!(
+        call(&live, "GET", &path).await,
+        (StatusCode::OK, listing(false))
+    );
+    assert_eq!(
+        put_topic(&live, &topic, setting(true)).await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        call(&readonly, "GET", &path).await,
+        (StatusCode::OK, listing(true))
+    );
+
+    let other_topic = format!("/api/v1/chats/{}/topics/5", other.get());
+    assert_eq!(
+        put_topic(&live, &other_topic, setting(false)).await.0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        call(&live, "GET", "/api/v1/chats/1/topics").await.0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        call(&live, "GET", "/api/v1/chats/0/topics").await.0,
+        StatusCode::BAD_REQUEST
+    );
+    for (uri, body) in [
+        (format!("{path}/0"), setting(false)),
+        (format!("{path}/2147483648"), setting(false)),
+        (topic.clone(), json!({})),
+        (topic.clone(), json!({"collected":"false"})),
+    ] {
+        let (status, error) = put_topic(&live, &uri, body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(error["error"]["code"], "malformed_request");
+    }
+    store.set_tracked(id, false).await.unwrap();
+    let (status, error) = put_topic(&live, &topic, setting(false)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(error["error"]["code"], "chat_not_tracked");
+    assert_eq!(
+        call(&live, "GET", &path).await,
+        (StatusCode::OK, listing(true))
+    );
 }
 
 #[tokio::test]

@@ -106,6 +106,61 @@ function Actions({ chat }: { chat: Chat }) {
   );
 }
 
+function TopicSettings({ chat }: { chat: Chat }) {
+  const id = useId();
+  const qc = useQueryClient();
+  const status = useSyncStatus();
+  const topicsKey = ['topics', chat.id];
+  const topics = useQuery({
+    queryKey: topicsKey, queryFn: () => api.topics(chat.id), enabled: chat.tracked,
+    refetchInterval: (q) => status.data?.collector?.state !== 'disabled' && !q.state.data?.length ? 15_000 : false,
+  });
+  const save = useMutation({
+    mutationFn: ({ topicId, collected }: { topicId: number; collected: boolean }) => api.setTopicCollected(chat.id, topicId, collected),
+    onSettled: () => Promise.all([
+      qc.invalidateQueries({ queryKey: topicsKey }),
+      qc.invalidateQueries({ queryKey: ['sync-status'] }),
+      qc.invalidateQueries({ queryKey: ['chat', chat.id] }),
+    ]),
+  });
+  const state = status.data?.collector?.state;
+  const unavailable = !chat.tracked ? '請先開始收集此聊天室，才能變更話題設定。'
+    : !state || status.isError ? '目前無法確認收集器狀態。'
+    : state === 'disabled' ? '目前是唯讀模式，無法變更話題設定。' : null;
+
+  const refreshButton = chat.tracked && topics.isError && (
+    <Button size="sm" variant="outline" disabled={topics.isFetching} onClick={() => void topics.refetch()}>重新載入話題</Button>
+  );
+  if (!topics.data?.length) {
+    if (refreshButton) return <div><ErrorBox error={topics.error} />{refreshButton}</div>;
+    if (topics.isLoading) return <span className="text-xs text-muted-foreground">正在載入話題…</span>;
+    return null;
+  }
+  return (
+    <details className="min-w-0 text-xs" onToggle={(event) => {
+      if (event.currentTarget.open && chat.tracked && topics.isStale) void topics.refetch();
+    }}>
+      <summary className="min-h-8 cursor-pointer content-center rounded-md px-2 font-medium hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring">話題收集設定</summary>
+      <fieldset aria-describedby={`${id}-help`} className="space-y-1 px-2 py-2">
+        <legend className="font-semibold">要收集的話題</legend>
+        <p id={`${id}-help`} className="text-muted-foreground">預設收集所有話題，包括新建立的話題。取消勾選不會刪除已封存的訊息；重新勾選會補收 Telegram 仍保留的歷史訊息，並修正既有訊息的話題歸屬。</p>
+        {unavailable && <p>{unavailable}</p>}
+        {topics.data.map((topic) => (
+          <Label key={topic.id} htmlFor={`${id}-${topic.id}`} className="min-h-12 wrap-anywhere">
+            <Checkbox id={`${id}-${topic.id}`} checked={topic.collected}
+              disabled={!!unavailable || save.isPending || topics.isError}
+              onCheckedChange={(value) => save.mutate({ topicId: topic.id, collected: value === true })} />
+            {topic.title}
+          </Label>
+        ))}
+        <p role="status">{save.isPending ? '正在儲存話題設定…' : save.isSuccess ? '已儲存話題設定' : ''}</p>
+        <ErrorBox error={save.error ?? topics.error} />
+        {refreshButton}
+      </fieldset>
+    </details>
+  );
+}
+
 function MediaTools({ chatId }: { chatId: number }) {
   const toolsId = useId();
   const [expanded, setExpanded] = useState(false);
@@ -226,6 +281,7 @@ export default function ChatPane({ chatId }: { chatId: number }) {
         <div id={toolsId} className={`${toolsOpen ? 'block' : 'hidden'} lg:contents`}>
           <div className="flex flex-wrap items-start justify-between gap-2 px-4 pb-3 lg:max-w-sm lg:justify-end lg:self-center lg:py-3 lg:pe-6 lg:ps-0">
             <Actions chat={c} />
+            {c.kind === 'supergroup' && <TopicSettings chat={c} />}
             {s && (
               <details className="min-w-0 rounded-md text-xs text-muted-foreground">
                 <summary className="flex min-h-8 cursor-pointer list-none items-center gap-1.5 rounded-md px-2 font-medium hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring">

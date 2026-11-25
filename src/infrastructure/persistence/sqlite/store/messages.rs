@@ -29,7 +29,7 @@ async fn attachments_for(
     Ok(attachments)
 }
 
-/// `legacy` is a read-only database that predates migration 0007: the metadata columns read as NULL.
+/// Project missing metadata as NULL for read-only databases predating its migration.
 fn message_select(legacy: LegacyColumns) -> String {
     let metadata = if legacy.metadata {
         "NULL AS post_author, NULL AS fwd_from_id, NULL AS fwd_from_name, NULL AS fwd_date"
@@ -37,7 +37,10 @@ fn message_select(legacy: LegacyColumns) -> String {
         "m.post_author, m.fwd_from_id, m.fwd_from_name, m.fwd_date"
     };
     let bot = if legacy.bot { "NULL" } else { "s.is_bot" };
-    format!("{MESSAGE_SELECT_HEAD}{metadata}{MESSAGE_SELECT_MID}{bot}{MESSAGE_SELECT_TAIL}")
+    let topic = if legacy.topics { "NULL" } else { "m.topic_id" };
+    format!(
+        "{MESSAGE_SELECT_HEAD}{topic} AS topic_id, {metadata}{MESSAGE_SELECT_MID}{bot}{MESSAGE_SELECT_TAIL}"
+    )
 }
 
 const MESSAGE_SELECT_HEAD: &str = "SELECT m.row_id, m.chat_id, m.message_id, m.sender_id, m.timestamp, m.edited_at, m.collected_at, m.text, m.reply_to, ";
@@ -67,6 +70,11 @@ fn row_message(row: &SqliteRow, attachments: Vec<Attachment>) -> Result<Message,
         id: MessageId::new(row.try_get("message_id").map_err(storage_error)?)
             .map_err(invalid_data)?,
         chat_id: ChatId::from_marked(row.try_get("chat_id").map_err(storage_error)?)
+            .map_err(invalid_data)?,
+        topic_id: row
+            .try_get::<Option<i64>, _>("topic_id")?
+            .map(MessageId::new)
+            .transpose()
             .map_err(invalid_data)?,
         sender_id: sender
             .map(SenderId::from_marked)

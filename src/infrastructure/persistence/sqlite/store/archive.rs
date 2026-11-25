@@ -146,6 +146,22 @@ async fn backfill_metadata(
 impl ArchiveWriter for SqliteStore {
     async fn write_batch(&self, batch: IngestBatch) -> Result<(), RepositoryError> {
         let mut tx = self.pool.begin().await?;
+        if let Some((walk, next)) = batch.topic_backfill {
+            // Claim exactly the page that was requested. An untrack, toggle or another
+            // worker's commit can invalidate it while the Telegram RPC is in flight.
+            let claimed = sqlx::query("UPDATE forum_topics SET before_id=?1, backfill_pending=(?1 IS NOT NULL) WHERE chat_id=?2 AND topic_id=?3 AND generation=?4 AND before_id IS ?5 AND backfill_pending=1 AND EXISTS(SELECT 1 FROM chats WHERE id=?2 AND tracked=1)")
+                .bind(next.map(MessageId::get))
+                .bind(walk.chat_id.get())
+                .bind(walk.topic_id.get())
+                .bind(walk.generation)
+                .bind(walk.before_id.map(MessageId::get))
+                .execute(&mut *tx)
+                .await?;
+            if claimed.rows_affected() == 0 {
+                tx.rollback().await?;
+                return Ok(());
+            }
+        }
         if !batch.account_deletions.is_empty() {
             let bound: Option<i64> = sqlx::query_scalar(
                 "SELECT user_id FROM telegram_account_identity WHERE singleton=1",
@@ -181,22 +197,8 @@ impl ArchiveWriter for SqliteStore {
         for chat in &batch.chats {
             save_chat(&mut tx, chat).await?;
         }
-        let observed_at = batch
-            .records
-            .iter()
-            .filter_map(|record| match &record.event {
-                MessageEvent::Created(message) | MessageEvent::Updated(message) => {
-                    Some(seconds(message.collected_at))
-                }
-                MessageEvent::Deleted { .. } => None,
-            })
-            .max()
-            .unwrap_or_else(|| Utc::now().timestamp());
-        for sender in &batch.senders {
-            save_sender(&mut tx, sender, observed_at).await?;
-        }
-
-        for record in &batch.records {
+        let mut skipped = Vec::new();
+        for (index, record) in batch.records.iter().enumerate() {
             match &record.event {
                 MessageEvent::Deleted {
                     chat_id,
@@ -204,6 +206,16 @@ impl ArchiveWriter for SqliteStore {
                     deleted_at,
                 } => {
                     ensure_chat(&mut tx, *chat_id).await?;
+                    // Telegram deletions carry no topic ID. Respect exclusions for known rows,
+                    // but retain the usual tombstone semantics for an unknown message.
+                    let excluded: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM messages m JOIN forum_topics t ON t.chat_id=m.chat_id AND t.topic_id=m.topic_id WHERE m.chat_id=? AND m.message_id=? AND t.collected=0)")
+                        .bind(chat_id.get())
+                        .bind(message_id.get())
+                        .fetch_one(&mut *tx)
+                        .await?;
+                    if excluded {
+                        continue;
+                    }
                     sqlx::query("INSERT INTO message_tombstones(chat_id, message_id, deleted_at) VALUES (?, ?, ?) ON CONFLICT(chat_id, message_id) DO UPDATE SET deleted_at=MAX(message_tombstones.deleted_at, excluded.deleted_at)")
                         .bind(chat_id.get()).bind(message_id.get()).bind(seconds(*deleted_at))
                         .execute(&mut *tx).await?;
@@ -215,27 +227,49 @@ impl ArchiveWriter for SqliteStore {
                     ensure_chat(&mut tx, message.chat_id).await?;
                     let version = seconds(message.edited_at.unwrap_or(message.timestamp));
                     let priority = i64::from(matches!(record.source, MessageSource::Realtime));
-                    let previous: Option<(i64, Option<String>)> = sqlx::query_as(
-                        "SELECT row_id, text FROM messages WHERE chat_id=? AND message_id=?",
+                    let topic_id = message.topic_id.map(MessageId::get);
+                    // Prefer explicit membership, then archived membership. Only an active
+                    // General topic from a successful catalog refresh can classify a sparse event.
+                    let (previous_id, previous_text, previous_topic, excluded, topic_id): (Option<i64>, Option<String>, Option<i64>, bool, Option<i64>) = sqlx::query_as(
+                        "SELECT m.row_id, m.text, m.topic_id, t.collected IS 0, COALESCE(?3,m.topic_id,t.topic_id) FROM (SELECT ?1 AS chat_id, ?2 AS message_id) k LEFT JOIN messages m USING(chat_id,message_id) LEFT JOIN forum_topics t ON t.chat_id=k.chat_id AND t.topic_id=COALESCE(?3,m.topic_id,1) AND (t.active=1 OR COALESCE(?3,m.topic_id) IS NOT NULL)",
                     )
                     .bind(message.chat_id.get())
                     .bind(message.id.get())
-                    .fetch_optional(&mut *tx)
+                    .bind(topic_id)
+                    .fetch_one(&mut *tx)
                     .await?;
-                    if let (MessageSource::Refetch, Some((row_id, _))) = (record.source, &previous)
+                    if excluded {
+                        if !batch.senders.is_empty() {
+                            skipped.push(index);
+                        }
+                        continue;
+                    }
+                    // Topic identity is independent of text/edit precedence. Even a stale
+                    // history page can repair a migrated or previously misclassified row.
+                    if let (Some(row_id), Some(topic)) = (previous_id, topic_id)
+                        && previous_topic != Some(topic)
                     {
-                        backfill_metadata(&mut tx, *row_id, message).await?;
+                        sqlx::query(
+                            "UPDATE messages SET topic_id=?, updated_at=unixepoch() WHERE row_id=?",
+                        )
+                        .bind(topic)
+                        .bind(row_id)
+                        .execute(&mut *tx)
+                        .await?;
+                    }
+                    if let (MessageSource::Refetch, Some(row_id)) = (record.source, previous_id) {
+                        backfill_metadata(&mut tx, row_id, message).await?;
                         enqueue_attachment_downloads(
                             &mut tx,
                             message.chat_id.get(),
                             message.id.get(),
-                            *row_id,
+                            row_id,
                         )
                         .await?;
                         continue;
                     }
-                    let result = sqlx::query("INSERT INTO messages(chat_id, message_id, sender_id, timestamp, edited_at, collected_at, created_at, updated_at, text, reply_to, version_at, source_priority, post_author, fwd_from_id, fwd_from_name, fwd_date) SELECT ?, ?, ?, ?, ?, ?, unixepoch(), unixepoch(), ?, ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS(SELECT 1 FROM message_tombstones WHERE chat_id=? AND message_id=?) AND NOT (? > -1000000000000 AND EXISTS(SELECT 1 FROM common_message_tombstones WHERE message_id=?)) ON CONFLICT(chat_id, message_id) DO UPDATE SET sender_id=COALESCE(excluded.sender_id, messages.sender_id), post_author=COALESCE(excluded.post_author, messages.post_author), fwd_from_id=COALESCE(excluded.fwd_from_id, messages.fwd_from_id), fwd_from_name=COALESCE(excluded.fwd_from_name, messages.fwd_from_name), fwd_date=COALESCE(excluded.fwd_date, messages.fwd_date), timestamp=excluded.timestamp, edited_at=excluded.edited_at, collected_at=excluded.collected_at, updated_at=unixepoch(), text=excluded.text, reply_to=excluded.reply_to, version_at=excluded.version_at, source_priority=excluded.source_priority WHERE (excluded.version_at > messages.version_at OR (excluded.version_at = messages.version_at AND excluded.source_priority >= messages.source_priority)) AND messages.is_deleted=0")
-                        .bind(message.chat_id.get()).bind(message.id.get()).bind(message.sender_id.map(SenderId::get))
+                    let result = sqlx::query("INSERT INTO messages(chat_id, message_id, topic_id, sender_id, timestamp, edited_at, collected_at, created_at, updated_at, text, reply_to, version_at, source_priority, post_author, fwd_from_id, fwd_from_name, fwd_date) SELECT ?, ?, ?, ?, ?, ?, ?, unixepoch(), unixepoch(), ?, ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS(SELECT 1 FROM message_tombstones WHERE chat_id=? AND message_id=?) AND NOT (? > -1000000000000 AND EXISTS(SELECT 1 FROM common_message_tombstones WHERE message_id=?)) ON CONFLICT(chat_id, message_id) DO UPDATE SET sender_id=COALESCE(excluded.sender_id, messages.sender_id), post_author=COALESCE(excluded.post_author, messages.post_author), fwd_from_id=COALESCE(excluded.fwd_from_id, messages.fwd_from_id), fwd_from_name=COALESCE(excluded.fwd_from_name, messages.fwd_from_name), fwd_date=COALESCE(excluded.fwd_date, messages.fwd_date), timestamp=excluded.timestamp, edited_at=excluded.edited_at, collected_at=excluded.collected_at, updated_at=unixepoch(), text=excluded.text, reply_to=excluded.reply_to, version_at=excluded.version_at, source_priority=excluded.source_priority WHERE (excluded.version_at > messages.version_at OR (excluded.version_at = messages.version_at AND excluded.source_priority >= messages.source_priority)) AND messages.is_deleted=0")
+                        .bind(message.chat_id.get()).bind(message.id.get()).bind(topic_id).bind(message.sender_id.map(SenderId::get))
                         .bind(seconds(message.timestamp)).bind(message.edited_at.map(seconds)).bind(seconds(message.collected_at))
                         .bind(&message.text).bind(message.reply_to.map(MessageId::get)).bind(version).bind(priority)
                         .bind(&message.post_author)
@@ -255,10 +289,7 @@ impl ArchiveWriter for SqliteStore {
                         .await?;
                         // The guarded upsert changed the row: re-index only if the text did.
                         let new_text = message.text.as_deref().filter(|text| !text.is_empty());
-                        let old_text = previous
-                            .as_ref()
-                            .and_then(|(_, text)| text.as_deref())
-                            .filter(|text| !text.is_empty());
+                        let old_text = previous_text.as_deref().filter(|text| !text.is_empty());
                         if new_text != old_text {
                             index_message(&mut tx, self.tokenizer.as_ref(), row_id, new_text)
                                 .await?;
@@ -275,6 +306,33 @@ impl ArchiveWriter for SqliteStore {
                             .bind(message.id.get()).bind(message.id.get()).bind(message.id.get()).bind(message.id.get()).bind(message.chat_id.get())
                             .execute(&mut *tx).await?;
                     }
+                }
+            }
+        }
+        if !batch.senders.is_empty() {
+            // Telegram supplies sender profiles separately from messages. A skipped topic
+            // must not contribute a sender profile or advance its observed timestamp.
+            let mut kept_senders = std::collections::HashSet::new();
+            let mut observed_at = None;
+            for (index, record) in batch.records.iter().enumerate() {
+                if skipped.binary_search(&index).is_ok() {
+                    continue;
+                }
+                if let MessageEvent::Created(message) | MessageEvent::Updated(message) =
+                    &record.event
+                {
+                    observed_at = observed_at.max(Some(seconds(message.collected_at)));
+                    if !skipped.is_empty()
+                        && let Some(id) = message.sender_id
+                    {
+                        kept_senders.insert(id);
+                    }
+                }
+            }
+            let observed_at = observed_at.unwrap_or_else(|| Utc::now().timestamp());
+            for sender in &batch.senders {
+                if skipped.is_empty() || kept_senders.contains(&sender.id) {
+                    save_sender(&mut tx, sender, observed_at).await?;
                 }
             }
         }

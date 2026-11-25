@@ -70,6 +70,7 @@ fn sender(id: i64, name: &str, username: Option<&str>) -> Sender {
 
 fn msg(chat: i64, id: i64, sender: Option<i64>, at: DateTime<Utc>, text: Option<&str>) -> Message {
     Message {
+        topic_id: None,
         post_author: None,
         forward: None,
         id: mid(id),
@@ -507,6 +508,19 @@ async fn main() {
             .await
             .unwrap();
     }
+    store
+        .save_topics(
+            cid(BIG),
+            [(22, "群友聊天"), (35, "每日班表")]
+                .into_iter()
+                .map(|(id, title)| tgarchive::domain::ForumTopic {
+                    id: mid(id),
+                    title: title.into(),
+                })
+                .collect(),
+        )
+        .await
+        .unwrap();
     for id in [ALICE, BIG, NEWS, FAMILY] {
         store
             .write_batch(IngestBatch {

@@ -125,7 +125,12 @@ impl NormalizedBatch {
         if let Some(sender_id) = message.sender_id() {
             self.include_sender(mapper::map_sender(sender_id, message.sender())?);
         }
-        let mapped = mapper::map_message(message, collected_at, self.account)?;
+        let mapped = mapper::map_message(
+            message,
+            collected_at,
+            self.account,
+            message.peer().is_some_and(mapper::is_forum),
+        )?;
         self.records.push(IngestRecord {
             event: if edited {
                 MessageEvent::Updated(mapped)

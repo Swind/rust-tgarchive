@@ -1,4 +1,5 @@
 mod coordinator;
+mod topics;
 pub use coordinator::SyncCoordinator;
 
 use std::{sync::Arc, time::Duration};
@@ -22,6 +23,8 @@ pub struct SyncEngine {
     page_size: PageSize,
     pacer: Arc<RatePacer>,
     max_flood_wait: Duration,
+    /// A foreground sync and the background worker must not fetch the same pending page.
+    topic_round: tokio::sync::Mutex<()>,
 }
 
 /// Longest FLOOD_WAIT that is waited out by default; longer ones pause or skip instead.
@@ -43,6 +46,7 @@ impl SyncEngine {
             page_size,
             pacer: Arc::new(RatePacer::disabled()),
             max_flood_wait: DEFAULT_MAX_FLOOD_WAIT,
+            topic_round: tokio::sync::Mutex::default(),
         }
     }
 
@@ -117,6 +121,7 @@ impl SyncEngine {
         chat_id: ChatId,
         cancel: &CancellationToken,
     ) -> Result<u64, ApplicationError> {
+        self.sync_chat_topics(chat_id, cancel).await?;
         let mut checkpoint = self
             .repository
             .get_checkpoint(chat_id)
@@ -224,6 +229,7 @@ impl SyncEngine {
         chat_id: ChatId,
         cancel: &CancellationToken,
     ) -> Result<u64, ApplicationError> {
+        self.sync_chat_topics(chat_id, cancel).await?;
         let saved = self.repository.get_refetch_checkpoint(chat_id).await?;
         let mut before = if saved.active { saved.before_id } else { None };
         let mut committed = 0u64;
@@ -478,6 +484,21 @@ impl SyncEngine {
         page_size: PageSize,
         cancel: &CancellationToken,
     ) -> Result<super::HistoryPage, ApplicationError> {
+        self.request_with_retry(cancel, || {
+            self.gateway
+                .fetch_history(chat, boundary.clone(), page_size)
+        })
+        .await
+    }
+
+    async fn request_with_retry<T, F>(
+        &self,
+        cancel: &CancellationToken,
+        mut request: impl FnMut() -> F,
+    ) -> Result<T, ApplicationError>
+    where
+        F: Future<Output = Result<T, TelegramError>>,
+    {
         let mut transient_attempt = 0;
         let mut flood_attempt = 0;
         loop {
@@ -487,7 +508,7 @@ impl SyncEngine {
             if self.pacer.acquire(cancel).await {
                 return Err(ApplicationError::Conflict);
             }
-            let response = tokio::select! { _ = cancel.cancelled() => return Err(ApplicationError::Conflict), result = self.gateway.fetch_history(chat, boundary.clone(), page_size) => result };
+            let response = tokio::select! { _ = cancel.cancelled() => return Err(ApplicationError::Conflict), result = request() => result };
             match response {
                 Ok(page) => {
                     self.pacer.on_success();

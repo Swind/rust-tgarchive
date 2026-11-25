@@ -28,6 +28,7 @@ async fn setup() -> (tempfile::TempDir, SqliteStore, ChatId) {
 fn message(chat_id: ChatId, id: i64, attachments: Vec<Attachment>) -> Message {
     let now = DateTime::<Utc>::from_timestamp(1_700_000_000 + id, 0).unwrap();
     Message {
+        topic_id: None,
         post_author: None,
         forward: None,
         id: MessageId::new(id).unwrap(),

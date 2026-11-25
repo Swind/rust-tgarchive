@@ -40,6 +40,7 @@ fn chat(id: i64) -> Chat {
 fn message(chat: i64, id: i64, text: &str) -> Message {
     let time = DateTime::<Utc>::from_timestamp(BASE + id, 0).unwrap();
     Message {
+        topic_id: None,
         post_author: None,
         forward: None,
         id: MessageId::new(id).unwrap(),

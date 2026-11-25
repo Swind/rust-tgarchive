@@ -110,6 +110,8 @@ pub fn router_with_groups(
         .route("/api/v1/chats", get(routes::list_chats))
         .route("/api/v1/chats/refresh", axum::routing::post(routes::refresh_chats))
         .route("/api/v1/chats/{chat_id}", get(routes::get_chat))
+        .route("/api/v1/chats/{chat_id}/topics", get(routes::list_chat_topics))
+        .route("/api/v1/chats/{chat_id}/topics/{topic_id}", axum::routing::put(routes::set_topic_collected))
         .route("/api/v1/chats/{chat_id}/media-policy", get(routes::get_media_policy).patch(routes::set_media_policy))
         .route("/api/v1/chats/{chat_id}/media/downloads", axum::routing::post(routes::backfill_media))
         .route("/api/v1/chats/{chat_id}/messages/{message_id}/media", get(routes::message_media))

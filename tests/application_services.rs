@@ -217,6 +217,7 @@ fn chat() -> Chat {
 
 fn message() -> Message {
     Message {
+        topic_id: None,
         post_author: None,
         forward: None,
         id: MessageId::new(10).unwrap(),

@@ -519,6 +519,99 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorEnvelope'
+  /api/v1/chats/{chat_id}/topics:
+    get:
+      tags:
+      - routes
+      operationId: list_chat_topics
+      parameters:
+      - name: chat_id
+        in: path
+        description: Marked Telegram chat ID
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: Archived topic list and collection settings. Available in query-only mode; new topics are collected by default.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TopicDto'
+        '400':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /api/v1/chats/{chat_id}/topics/{topic_id}:
+    put:
+      tags:
+      - routes
+      operationId: set_topic_collected
+      parameters:
+      - name: chat_id
+        in: path
+        description: Marked Telegram chat ID
+        required: true
+        schema:
+          type: integer
+          format: int64
+      - name: topic_id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int32
+          minimum: 1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetTopicCollectedDto'
+        required: true
+      responses:
+        '204':
+          description: Collection setting saved. Excluding keeps archived messages; re-enabling schedules a history backfill.
+        '400':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: Unknown chat or topic
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: Chat is not tracked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          description: Query-only mode or storage unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
   /api/v1/chats/{chat_id}/tracking:
     put:
       tags:
@@ -1742,6 +1835,12 @@ components:
         timestamp:
           type: string
           format: date-time
+        topic_id:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: Telegram forum topic ID, or null for non-forum messages and unclassified history.
     MessagePageDto:
       type: object
       required:
@@ -2114,6 +2213,14 @@ components:
           type:
           - string
           - 'null'
+    SetTopicCollectedDto:
+      type: object
+      required:
+      - collected
+      properties:
+        collected:
+          type: boolean
+      additionalProperties: false
     StatusDto:
       type: object
       required:
@@ -2213,6 +2320,21 @@ components:
           - 'null'
           format: date-time
         state:
+          type: string
+    TopicDto:
+      type: object
+      required:
+      - id
+      - title
+      - collected
+      properties:
+        collected:
+          type: boolean
+          description: New topics are collected unless explicitly excluded.
+        id:
+          type: integer
+          format: int64
+        title:
           type: string
     TrackChatDto:
       allOf:

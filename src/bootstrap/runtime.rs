@@ -66,14 +66,27 @@ impl SyncRuntime {
         let source = AdapterRealtime::new(adapter, self.sink.clone(), scope);
         let token = cancel.clone();
         let handle = tokio::spawn(async move {
-            supervise_realtime_with_status(
-                &source,
-                &engine,
-                ReconnectBackoff::default(),
-                token,
-                &status,
-            )
-            .await
+            // If either producer fails, let its sibling finish its acknowledged write and
+            // checkpoint before tearing down the Telegram session.
+            let live = async {
+                let result = supervise_realtime_with_status(
+                    &source,
+                    &engine,
+                    ReconnectBackoff::default(),
+                    token.clone(),
+                    &status,
+                )
+                .await;
+                token.cancel();
+                result
+            };
+            let topics = async {
+                let result = engine.maintain_topics(&token).await;
+                token.cancel();
+                result
+            };
+            let (live, topics) = tokio::join!(live, topics);
+            live.and(topics)
         });
         self.realtime = Some(RealtimeTask { cancel, handle });
     }

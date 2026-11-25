@@ -178,6 +178,28 @@ pub struct Chat {
     pub tracked: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ForumTopic {
+    pub id: MessageId,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TopicSummary {
+    pub id: MessageId,
+    pub title: String,
+    pub collected: bool,
+}
+
+/// One pending walk, with the generation and cursor used to reject stale pages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TopicBackfill {
+    pub chat_id: ChatId,
+    pub topic_id: MessageId,
+    pub generation: i64,
+    pub before_id: Option<MessageId>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Sender {
     pub id: SenderId,
@@ -194,6 +216,9 @@ pub struct Sender {
 pub struct Message {
     pub id: MessageId,
     pub chat_id: ChatId,
+    /// Telegram forum topic ID; distinct from the message this one directly replies to.
+    #[serde(default)]
+    pub topic_id: Option<MessageId>,
     pub sender_id: Option<SenderId>,
     pub timestamp: DateTime<Utc>,
     pub edited_at: Option<DateTime<Utc>>,

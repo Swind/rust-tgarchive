@@ -41,8 +41,75 @@ fn row_summary(row: &SqliteRow) -> Result<ChatSummary, RepositoryError> {
     })
 }
 
+fn row_topic(row: SqliteRow) -> Result<TopicSummary, RepositoryError> {
+    Ok(TopicSummary {
+        id: MessageId::new(row.try_get("topic_id")?).map_err(invalid_data)?,
+        title: row.try_get("title")?,
+        collected: row.try_get("collected")?,
+    })
+}
+
 #[async_trait::async_trait]
 impl ChatRepository for SqliteStore {
+    async fn save_topics(
+        &self,
+        chat_id: ChatId,
+        topics: Vec<ForumTopic>,
+    ) -> Result<(), RepositoryError> {
+        // One snapshot parameter avoids SQLite's variable limit even for large forums.
+        let snapshot = serde_json::to_string(&topics).map_err(invalid_data)?;
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("UPDATE forum_topics SET active=0, backfill_pending=0, before_id=NULL, generation=generation+1 WHERE chat_id=? AND active=1 AND topic_id NOT IN (SELECT value->>'id' FROM json_each(?))")
+            .bind(chat_id.get())
+            .bind(&snapshot)
+            .execute(&mut *tx)
+            .await?;
+        if !topics.is_empty() {
+            let repair = sqlx::query(
+                "UPDATE chats SET topic_repair_needed=0 WHERE id=? AND topic_repair_needed=1",
+            )
+            .bind(chat_id.get())
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+                != 0;
+            sqlx::query("INSERT INTO forum_topics(chat_id,topic_id,title,backfill_pending) SELECT ?1,value->>'id',value->>'title',?2 FROM json_each(?3) WHERE true ON CONFLICT(chat_id,topic_id) DO UPDATE SET title=excluded.title, active=1 WHERE title != excluded.title OR active=0")
+                .bind(chat_id.get()).bind(repair).bind(snapshot).execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn list_topics(&self, chat_id: ChatId) -> Result<Vec<TopicSummary>, RepositoryError> {
+        if self.pre_0010_topics {
+            return Ok(Vec::new());
+        }
+        sqlx::query("SELECT topic_id,title,collected FROM forum_topics WHERE chat_id=? AND active=1 ORDER BY topic_id")
+            .bind(chat_id.get())
+            .fetch_all(&self.pool)
+            .await?
+            .into_iter()
+            .map(row_topic)
+            .collect()
+    }
+
+    async fn set_topic_collected(
+        &self,
+        chat_id: ChatId,
+        topic_id: MessageId,
+        collected: bool,
+    ) -> Result<Option<TopicSummary>, RepositoryError> {
+        // Repeated PUTs preserve a pending cursor. A change invalidates every outstanding page.
+        sqlx::query("UPDATE forum_topics SET generation=generation+(collected != ?1), backfill_pending=CASE WHEN collected != ?1 THEN ?1 ELSE backfill_pending END, before_id=CASE WHEN collected = ?1 THEN before_id END, collected=?1 WHERE chat_id=?2 AND topic_id=?3 AND active=1 AND EXISTS(SELECT 1 FROM chats WHERE id=?2 AND tracked=1) RETURNING topic_id,title,collected")
+            .bind(collected)
+            .bind(chat_id.get())
+            .bind(topic_id.get())
+            .fetch_optional(&self.pool)
+            .await?
+            .map(row_topic)
+            .transpose()
+    }
+
     async fn list_with_stats(&self, sort: ChatSort) -> Result<Vec<ChatSummary>, RepositoryError> {
         sqlx::query(&chat_summary_query(false, sort))
             .fetch_all(&self.pool)
@@ -93,11 +160,26 @@ impl ChatRepository for SqliteStore {
         id: ChatId,
         tracked: bool,
     ) -> Result<Option<Chat>, RepositoryError> {
-        sqlx::query("UPDATE chats SET tracked=?1, tracked_at=CASE WHEN ?1=1 THEN COALESCE(tracked_at, unixepoch()) ELSE NULL END WHERE id=?2 AND tracked != ?1")
+        let mut tx = self.pool.begin().await?;
+        let changed = sqlx::query("UPDATE chats SET tracked=?1, tracked_at=CASE WHEN ?1=1 THEN COALESCE(tracked_at, unixepoch()) ELSE NULL END WHERE id=?2 AND tracked != ?1")
             .bind(i64::from(tracked))
             .bind(id.get())
-            .execute(&self.pool)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        if changed != 0 {
+            // Pause/resume pending walks at their saved cursor. Tracking a chat does not
+            // itself request historical backfill, but must invalidate in-flight pages.
+            sqlx::query("UPDATE forum_topics SET generation=generation+1 WHERE chat_id=? AND backfill_pending=1")
+                .bind(id.get())
+                .execute(&mut *tx)
+                .await?;
+        }
+        let row = sqlx::query("SELECT id, kind, title, username, tracked FROM chats WHERE id=?")
+            .bind(id.get())
+            .fetch_optional(&mut *tx)
             .await?;
-        ChatRepository::get(self, id).await
+        tx.commit().await?;
+        row.as_ref().map(row_chat).transpose()
     }
 }

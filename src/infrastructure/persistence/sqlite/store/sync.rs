@@ -68,6 +68,20 @@ fn row_job(row: &SqliteRow) -> Result<SyncJob, RepositoryError> {
 
 #[async_trait::async_trait]
 impl SyncRepository for SqliteStore {
+    async fn pending_topic_backfills(&self) -> Result<Vec<TopicBackfill>, RepositoryError> {
+        sqlx::query("SELECT t.chat_id,t.topic_id,t.generation,t.before_id FROM forum_topics t JOIN chats c ON c.id=t.chat_id WHERE t.backfill_pending=1 AND c.tracked=1 ORDER BY t.chat_id,t.topic_id")
+            .fetch_all(&self.pool)
+            .await?
+            .into_iter()
+            .map(|row| Ok(TopicBackfill {
+                chat_id: ChatId::from_marked(row.try_get("chat_id")?).map_err(invalid_data)?,
+                topic_id: MessageId::new(row.try_get("topic_id")?).map_err(invalid_data)?,
+                generation: row.try_get("generation")?,
+                before_id: row.try_get::<Option<i64>, _>("before_id")?.map(MessageId::new).transpose().map_err(invalid_data)?,
+            }))
+            .collect()
+    }
+
     async fn newest_archived_id(
         &self,
         chat_id: ChatId,

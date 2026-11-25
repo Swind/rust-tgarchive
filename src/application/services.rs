@@ -9,7 +9,7 @@ use crate::{
         SyncRepository, TelegramGateway,
         pacer::{RateLimitStatus, RatePacer},
     },
-    domain::{Chat, ChatId, MessageEvent, MessageId, Sender},
+    domain::{Chat, ChatId, ChatKind, MessageEvent, MessageId, Sender, TopicSummary},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -303,6 +303,34 @@ impl ChatService {
             .map_err(ApplicationError::from)?
             .ok_or(ApplicationError::NotFound)
     }
+
+    async fn list_topics(&self, chat_id: ChatId) -> Result<Vec<TopicSummary>, ApplicationError> {
+        let chat = self.get(chat_id).await?;
+        if chat.kind != ChatKind::Supergroup {
+            return Ok(Vec::new());
+        }
+        Ok(self.chats.list_topics(chat_id).await?)
+    }
+
+    async fn set_topic_collected(
+        &self,
+        chat_id: ChatId,
+        topic_id: MessageId,
+        collected: bool,
+    ) -> Result<(), ApplicationError> {
+        let chat = self.get(chat_id).await?;
+        if !chat.tracked {
+            return Err(ApplicationError::NotTracked);
+        }
+        if chat.kind != ChatKind::Supergroup {
+            return Err(ApplicationError::NotFound);
+        }
+        self.chats
+            .set_topic_collected(chat_id, topic_id, collected)
+            .await?
+            .ok_or(ApplicationError::NotFound)?;
+        Ok(())
+    }
 }
 
 pub struct RefreshChatsService {
@@ -522,6 +550,30 @@ impl Application {
 
     pub async fn untrack_chat(&self, id: ChatId) -> Result<Chat, ApplicationError> {
         self.chats.set_tracked(id, false).await
+    }
+
+    /// Read the collector's topic catalog without contacting Telegram or writing to the archive.
+    pub async fn list_chat_topics(
+        &self,
+        chat_id: ChatId,
+    ) -> Result<Vec<TopicSummary>, ApplicationError> {
+        self.chats.list_topics(chat_id).await
+    }
+
+    pub async fn set_topic_collected(
+        &self,
+        chat_id: ChatId,
+        topic_id: MessageId,
+        collected: bool,
+    ) -> Result<(), ApplicationError> {
+        if self.refresh_chats.gateway.is_none() {
+            return Err(ApplicationError::TelegramUnavailable(
+                "Topic selection requires a collector".into(),
+            ));
+        }
+        self.chats
+            .set_topic_collected(chat_id, topic_id, collected)
+            .await
     }
 
     pub async fn refresh_chats(&self) -> Result<Vec<Chat>, ApplicationError> {

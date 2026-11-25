@@ -4,6 +4,8 @@ use super::*;
 pub struct MessageDto {
     pub id: i64,
     pub chat_id: i64,
+    /// Telegram forum topic ID, or null for non-forum messages and unclassified history.
+    pub topic_id: Option<i64>,
     pub sender_id: Option<i64>,
     /// Resolved sender; null for messages without a sender.
     pub sender: Option<SenderDto>,
@@ -84,6 +86,7 @@ impl From<MessageView> for MessageDto {
             deleted_at,
             id: message.id.get(),
             chat_id: message.chat_id.get(),
+            topic_id: message.topic_id.map(|id| id.get()),
             sender_id: message.sender_id.map(SenderId::get),
             timestamp: message.timestamp,
             edited_at: message.edited_at,

@@ -70,6 +70,7 @@ fn person(raw: i64, name: &str, username: Option<&str>) -> Sender {
 fn msg(chat_id: ChatId, id: i64, at: i64, sender: Option<SenderId>) -> Message {
     let time = DateTime::from_timestamp(BASE + at, 0).unwrap();
     Message {
+        topic_id: None,
         id: MessageId::new(id).unwrap(),
         chat_id,
         sender_id: sender,

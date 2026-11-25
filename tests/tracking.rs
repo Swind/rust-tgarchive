@@ -67,6 +67,7 @@ fn all_chats() -> Vec<Chat> {
 fn message(chat_id: ChatId, id: i64) -> Message {
     let timestamp = DateTime::<Utc>::from_timestamp(1_700_000_000 + id, 0).unwrap();
     Message {
+        topic_id: None,
         post_author: None,
         forward: None,
         id: MessageId::new(id).unwrap(),

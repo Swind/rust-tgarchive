@@ -88,6 +88,9 @@ export const api = {
   health: (kind: 'live' | 'ready') => request<S['HealthDto']>('GET', `/health/${kind}`),
   chats: (sort?: ChatSort) => request<Chat[]>('GET', '/api/v1/chats', { sort }),
   chat: (id: number) => request<Chat>('GET', chatPath(id)),
+  topics: (id: number) => request<S['TopicDto'][]>('GET', `${chatPath(id)}/topics`),
+  setTopicCollected: (id: number, topicId: number, collected: boolean) =>
+    request<void>('PUT', `${chatPath(id)}/topics/${topicId}`, undefined, { collected } satisfies S['SetTopicCollectedDto']),
   mediaPolicy: (id: number) => request<MediaPolicy>('GET', `${chatPath(id)}/media-policy`),
   setMediaPolicy: (id: number, auto_archive: boolean) =>
     request<MediaPolicy>('PATCH', `${chatPath(id)}/media-policy`, undefined, { auto_archive }),

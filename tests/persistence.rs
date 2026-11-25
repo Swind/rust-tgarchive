@@ -36,6 +36,7 @@ fn chat(id: i64) -> Chat {
 fn message(chat_id: ChatId, id: i64, text: &str) -> Message {
     let time = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap();
     Message {
+        topic_id: None,
         post_author: None,
         forward: None,
         id: MessageId::new(id).unwrap(),
@@ -732,4 +733,329 @@ async fn successful_chat_progress_records_sync_start_and_completion_times() {
         .await
         .unwrap();
     assert!(times().await.is_some());
+}
+
+fn in_topic(chat_id: ChatId, id: i64, topic_id: MessageId, text: &str) -> Message {
+    Message {
+        topic_id: Some(topic_id),
+        ..message(chat_id, id, text)
+    }
+}
+
+#[tokio::test]
+async fn forum_topic_exclusion_applies_at_write_without_hiding_stored_messages() {
+    use tgarchive::domain::{ForumTopic, Sender, SenderId, SenderKind};
+
+    let (_dir, store, _) = store().await;
+    let chat_id = ChatId::from_marked(-1_000_000_000_100).unwrap();
+    let topic = MessageId::new(12).unwrap();
+    let known = in_topic(chat_id, 20, topic, "keep me");
+    store
+        .write_batch(ingest(vec![known.clone()]))
+        .await
+        .unwrap();
+    store.set_tracked(chat_id, true).await.unwrap();
+    let metadata = |title: &str| ForumTopic {
+        id: topic,
+        title: title.into(),
+    };
+    store
+        .save_topics(chat_id, vec![metadata("old title")])
+        .await
+        .unwrap();
+    assert!(store.list_topics(chat_id).await.unwrap()[0].collected);
+    store
+        .set_topic_collected(chat_id, topic, false)
+        .await
+        .unwrap();
+    store
+        .save_topics(chat_id, vec![metadata("renamed")])
+        .await
+        .unwrap();
+    let summary = store.list_topics(chat_id).await.unwrap().pop().unwrap();
+    assert_eq!(summary.title, "renamed");
+    assert!(!summary.collected);
+
+    let sender = SenderId::from_marked(101).unwrap();
+    for source in [
+        MessageSource::History,
+        MessageSource::Refetch,
+        MessageSource::Realtime,
+    ] {
+        let mut blocked = in_topic(chat_id, 21, topic, "do not archive");
+        blocked.sender_id = Some(sender);
+        let mut batch = ingest(vec![blocked]);
+        batch.records[0].source = source;
+        batch.senders = vec![Sender {
+            id: sender,
+            kind: SenderKind::User,
+            display_name: Some("private".into()),
+            username: None,
+            is_bot: None,
+        }];
+        store.write_batch(batch).await.unwrap();
+    }
+    let mut partial = known.clone();
+    partial.topic_id = None;
+    partial.text = Some("do not update".into());
+    let fresh_topic = MessageId::new(15).unwrap();
+    let mut batch = ingest(vec![
+        partial,
+        in_topic(chat_id, 22, fresh_topic, "new topic"),
+    ]);
+    batch.records.push(IngestRecord {
+        source: MessageSource::Realtime,
+        event: MessageEvent::Deleted {
+            chat_id,
+            message_id: known.id,
+            deleted_at: known.timestamp,
+        },
+    });
+    store.write_batch(batch).await.unwrap();
+    let visible = MessageRepository::list(&store, list(None, None, 10))
+        .await
+        .unwrap();
+    assert_eq!(visible.items.len(), 2);
+    assert_eq!(visible.items[0].topic_id, Some(fresh_topic));
+    assert_eq!(visible.items[1].topic_id, Some(topic));
+    assert_eq!(visible.items[1].text, known.text);
+    assert!(store.sender_detail(sender, true).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn forum_topic_backfill_is_atomic_resumable_and_rejects_stale_pages() {
+    use tgarchive::domain::ForumTopic;
+
+    let (_dir, store, url) = store().await;
+    let chat_id = ChatId::from_marked(-1_000_000_000_100).unwrap();
+    let topic = MessageId::new(11).unwrap();
+    let original = message(chat_id, 30, "original");
+    let wrong = in_topic(chat_id, 31, MessageId::new(9).unwrap(), "also original");
+    store
+        .write_batch(ingest(vec![original.clone(), wrong.clone()]))
+        .await
+        .unwrap();
+    store.set_tracked(chat_id, true).await.unwrap();
+    store
+        .save_topics(
+            chat_id,
+            vec![ForumTopic {
+                id: topic,
+                title: "topic".into(),
+            }],
+        )
+        .await
+        .unwrap();
+    assert!(store.pending_topic_backfills().await.unwrap().is_empty());
+    store
+        .set_topic_collected(chat_id, topic, false)
+        .await
+        .unwrap();
+    store
+        .set_topic_collected(chat_id, topic, true)
+        .await
+        .unwrap();
+    let stale = store.pending_topic_backfills().await.unwrap()[0];
+    store
+        .set_topic_collected(chat_id, topic, false)
+        .await
+        .unwrap();
+    store
+        .set_topic_collected(chat_id, topic, true)
+        .await
+        .unwrap();
+    let walk = store.pending_topic_backfills().await.unwrap()[0];
+    let page = |walk, next, messages| {
+        let mut batch = ingest(messages);
+        batch.topic_backfill = Some((walk, next));
+        for record in &mut batch.records {
+            record.source = MessageSource::Refetch;
+        }
+        batch
+    };
+    let skipped = in_topic(chat_id, 40, topic, "stale");
+    store
+        .write_batch(page(stale, None, vec![skipped.clone()]))
+        .await
+        .unwrap();
+    assert_eq!(store.pending_topic_backfills().await.unwrap(), vec![walk]);
+    let mut invalid = in_topic(chat_id, 39, topic, "roll back the cursor too");
+    invalid.attachments.push(Attachment {
+        kind: AttachmentKind::Document,
+        telegram_file_id: None,
+        mime_type: None,
+        file_name: None,
+        size: Some(-1),
+    });
+    assert!(
+        store
+            .write_batch(page(walk, Some(invalid.id), vec![invalid]))
+            .await
+            .is_err()
+    );
+    assert_eq!(store.pending_topic_backfills().await.unwrap(), vec![walk]);
+    store
+        .write_batch(page(
+            walk,
+            Some(original.id),
+            vec![
+                in_topic(chat_id, 30, topic, "older content"),
+                in_topic(chat_id, 31, topic, "older content"),
+            ],
+        ))
+        .await
+        .unwrap();
+    store
+        .write_batch(page(walk, None, vec![skipped.clone()]))
+        .await
+        .unwrap();
+    store
+        .set_topic_collected(chat_id, topic, true)
+        .await
+        .unwrap();
+    let saved = store.pending_topic_backfills().await.unwrap()[0];
+    assert_eq!(saved.generation, walk.generation);
+    assert_eq!(saved.before_id, Some(original.id));
+    store.close().await;
+    let store = SqliteStore::open_existing(&url).await.unwrap();
+    assert_eq!(store.pending_topic_backfills().await.unwrap(), vec![saved]);
+    store.set_tracked(chat_id, false).await.unwrap();
+    assert!(store.pending_topic_backfills().await.unwrap().is_empty());
+    store.set_tracked(chat_id, true).await.unwrap();
+    store
+        .write_batch(page(saved, None, vec![skipped.clone()]))
+        .await
+        .unwrap();
+    let resumed = store.pending_topic_backfills().await.unwrap()[0];
+    assert_eq!(resumed.before_id, saved.before_id);
+    store
+        .write_batch(page(
+            resumed,
+            None,
+            vec![in_topic(chat_id, 29, topic, "missed")],
+        ))
+        .await
+        .unwrap();
+    assert!(store.pending_topic_backfills().await.unwrap().is_empty());
+    let visible = MessageRepository::list(&store, list(None, None, 10))
+        .await
+        .unwrap();
+    assert_eq!(visible.items.len(), 3);
+    assert!(
+        visible
+            .items
+            .iter()
+            .all(|item| item.topic_id == Some(topic))
+    );
+    assert_eq!(visible.items[0].text, wrong.text);
+    assert_eq!(visible.items[1].text, original.text);
+    assert_eq!(visible.items[2].text.as_deref(), Some("missed"));
+    store.set_tracked(chat_id, false).await.unwrap();
+    store.set_tracked(chat_id, true).await.unwrap();
+    assert!(store.pending_topic_backfills().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn forum_topic_upgrade_repairs_archived_groups_on_first_nonempty_snapshot() {
+    use tgarchive::domain::ForumTopic;
+
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("sqlite://{}", dir.path().join("upgrade.db").display());
+    let migrations = tempfile::tempdir().unwrap();
+    for file in std::fs::read_dir("migrations").unwrap() {
+        let file = file.unwrap();
+        if file.file_name().to_str().unwrap().starts_with("000") {
+            std::fs::copy(file.path(), migrations.path().join(file.file_name())).unwrap();
+        }
+    }
+    let options = url
+        .parse::<sqlx::sqlite::SqliteConnectOptions>()
+        .unwrap()
+        .create_if_missing(true);
+    let pool = sqlx::SqlitePool::connect_with(options).await.unwrap();
+    sqlx::migrate::Migrator::new(migrations.path())
+        .await
+        .unwrap()
+        .run(&pool)
+        .await
+        .unwrap();
+    let chat_id = ChatId::from_marked(-1_000_000_000_100).unwrap();
+    let empty = ChatId::from_marked(-1_000_000_000_101).unwrap();
+    for id in [chat_id, empty] {
+        sqlx::query("INSERT INTO chats(id,kind,created_at,updated_at,tracked) VALUES (?,'supergroup',1,1,1)")
+            .bind(id.get()).execute(&pool).await.unwrap();
+    }
+    sqlx::query("INSERT INTO messages(chat_id,message_id,timestamp,collected_at,created_at,updated_at,version_at,source_priority) VALUES (?,10,1,1,1,1,1,0)")
+        .bind(chat_id.get()).execute(&pool).await.unwrap();
+    pool.close().await;
+    let readonly = SqliteStore::open_existing_readonly(&url).await.unwrap();
+    assert!(readonly.list_topics(chat_id).await.unwrap().is_empty());
+    let row = MessageRepository::get(&readonly, chat_id, MessageId::new(10).unwrap(), false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.topic_id, None);
+    readonly.close().await;
+
+    let store = SqliteStore::open_existing(&url).await.unwrap();
+    let general = MessageId::new(1).unwrap();
+    let snapshot = || {
+        vec![ForumTopic {
+            id: general,
+            title: "General".into(),
+        }]
+    };
+    for id in [chat_id, empty] {
+        store.save_topics(id, vec![]).await.unwrap();
+        store.save_topics(id, snapshot()).await.unwrap();
+    }
+    let pending = store.pending_topic_backfills().await.unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(
+        (pending[0].chat_id, pending[0].topic_id),
+        (chat_id, general)
+    );
+    store
+        .write_batch(IngestBatch {
+            topic_backfill: Some((pending[0], None)),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    store.save_topics(chat_id, snapshot()).await.unwrap();
+    assert!(store.pending_topic_backfills().await.unwrap().is_empty());
+    store
+        .write_batch(ingest(vec![message(chat_id, 11, "sparse")]))
+        .await
+        .unwrap();
+    let sparse = MessageRepository::get(&store, chat_id, MessageId::new(11).unwrap(), false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(sparse.topic_id, Some(general));
+    store
+        .set_topic_collected(chat_id, general, false)
+        .await
+        .unwrap();
+    store
+        .write_batch(ingest(vec![message(chat_id, 12, "excluded General")]))
+        .await
+        .unwrap();
+    assert!(
+        MessageRepository::get(&store, chat_id, MessageId::new(12).unwrap(), false)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    store.save_topics(chat_id, vec![]).await.unwrap();
+    assert!(store.list_topics(chat_id).await.unwrap().is_empty());
+    store
+        .write_batch(ingest(vec![message(chat_id, 13, "no longer a forum")]))
+        .await
+        .unwrap();
+    let regular = MessageRepository::get(&store, chat_id, MessageId::new(13).unwrap(), false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(regular.topic_id, None);
 }

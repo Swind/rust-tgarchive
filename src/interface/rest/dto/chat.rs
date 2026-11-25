@@ -13,6 +13,30 @@ pub struct ChatDto {
     pub stats: Option<ChatStatsDto>,
 }
 
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TopicDto {
+    pub id: i64,
+    pub title: String,
+    /// New topics are collected unless explicitly excluded.
+    pub collected: bool,
+}
+
+impl From<crate::domain::TopicSummary> for TopicDto {
+    fn from(topic: crate::domain::TopicSummary) -> Self {
+        Self {
+            id: topic.id.get(),
+            title: topic.title,
+            collected: topic.collected,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SetTopicCollectedDto {
+    pub collected: bool,
+}
+
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct ChatStatsDto {
     /// Non-deleted archived messages.

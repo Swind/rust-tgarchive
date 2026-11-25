@@ -11,8 +11,8 @@ use crate::{
         SyncChatProgress, SyncJob, SyncJobState, SyncRepository, SyncScope, TrackingScope,
     },
     domain::{
-        Attachment, AttachmentKind, Chat, ChatId, ChatKind, Forward, Message, MessageEvent,
-        MessageId, Sender, SenderId, SenderKind,
+        Attachment, AttachmentKind, Chat, ChatId, ChatKind, ForumTopic, Forward, Message,
+        MessageEvent, MessageId, Sender, SenderId, SenderKind, TopicBackfill, TopicSummary,
     },
 };
 
@@ -35,6 +35,7 @@ pub struct SqliteStore {
     pub(super) pre_0008: bool,
     /// Read-only database opened without migrating: lacks media tables from migration 0009.
     pub(super) pre_0009_media: bool,
+    pre_0010_topics: bool,
 }
 
 /// Which migrations a read-only, unmigrated database is missing.
@@ -42,6 +43,7 @@ pub struct SqliteStore {
 pub(super) struct LegacyColumns {
     pub(super) metadata: bool,
     pub(super) bot: bool,
+    topics: bool,
 }
 
 impl SqliteStore {
@@ -52,6 +54,7 @@ impl SqliteStore {
             legacy_schema: false,
             pre_0008: false,
             pre_0009_media: false,
+            pre_0010_topics: false,
         }
     }
 
@@ -121,6 +124,7 @@ impl SqliteStore {
         LegacyColumns {
             metadata: self.legacy_schema,
             bot: self.pre_0008,
+            topics: self.pre_0010_topics,
         }
     }
 
@@ -144,6 +148,11 @@ impl SqliteStore {
         .fetch_one(&store.pool)
         .await?;
         store.pre_0009_media = media == 0;
+        store.pre_0010_topics = !sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('messages') WHERE name='topic_id')",
+        )
+        .fetch_one(&store.pool)
+        .await?;
         Ok(store)
     }
 }

@@ -83,6 +83,88 @@ test.describe('chat list', () => {
   });
 });
 
+test.describe('forum topic collection', () => {
+  const url = `/chats/${CHAT.big}`;
+  const base = `**/api/v1${url}`;
+
+  test('shows archived topics read-only without a collector', async ({ page }) => {
+    await page.goto(url);
+    await page.getByText('話題收集設定', { exact: true }).click();
+    const settings = page.getByRole('group', { name: '要收集的話題' });
+    await expect(settings.getByRole('checkbox', { name: '群友聊天' })).toBeDisabled();
+    await expect(settings.getByRole('checkbox', { name: '每日班表' })).toBeDisabled();
+    await expect(settings).toContainText('唯讀模式');
+    await expect(settings).toContainText('包括新建立的話題');
+    await expect(settings).toContainText('重新勾選會補收');
+  });
+
+  test('saves exclusions, keeps failed rechecks off, and discovers new topics on refresh', async ({ page }) => {
+    const topics = [
+      { id: 22, title: '群友聊天', collected: true },
+      { id: 35, title: '每日班表', collected: true },
+    ];
+    await page.route('**/api/v1/sync/status', (route) =>
+      route.fulfill({ json: { collector: { state: 'running' }, sync_jobs: [] } }));
+    await page.route(`${base}/topics`, (route) => route.fulfill({ json: topics }));
+    const writes: boolean[] = [];
+    const settings = page.getByRole('group', { name: '要收集的話題' });
+    const schedule = settings.getByRole('checkbox', { name: '每日班表' });
+    await page.route(`${base}/topics/35`, async (route) => {
+      expect(route.request().method()).toBe('PUT');
+      const { collected } = route.request().postDataJSON();
+      writes.push(collected);
+      if (writes.length === 1) {
+        await expect(schedule).toBeDisabled();
+        await expect(settings.getByRole('status')).toContainText('正在儲存');
+      }
+      if (writes.length === 2) {
+        return route.fulfill({ status: 503, json: { error: { code: 'unavailable', message: '無法連線至 Telegram' } } });
+      }
+      topics[1]!.collected = collected;
+      if (writes.length === 1) topics.push({ id: 41, title: '新話題', collected: true });
+      await route.fulfill({ status: 204 });
+    });
+    await page.goto(url);
+    await page.getByText('話題收集設定', { exact: true }).click();
+    await expect(schedule).toBeChecked();
+    await schedule.click();
+    await expect(schedule).not.toBeChecked();
+    await expect(settings.getByRole('checkbox', { name: '新話題' })).toBeChecked();
+    await expect(settings.getByRole('checkbox', { name: '群友聊天' })).toBeChecked();
+    await schedule.click();
+    await expect(settings.getByRole('alert')).toContainText('無法連線至 Telegram');
+    await expect(schedule).not.toBeChecked();
+    await expect(schedule).toBeEnabled();
+    await schedule.press('Space');
+    await expect(schedule).toBeChecked();
+    await expect(settings.getByRole('alert')).toHaveCount(0);
+    expect(writes).toEqual([false, true, true]);
+  });
+
+  test('stopping chat collection disables cached topic settings', async ({ page }) => {
+    let tracked = true;
+    await page.route('**/api/v1/sync/status', (route) =>
+      route.fulfill({ json: { collector: { state: 'running' }, sync_jobs: [] } }));
+    await page.route(base, async (route) => {
+      const response = await route.fetch();
+      await route.fulfill({ response, json: { ...await response.json(), tracked } });
+    });
+    await page.route(`${base}/tracking`, (route) => {
+      expect(route.request().method()).toBe('DELETE');
+      tracked = false;
+      return route.fulfill({ json: { id: CHAT.big, kind: 'supergroup', tracked } });
+    });
+    await page.goto(url);
+    await page.getByText('話題收集設定', { exact: true }).click();
+    const checkbox = page.getByRole('checkbox', { name: '群友聊天' });
+    await expect(checkbox).toBeEnabled();
+    await page.getByRole('button', { name: '停止收集', exact: true }).click();
+    await page.getByRole('button', { name: '確認停止收集' }).click();
+    await expect(checkbox).toBeDisabled();
+    await expect(page.getByText('請先開始收集此聊天室，才能變更話題設定。')).toBeVisible();
+  });
+});
+
 test.describe('big chat timeline', () => {
   const url = `/chats/${CHAT.big}`;
 

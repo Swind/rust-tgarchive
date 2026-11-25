@@ -16,6 +16,7 @@
 ## 升級指引
 
 - 0009：新增 `media_policies`（每個 chat 的 `auto_archive` 預設 false）與 `media_downloads` 持久化下載佇列，包含來源 media 身分、preview/archive、auto/manual、狀態與本地檔案資訊。既有訊息不自動掃描補下載；Web UI 可明確補下載預覽。預覽固定自動排程，封存由 channel 設定或手動請求排程。唯讀舊庫缺少下載表時回傳空下載列表與預設設定；需要 `db init` 或連線至 Telegram 的 `serve` 套用 migration。
+- 0010：新增 `messages.topic_id` 與 `forum_topics`。既有訊息保留，話題 ID 不從文字或一般回覆推測。有舊訊息的超級群組在升級後首次發現話題時，會排程補抓以修復既有列；沒有舊訊息的群組不會因此自動回補歷史。新話題預設收集，取消勾選只影響後續寫入。重新勾選會記錄待補抓狀態，每頁資料與游標在同一交易提交；再次切換後，不套用舊一輪尚在傳輸的頁面。唯讀舊庫仍可讀取訊息，話題清單為空。
 
 - 升級程式後，**先執行 `tgarchive db init`**，再使用讀取型命令（`chats list`、`messages ...`、`status`）。讀取型命令不會自動套用 migration；舊資料庫（0003 之前）缺少 `tracked` 欄位會出錯或無法查詢。
 - **0006（全文索引改版）**：套用後既有訊息尚未索引，狀態為 `stale`。`tgarchive db init` 會在 migration 之後自動重建索引（分批交易，進度顯示於 stderr，約每秒數萬則；100k 則訊息在 release 版約 3 秒）。也可手動 `tgarchive search rebuild-index`。重建期間及之前搜尋退回 `LIKE` 掃描（結果正確但較慢、依時間排序），`/api/v1/status` 的 `search_index.state` 會顯示 `stale`／`rebuilding`。`serve`／`serve --query-only` 不阻塞啟動、不自動重建；唯讀開啟尚未 migrate 的舊資料庫同樣回報 `stale` 並用 `LIKE` 搜尋。索引是可拋棄的衍生資料；更換 jieba 版本或規則時遞增 `SEARCH_INDEX_VERSION`，狀態自動變為 `stale`，重新執行重建即可。

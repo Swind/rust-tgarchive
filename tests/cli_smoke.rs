@@ -35,6 +35,7 @@ fn fixture() -> (Chat, Message) {
     };
     let timestamp = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap();
     let message = Message {
+        topic_id: None,
         post_author: None,
         forward: None,
         id: MessageId::new(7).unwrap(),

@@ -208,7 +208,7 @@ fn raw_message_media_and_reply_fixture_maps_to_domain_message() {
         video_timestamp: None,
         ttl_seconds: None,
     });
-    let mapped = map_raw_message(&raw_message(Some(media)), Utc::now(), None).unwrap();
+    let mapped = map_raw_message(&raw_message(Some(media)), Utc::now(), None, false).unwrap();
 
     assert_eq!(mapped.id.get(), 123);
     assert_eq!(mapped.chat_id.get(), 42);
@@ -228,7 +228,7 @@ fn raw_message_media_and_reply_fixture_maps_to_domain_message() {
 }
 
 #[test]
-fn raw_service_message_fixture_is_preserved_as_a_message_without_fake_text() {
+fn topic_creation_service_is_preserved_as_its_own_root_without_fake_text() {
     use grammers_client::tl::{enums::Peer, types};
 
     let service = types::MessageService {
@@ -241,18 +241,25 @@ fn raw_service_message_fixture_is_preserved_as_a_message_without_fake_text() {
         legacy: false,
         id: 55,
         from_id: Some(Peer::User(types::PeerUser { user_id: 5 })),
-        peer_id: Peer::Chat(types::PeerChat { chat_id: 6 }),
+        peer_id: Peer::Channel(types::PeerChannel { channel_id: 6 }),
         saved_peer_id: None,
         reply_to: None,
         date: 1_700_000_001,
-        action: grammers_client::tl::enums::MessageAction::PinMessage,
+        action: types::MessageActionTopicCreate {
+            title_missing: false,
+            title: "planning".into(),
+            icon_color: 0,
+            icon_emoji_id: None,
+        }
+        .into(),
         reactions: None,
         ttl_period: None,
     };
-    let mapped = map_raw_message(&service.into(), Utc::now(), None).unwrap();
+    let mapped = map_raw_message(&service.into(), Utc::now(), None, false).unwrap();
 
     assert_eq!(mapped.id.get(), 55);
-    assert_eq!(mapped.chat_id.get(), -6);
+    assert_eq!(mapped.chat_id.get(), -1_000_000_000_006);
+    assert_eq!(mapped.topic_id, Some(mapped.id));
     assert_eq!(mapped.sender_id.unwrap().get(), 5);
     assert_eq!(mapped.text, None);
     assert!(mapped.attachments.is_empty());
@@ -280,13 +287,13 @@ fn incoming_private_message_without_from_id_is_attributed_to_the_peer() {
         reactions: None,
         ttl_period: None,
     };
-    let mapped = map_raw_message(&service.clone().into(), Utc::now(), None).unwrap();
+    let mapped = map_raw_message(&service.clone().into(), Utc::now(), None, false).unwrap();
     assert_eq!(mapped.sender_id.unwrap().get(), 777_000);
     service.out = true;
-    let mapped = map_raw_message(&service.clone().into(), Utc::now(), None).unwrap();
+    let mapped = map_raw_message(&service.clone().into(), Utc::now(), None, false).unwrap();
     assert_eq!(mapped.sender_id, None);
     let account = SenderId::from_marked(4242).unwrap();
-    let mapped = map_raw_message(&service.into(), Utc::now(), Some(account)).unwrap();
+    let mapped = map_raw_message(&service.into(), Utc::now(), Some(account), false).unwrap();
     assert_eq!(mapped.sender_id, Some(account));
 }
 
@@ -301,14 +308,14 @@ fn outgoing_message_without_from_id_is_attributed_to_the_account_but_posts_stay_
     };
     message.from_id = None;
     message.out = true;
-    let mapped = map_raw_message(&raw, Utc::now(), Some(account)).unwrap();
+    let mapped = map_raw_message(&raw, Utc::now(), Some(account), false).unwrap();
     assert_eq!(mapped.sender_id, Some(account));
     let grammers_client::tl::enums::Message::Message(message) = &mut raw else {
         unreachable!()
     };
     message.peer_id = Peer::Channel(types::PeerChannel { channel_id: 9 });
     message.post = true;
-    let mapped = map_raw_message(&raw, Utc::now(), Some(account)).unwrap();
+    let mapped = map_raw_message(&raw, Utc::now(), Some(account), false).unwrap();
     assert_eq!(mapped.sender_id.unwrap().get(), -1_000_000_000_009);
 }
 
@@ -336,11 +343,53 @@ fn post_author_and_forward_origin_are_mapped_without_touching_the_sender() {
         saved_date: None,
         psa_type: None,
     }));
-    let mapped = map_raw_message(&raw, Utc::now(), None).unwrap();
+    let mapped = map_raw_message(&raw, Utc::now(), None, false).unwrap();
     assert_eq!(mapped.sender_id.unwrap().get(), 99);
     assert_eq!(mapped.post_author.as_deref(), Some("Editor"));
     let forward = mapped.forward.unwrap();
     assert_eq!(forward.from_id.unwrap().get(), -1_000_000_000_005);
     assert_eq!(forward.from_name.as_deref(), Some("Origin"));
     assert_eq!(forward.date.unwrap().timestamp(), 1_600_000_000);
+}
+
+#[test]
+fn forum_replies_keep_the_immediate_reply_separate_from_the_topic_root() {
+    use grammers_client::tl::{enums, types};
+
+    for (known_forum, flagged, top, expected_topic) in [
+        (false, false, None, None),
+        (false, false, Some(42), None), // ordinary group discussion thread
+        (true, false, Some(42), Some(1)), // ordinary thread inside General
+        (true, true, None, Some(7)),    // direct reply to the topic root
+        (false, true, Some(42), Some(42)), // explicit topic even without peer metadata
+    ] {
+        let mut raw = raw_message(None);
+        let enums::Message::Message(message) = &mut raw else {
+            unreachable!()
+        };
+        message.peer_id = enums::Peer::Channel(types::PeerChannel { channel_id: 9 });
+        let Some(enums::MessageReplyHeader::Header(header)) = &mut message.reply_to else {
+            unreachable!()
+        };
+        header.forum_topic = flagged;
+        header.reply_to_top_id = top;
+        let mapped = map_raw_message(&raw, Utc::now(), None, known_forum).unwrap();
+        assert_eq!(mapped.reply_to.unwrap().get(), 7);
+        assert_eq!(mapped.topic_id.map(MessageId::get), expected_topic);
+    }
+}
+
+#[test]
+fn unthreaded_messages_belong_to_general_only_in_known_forums() {
+    use grammers_client::tl::{enums, types};
+    let mut raw = raw_message(None);
+    let enums::Message::Message(message) = &mut raw else {
+        unreachable!()
+    };
+    message.peer_id = enums::Peer::Channel(types::PeerChannel { channel_id: 9 });
+    message.reply_to = None;
+    for (known_forum, expected_topic) in [(false, None), (true, Some(1))] {
+        let mapped = map_raw_message(&raw, Utc::now(), None, known_forum).unwrap();
+        assert_eq!(mapped.topic_id.map(MessageId::get), expected_topic);
+    }
 }

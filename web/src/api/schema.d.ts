@@ -180,6 +180,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/chats/{chat_id}/topics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_chat_topics"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/chats/{chat_id}/topics/{topic_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["set_topic_collected"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/chats/{chat_id}/tracking": {
         parameters: {
             query?: never;
@@ -688,6 +720,11 @@ export interface components {
             text?: string | null;
             /** Format: date-time */
             timestamp: string;
+            /**
+             * Format: int64
+             * @description Telegram forum topic ID, or null for non-forum messages and unclassified history.
+             */
+            topic_id?: number | null;
         };
         MessagePageDto: {
             has_more: boolean;
@@ -864,6 +901,9 @@ export interface components {
             message_count: number;
             username?: string | null;
         };
+        SetTopicCollectedDto: {
+            collected: boolean;
+        };
         StatusDto: {
             collector: components["schemas"]["ComponentStatusDto"];
             rate_limit?: null | components["schemas"]["RateLimitDto"];
@@ -905,6 +945,13 @@ export interface components {
             /** Format: date-time */
             started_at?: string | null;
             state: string;
+        };
+        TopicDto: {
+            /** @description New topics are collected unless explicitly excluded. */
+            collected: boolean;
+            /** Format: int64 */
+            id: number;
+            title: string;
         };
         /** @description Response of `PUT /chats/{id}/tracking`: the chat, plus backfill info when requested. */
         TrackChatDto: components["schemas"]["ChatDto"] & {
@@ -1408,6 +1455,114 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    list_chat_topics: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Marked Telegram chat ID */
+                chat_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Archived topic list and collection settings. Available in query-only mode; new topics are collected by default. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TopicDto"][];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    set_topic_collected: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Marked Telegram chat ID */
+                chat_id: number;
+                topic_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetTopicCollectedDto"];
+            };
+        };
+        responses: {
+            /** @description Collection setting saved. Excluding keeps archived messages; re-enabling schedules a history backfill. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unknown chat or topic */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Chat is not tracked */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Query-only mode or storage unavailable */
             503: {
                 headers: {
                     [name: string]: unknown;

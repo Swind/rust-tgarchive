@@ -5,6 +5,7 @@ mod health;
 mod media;
 mod messages;
 mod query;
+mod topics;
 
 use super::{ApiError, ErrorEnvelope, MediaContext, RequestId, RestState};
 use super::{dto, extract};
@@ -15,5 +16,6 @@ pub(in crate::interface::rest) use groups::*;
 pub(in crate::interface::rest) use health::*;
 pub(in crate::interface::rest) use media::*;
 pub(in crate::interface::rest) use messages::*;
+pub(in crate::interface::rest) use topics::*;
 
 use query::{MessageQuery, SearchQuery, build_list_query, build_search_query};

@@ -43,6 +43,9 @@ pub struct IngestBatch {
     pub account_deletions: Vec<AccountDeletion>,
     pub checkpoint: Option<(ChatId, ChatCheckpoint)>,
     pub refetch_checkpoint: Option<(ChatId, RefetchCheckpoint)>,
+    /// Expected topic generation/cursor and the next exclusive cursor (`None` completes it).
+    /// The writer must discard this whole batch if its expected state is stale.
+    pub topic_backfill: Option<(crate::domain::TopicBackfill, Option<MessageId>)>,
     pub job_progress: Option<SyncChatProgress>,
     /// Sanitized reason a chat could not be synced; stored as `last_error` until the next
     /// checkpoint commit for that chat clears it.

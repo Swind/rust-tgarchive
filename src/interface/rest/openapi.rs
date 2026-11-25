@@ -28,6 +28,8 @@ pub enum SpecError {
         routes::sync_status,
         routes::get_sync_job,
         routes::get_chat,
+        routes::list_chat_topics,
+        routes::set_topic_collected,
         routes::get_media_policy,
         routes::set_media_policy,
         routes::message_media,
@@ -59,6 +61,8 @@ pub enum SpecError {
     ),
     components(schemas(
         ChatDto,
+        TopicDto,
+        SetTopicCollectedDto,
         MediaPolicyDto,
         MediaDownloadDto,
         MediaProgressDto,

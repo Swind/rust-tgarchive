@@ -38,6 +38,7 @@ async fn ingest_images(store: &SqliteStore, chat: ChatId, count: i64) {
             let timestamp = DateTime::<Utc>::from_timestamp(1_700_000_000 + id, 0).unwrap();
             IngestRecord {
                 event: MessageEvent::Created(Message {
+                    topic_id: None,
                     post_author: None,
                     forward: None,
                     id: MessageId::new(id).unwrap(),

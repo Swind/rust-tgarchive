@@ -3,7 +3,7 @@ import type { QueryClient, QueryKey } from '@tanstack/react-query';
 export type ArchiveChange = { chatIds: Set<number>; global: boolean };
 
 // Keys scoped to one chat carry the chat id at index 1.
-const CHAT_SCOPED = new Set(['chat', 'senders', 'messages', 'context']);
+const CHAT_SCOPED: Record<string, true> = { chat: true, senders: true, messages: true, context: true, topics: true };
 // Archive-derived keys that are not chat-scoped (or filter by chat inside params): refresh on any change.
 const ARCHIVE_WIDE = new Set([
   'chats', 'search', 'senders-list', 'senders-pick', 'sender', 'sender-messages', 'sender-search',
@@ -12,7 +12,7 @@ const ARCHIVE_WIDE = new Set([
 export function isArchiveQuery(key: QueryKey, change: ArchiveChange): boolean {
   const head = key[0];
   if (typeof head !== 'string') return false;
-  if (CHAT_SCOPED.has(head)) return change.global || (typeof key[1] === 'number' && change.chatIds.has(key[1]));
+  if (Object.hasOwn(CHAT_SCOPED, head)) return change.global || (typeof key[1] === 'number' && change.chatIds.has(key[1]));
   return ARCHIVE_WIDE.has(head);
 }
 

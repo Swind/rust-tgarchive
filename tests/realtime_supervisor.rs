@@ -33,6 +33,7 @@ fn chat_id() -> ChatId {
 fn message(id: i64) -> Message {
     let timestamp = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
     Message {
+        topic_id: None,
         post_author: None,
         forward: None,
         id: MessageId::new(id).unwrap(),

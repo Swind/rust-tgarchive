@@ -46,6 +46,7 @@ fn msg(id: i64, at: i64, from: Option<i64>) -> IngestRecord {
     let time = DateTime::from_timestamp(BASE + at, 0).unwrap();
     IngestRecord {
         event: MessageEvent::Created(Message {
+            topic_id: None,
             id: MessageId::new(id).unwrap(),
             chat_id: group(),
             sender_id: from.map(user),

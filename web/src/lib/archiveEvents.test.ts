@@ -11,6 +11,8 @@ describe('isArchiveQuery', () => {
     expect(isArchiveQuery(['context', 2, 5, false], change([], true))).toBe(true);
     expect(isArchiveQuery(['chat', 1], change([1]))).toBe(true);
     expect(isArchiveQuery(['senders', 3], change([1]))).toBe(false);
+    expect(isArchiveQuery(['topics', 1], change([1]))).toBe(true);
+    expect(isArchiveQuery(['topics', 2], change([1]))).toBe(false);
   });
   it('refreshes archive-wide keys and ignores polled/media keys', () => {
     for (const k of ['chats', 'search', 'senders-list', 'sender', 'sender-messages']) expect(isArchiveQuery([k, 9], change([1]))).toBe(true);

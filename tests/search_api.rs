@@ -77,6 +77,7 @@ async fn seed(store: &SqliteStore, kind: ChatKind, raw_id: i64, texts: &[&str]) 
             let time = DateTime::from_timestamp(BASE + index as i64, 0).unwrap();
             IngestRecord {
                 event: MessageEvent::Created(Message {
+                    topic_id: None,
                     post_author: None,
                     forward: None,
                     id: MessageId::new(index as i64 + 1).unwrap(),

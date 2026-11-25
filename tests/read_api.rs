@@ -46,6 +46,7 @@ fn chat(id: ChatId, title: Option<&str>) -> Chat {
 fn msg(chat_id: ChatId, id: i64, at: i64, sender: Option<SenderId>) -> Message {
     let time = DateTime::from_timestamp(at, 0).unwrap();
     Message {
+        topic_id: None,
         post_author: None,
         forward: None,
         id: MessageId::new(id).unwrap(),
@@ -180,6 +181,52 @@ async fn seed_with_deletions(f: &Fixture) -> ChatId {
         .await
         .unwrap();
     chat_id
+}
+
+#[tokio::test]
+async fn excluding_a_topic_keeps_its_archived_message_and_topic_id_readable() {
+    use tgarchive::{application::ChatRepository, domain::ForumTopic};
+
+    let f = fixture().await;
+    let id = ChatId::from_telegram(ChatKind::Supergroup, 17).unwrap();
+    let topic_id = MessageId::new(12).unwrap();
+    f.store
+        .save_refresh(vec![Chat {
+            kind: ChatKind::Supergroup,
+            ..chat(id, Some("Forum"))
+        }])
+        .await
+        .unwrap();
+    f.store.set_tracked(id, true).await.unwrap();
+    f.store
+        .save_topics(
+            id,
+            vec![ForumTopic {
+                id: topic_id,
+                title: "News".into(),
+            }],
+        )
+        .await
+        .unwrap();
+    let mut message = msg(id, 15, BASE, None);
+    message.topic_id = Some(topic_id);
+    f.store
+        .write_batch(IngestBatch {
+            records: vec![created(message)],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    f.store
+        .set_topic_collected(id, topic_id, false)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let (status, archived) = get(&f.app, &format!("/api/v1/chats/{}/messages/15", id.get())).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(archived["topic_id"], 12);
+    assert_eq!(archived["text"], "body 15");
 }
 
 #[tokio::test]

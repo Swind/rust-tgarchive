@@ -50,6 +50,7 @@ async fn setup(worker_enabled: bool) -> (tempfile::TempDir, SqliteStore, ChatId,
         .write_batch(IngestBatch {
             records: vec![IngestRecord {
                 event: MessageEvent::Created(Message {
+                    topic_id: None,
                     post_author: None,
                     forward: None,
                     id: MessageId::new(8).unwrap(),

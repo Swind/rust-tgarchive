@@ -97,6 +97,7 @@ Notes:
 
 - `chats track` does **not** fetch history by default; it only decides which chats are collected from now on. Fetch history manually with `sync chat` / `sync all`, or add `--backfill` (see "Rate limiting and pacing").
 - `chats untrack` stops collection but keeps the messages already stored.
+- Telegram forum topics are collection settings, not hashtags or search filters. For a tracked forum, all topics (including newly created ones) are collected by default. In the Web UI, uncheck a topic to stop collecting it without deleting archived messages. Recheck it to backfill history still available from Telegram. Untracking the whole chat takes precedence over individual topic settings.
 - Running `sync chat` on a chat whose history is already complete performs a **forward catch-up** instead: it fetches messages newer than `catchup_after_id` (or the largest archived message ID). The upper bound is fixed when the run starts and the run is subject to the same pacing. This fills gaps without running `serve`. The first page of a history sync also records `catchup_after_id`, so the later `serve` baseline does not skip messages that appeared after the history sync. For chats that already have archived messages, the baseline is the largest archived ID; only a brand-new chat with no data uses Telegram's current latest ID as its baseline.
 - `sync chat` on an untracked chat is rejected (REST returns 409 `chat_not_tracked`).
 - Tracking and untracking while `serve` is running does not require a restart.

@@ -99,14 +99,22 @@ pub fn map_sender(peer_id: PeerId, peer: Option<&Peer>) -> Result<Sender, Mappin
     })
 }
 
+pub(super) const GENERAL_TOPIC_ID: i32 = 1;
+
+pub(super) fn is_forum(peer: &Peer) -> bool {
+    matches!(peer, Peer::Group(group) if matches!(&group.raw,
+        grammers_client::tl::enums::Chat::Channel(channel) if channel.forum))
+}
+
 /// `account` is the Telegram account the archive is bound to; it attributes outgoing messages
 /// that carry no `from_id`.
 pub fn map_message(
     message: &TelegramMessage,
     collected_at: DateTime<Utc>,
     account: Option<SenderId>,
+    known_forum: bool,
 ) -> Result<Message, MappingError> {
-    map_raw_message(&message.raw, collected_at, account)
+    map_raw_message(&message.raw, collected_at, account, known_forum)
 }
 
 /// Profile of the authenticated account as a sender row.
@@ -134,6 +142,7 @@ pub fn map_raw_message(
     raw: &grammers_client::tl::enums::Message,
     collected_at: DateTime<Utc>,
     account: Option<SenderId>,
+    known_forum: bool,
 ) -> Result<Message, MappingError> {
     use grammers_client::tl::enums::Message as RawMessage;
 
@@ -160,7 +169,7 @@ pub fn map_raw_message(
             message.date,
             message.edit_date,
             Some(message.message.clone()),
-            message.reply_to.as_ref().and_then(reply_message_id),
+            message.reply_to.as_ref(),
             message.media.clone(),
             message
                 .post_author
@@ -177,12 +186,26 @@ pub fn map_raw_message(
             message.date,
             None,
             None,
-            message.reply_to.as_ref().and_then(reply_message_id),
+            message.reply_to.as_ref(),
             None,
             None,
             None,
         ),
         RawMessage::Empty(_) => return Err(MappingError::UnsupportedMessage),
+    };
+    use grammers_client::tl::enums::{MessageAction, MessageReplyHeader};
+    let header = reply_to.and_then(|reply| match reply {
+        MessageReplyHeader::Header(header) => Some(header),
+        MessageReplyHeader::MessageReplyStoryHeader(_) => None,
+    });
+    let topic_id = match raw {
+        RawMessage::Service(service) if matches!(service.action, MessageAction::TopicCreate(_)) => {
+            Some(id)
+        }
+        _ => match header {
+            Some(header) if header.forum_topic => header.reply_to_top_id.or(header.reply_to_msg_id),
+            _ => known_forum.then_some(GENERAL_TOPIC_ID),
+        },
     };
     let timestamp =
         DateTime::from_timestamp(i64::from(date), 0).ok_or(MappingError::InvalidTimestamp)?;
@@ -231,20 +254,17 @@ pub fn map_raw_message(
             .transpose()?,
         collected_at,
         text,
-        reply_to: reply_to
+        topic_id: topic_id
+            .map(|id| MessageId::new(i64::from(id)))
+            .transpose()?,
+        reply_to: header
+            .and_then(|header| header.reply_to_msg_id)
             .map(|id| MessageId::new(i64::from(id)))
             .transpose()?,
         attachments,
         post_author,
         forward,
     })
-}
-
-fn reply_message_id(reply: &grammers_client::tl::enums::MessageReplyHeader) -> Option<i32> {
-    match reply {
-        grammers_client::tl::enums::MessageReplyHeader::Header(header) => header.reply_to_msg_id,
-        grammers_client::tl::enums::MessageReplyHeader::MessageReplyStoryHeader(_) => None,
-    }
 }
 
 fn raw_peer_id(peer: &grammers_client::tl::enums::Peer) -> Result<PeerId, MappingError> {

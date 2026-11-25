@@ -356,6 +356,8 @@ pub fn is_empty(batch: &IngestBatch) -> bool {
         && batch.records.is_empty()
         && batch.account_deletions.is_empty()
         && batch.checkpoint.is_none()
+        && batch.refetch_checkpoint.is_none()
+        && batch.topic_backfill.is_none()
         && batch.job_progress.is_none()
         && batch.chat_error.is_none()
 }

@@ -899,7 +899,8 @@ impl Client {
         ActionSender::new(self, peer)
     }
 
-    pub(crate) async fn build_peer_map(
+    /// Build the peer map for messages obtained via a raw TL request.
+    pub async fn build_peer_map(
         &self,
         users: Vec<tl::enums::User>,
         chats: Vec<tl::enums::Chat>,

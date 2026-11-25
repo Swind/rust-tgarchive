@@ -154,6 +154,44 @@ pub trait ChatRepository: Send + Sync {
     /// Idempotently sets the tracking flag; `None` when the chat is unknown.
     async fn set_tracked(&self, id: ChatId, tracked: bool)
     -> Result<Option<Chat>, RepositoryError>;
+
+    /// Cache Telegram topic titles without changing existing collection preferences.
+    async fn save_topics(
+        &self,
+        _chat_id: ChatId,
+        topics: Vec<crate::domain::ForumTopic>,
+    ) -> Result<(), RepositoryError> {
+        // Repositories without forum support can represent an empty catalog, but not topics.
+        if topics.is_empty() {
+            Ok(())
+        } else {
+            Err(RepositoryError::Unavailable(
+                "topic storage not supported".into(),
+            ))
+        }
+    }
+
+    async fn list_topics(
+        &self,
+        _chat_id: ChatId,
+    ) -> Result<Vec<crate::domain::TopicSummary>, RepositoryError> {
+        Err(RepositoryError::Unavailable(
+            "topic storage not supported".into(),
+        ))
+    }
+
+    /// Idempotent. A false-to-true transition also schedules the topic history backfill.
+    /// Returns `None` for unknown topics or a no-longer-tracked chat.
+    async fn set_topic_collected(
+        &self,
+        _chat_id: ChatId,
+        _topic_id: MessageId,
+        _collected: bool,
+    ) -> Result<Option<crate::domain::TopicSummary>, RepositoryError> {
+        Err(RepositoryError::Unavailable(
+            "topic storage not supported".into(),
+        ))
+    }
 }
 
 /// Read side of the opt-in collection scope, consulted by realtime ingestion for every batch so
@@ -176,6 +214,25 @@ pub trait ArchiveWriter: Send + Sync {
 #[async_trait]
 pub trait TelegramGateway: Send + Sync {
     async fn list_chats(&self) -> Result<Vec<Chat>, TelegramError>;
+    /// An empty catalog means that the supergroup is not a forum.
+    async fn list_topics(
+        &self,
+        _chat_id: ChatId,
+    ) -> Result<Vec<crate::domain::ForumTopic>, TelegramError> {
+        Ok(Vec::new())
+    }
+    /// A newest-to-oldest page scoped to the topic, with an exclusive cursor.
+    async fn fetch_topic_history(
+        &self,
+        _chat_id: ChatId,
+        _topic_id: MessageId,
+        _before: Option<MessageId>,
+        _page_size: PageSize,
+    ) -> Result<HistoryPage, TelegramError> {
+        Err(TelegramError::Unavailable(
+            "topic history is not supported".into(),
+        ))
+    }
     async fn fetch_history(
         &self,
         chat_id: ChatId,
@@ -186,6 +243,12 @@ pub trait TelegramGateway: Send + Sync {
 
 #[async_trait]
 pub trait SyncRepository: Send + Sync {
+    /// Only includes collected topics of currently tracked chats with an unfinished walk.
+    async fn pending_topic_backfills(
+        &self,
+    ) -> Result<Vec<crate::domain::TopicBackfill>, RepositoryError> {
+        Ok(Vec::new())
+    }
     async fn get_checkpoint(
         &self,
         chat_id: ChatId,
