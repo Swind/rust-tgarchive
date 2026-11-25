@@ -20,8 +20,8 @@ COPY vendor ./vendor
 COPY migrations ./migrations
 COPY web/dist ./web/dist
 COPY src ./src
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target \
+RUN --mount=type=cache,id=tgarchive-registry-${TARGETARCH},sharing=locked,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=tgarchive-target-${TARGETARCH},sharing=locked,target=/src/target \
     set -eu; target=$(cat /rust-target); \
     if [ "$TARGETARCH" != "$BUILDARCH" ]; then \
       prefix="${target%-unknown-linux-gnu}-linux-gnu"; \
