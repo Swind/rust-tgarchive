@@ -16,6 +16,7 @@ function MediaPreview({ chatId, messageId, ordinal }: { chatId: number; messageI
   const [visible, setVisible] = useState(false);
   const [brokenPreviewUrl, setBrokenPreviewUrl] = useState<string | null>(null);
   const ref = useRef<HTMLDivElement>(null);
+  const lastPrioritized = useRef<number>(undefined);
   const qc = useQueryClient();
   useEffect(() => {
     const node = ref.current;
@@ -48,6 +49,33 @@ function MediaPreview({ chatId, messageId, ordinal }: { chatId: number; messageI
         items?.map((item) => item.id === updated.id ? updated : item));
     },
   });
+  const { mutate: prioritizePreview } = prioritize;
+  const priorityId = canPrioritize ? preview.id : undefined;
+  useEffect(() => {
+    const node = ref.current;
+    if (!node || priorityId === undefined || lastPrioritized.current === priorityId) return;
+    let inView = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const schedule = () => {
+      clearTimeout(timer);
+      if (!inView || document.hidden) return;
+      timer = setTimeout(() => {
+        lastPrioritized.current = priorityId;
+        prioritizePreview(priorityId);
+      }, 400);
+    };
+    const observer = new IntersectionObserver(([entry]) => {
+      inView = entry?.isIntersecting ?? false;
+      schedule();
+    });
+    observer.observe(node);
+    document.addEventListener('visibilitychange', schedule);
+    return () => {
+      observer.disconnect();
+      clearTimeout(timer);
+      document.removeEventListener('visibilitychange', schedule);
+    };
+  }, [priorityId, prioritizePreview]);
   const archiveRequest = useMutation({
     mutationFn: () => api.archiveMedia(String(preview!.id)),
     onSuccess: () => void qc.invalidateQueries({ queryKey: mediaKey }),
@@ -70,11 +98,6 @@ function MediaPreview({ chatId, messageId, ordinal }: { chatId: number; messageI
       )}
       {preview?.content_url && preview.content_url === brokenPreviewUrl && <span>本地預覽檔目前無法讀取</span>}
       {preview && ['queued', 'running'].includes(preview.state) && <span>預覽{preview.state === 'queued' ? '排隊中' : '下載中'}…</span>}
-      {canPrioritize && (
-        <Button type="button" size="sm" variant="outline" disabled={prioritize.isPending} onClick={() => prioritize.mutate(preview.id)}>
-          {prioritize.isPending ? '正在設定優先下載…' : '優先下載預覽'}
-        </Button>
-      )}
       {preview?.state === 'queued' && preview.prioritized && <span role="status">已優先排入預覽下載</span>}
       {prioritize.error && <span role="status" className="text-destructive">無法優先下載預覽：{prioritize.error.message}</span>}
       {canRetryPreview && <Button size="sm" variant="outline" disabled={retry.isPending} onClick={() => retry.mutate()}><RotateCw aria-hidden="true" />預覽失敗 · 重試</Button>}

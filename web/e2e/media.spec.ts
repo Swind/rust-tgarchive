@@ -2,20 +2,16 @@ import { CHAT, expect, test } from './fixtures';
 
 const image = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII=', 'base64');
 
-test('a queued preview can be prioritized and reports request errors', async ({ page }) => {
+test('a visible queued preview is prioritized automatically', async ({ page }) => {
   const preview = { id: 503, ordinal: 0, variant: 'preview', state: 'queued', prioritized: false, content_url: null as string | null };
   let attempts = 0;
-  const { promise: resumePolling, resolve: releasePoll } = Promise.withResolvers<void>();
   await page.route('**/api/v1/status', (route) => route.fulfill({ json: { collector: { state: 'running' }, sync_jobs: [] } }));
   await page.route(`**/api/v1/chats/${CHAT.big}/messages/30/media`, async (route) => {
-    if (attempts === 2) await resumePolling;
     await route.fulfill({ json: [preview] });
   });
   await page.route('**/api/v1/media/503/prioritize', async (route) => {
     expect(route.request().method()).toBe('POST');
-    if (++attempts === 1) {
-      return route.fulfill({ status: 503, json: { error: { code: 'media_unavailable', message: '下載服務暫時無法使用' } } });
-    }
+    attempts++;
     preview.prioritized = true;
     await route.fulfill({ json: preview });
   });
@@ -25,15 +21,8 @@ test('a queued preview can be prioritized and reports request errors', async ({ 
   const item = page.locator('#m-30');
   await item.scrollIntoViewIfNeeded();
   const prioritize = item.getByRole('button', { name: '優先下載預覽', exact: true });
-  await prioritize.click();
-  await expect(item.getByText('無法優先下載預覽：下載服務暫時無法使用')).toBeVisible();
-  try {
-    await prioritize.click();
-    await expect(item.getByRole('status')).toHaveText('已優先排入預覽下載');
-    await expect(prioritize).toHaveCount(0);
-  } finally {
-    releasePoll();
-  }
+  await expect(item.getByRole('status')).toHaveText('已優先排入預覽下載');
+  await expect(prioritize).toHaveCount(0);
 
   await page.reload();
   await item.scrollIntoViewIfNeeded();
@@ -45,10 +34,14 @@ test('a queued preview can be prioritized and reports request errors', async ({ 
   preview.state = 'succeeded';
   preview.content_url = '/api/v1/media/503/content';
   await expect(item.getByAltText('Telegram 圖片預覽')).toBeVisible();
-  await expect(prioritize).toHaveCount(0);
+  expect(attempts).toBe(1);
 });
 
-test('readonly mode does not offer preview priority', async ({ page }) => {
+test('readonly mode does not request preview priority', async ({ page }) => {
+  const requests: string[] = [];
+  page.on('request', (request) => {
+    if (request.url().endsWith('/prioritize')) requests.push(request.url());
+  });
   await page.route(`**/api/v1/chats/${CHAT.big}/messages/30/media`, (route) => route.fulfill({ json: [
     { id: 504, ordinal: 0, variant: 'preview', state: 'queued', prioritized: false, content_url: null },
   ] }));
@@ -57,7 +50,8 @@ test('readonly mode does not offer preview priority', async ({ page }) => {
   const item = page.locator('#m-30');
   await item.scrollIntoViewIfNeeded();
   await expect(item.getByText('預覽排隊中…')).toBeVisible();
-  await expect(item.getByRole('button', { name: '優先下載預覽', exact: true })).toHaveCount(0);
+  await expect(item.getByRole('status')).toHaveCount(0);
+  expect(requests).toEqual([]);
 });
 
 test('previews are local and lazy, archive is explicit, and channel policy saves', async ({ page }) => {
